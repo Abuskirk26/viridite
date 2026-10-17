@@ -1,3 +1,4 @@
+import { spawnTrail, spawnSparks, spawnDirt, spawnWreck, spawnFall, spawnBuildingDebris } from "./combat-fx.ts";
 import { allows, blocksSight, boatBeaches, isShell, isWater, slowsVehicles } from "./tileset.ts";
 import { barkClass, type Cue, type SfxName } from "./audio.ts";
 import { Rng } from "./rng.ts";
@@ -399,6 +400,22 @@ export function shortPlaceReason(reason: string): string {
   if (r.includes("too far")) return "Too far";
   if (r.startsWith("needs ")) return reason;
   return "Blocked";
+}
+
+/** Phrase drawn on the footprint. Keeps the real cause instead of collapsing it. */
+export function ghostPlaceReason(reason: string): string {
+  if (!reason) return "";
+  const r = reason.toLowerCase();
+  if (r.includes("off the map")) return "Off map";
+  if (r.includes("crystal")) return "On crystal";
+  if (r.includes("overlap") || r.includes("unit")) return "Overlapping";
+  if (r.includes("too far")) return "Out of build radius";
+  if (r.includes("water")) return "That's water";
+  if (r.includes("rock")) return "Blocked by rock";
+  if (r.includes("shore")) return "Shore only";
+  if (r.includes("credit") || r.includes("fund")) return "Insufficient funds";
+  if (r.includes("power")) return "No power";
+  return reason;
 }
 
 function hypot(ax: number, ay: number, bx: number, by: number): number {
@@ -948,7 +965,7 @@ export class Sim {
           /* shore is legal for a land pad that isn't a dock */
         }
         if (this.crystal[i] > 0) return { ok: false, reason: "Can't build on crystal" };
-        if (this.occ[i] !== 0) return { ok: false, reason: "Blocked" };
+        if (this.occ[i] !== 0) return { ok: false, reason: "Overlapping" };
         if (this.unitBlocksTile(x, y, 0)) return { ok: false, reason: "Unit in the way" };
       }
     }
@@ -2417,6 +2434,9 @@ export class Sim {
       vsAir: u.vsAir,
       owner: u.id,
     });
+    if (u.shot === "rocket" || u.shot === "shell") {
+      spawnTrail(u.x, u.y, (dx / d) * spd, (dy / d) * spd, u.shot === "rocket" ? "rocket" : "shell");
+    }
     this.weaponSfx(u);
   }
 
@@ -2478,15 +2498,24 @@ export class Sim {
       this.boom(u.x, u.y, u.armor === "vehicle" ? 0.55 : 0.32);
       this.debris(u.x, u.y, u.armor === "infantry" ? 4 : 6);
       this.blip("explosion", 0.08);
+      if (u.armor === "vehicle") {
+        spawnWreck(u.x, u.y, u.team);
+        this.impulse = Math.max(this.impulse, 0.35);
+      } else {
+        spawnFall(u.x, u.y, u.team);
+      }
       if (u.team === this.ear && u.kind !== "mcv") {
         this.say("Unit lost", "lost", 2);
         this.cue({ t: "voice", id: "unitLost" });
       }
-      if (u.armor === "vehicle") this.impulse = Math.max(this.impulse, 0.35);
-    } else if (u.team === this.ear && u.kind !== "harvester") {
+    } else {
+      if (u.armor === "vehicle") spawnSparks(u.x, u.y, 5);
+      else spawnDirt(u.x, u.y, 3);
+    }
+    if (u.hp > 0 && u.team === this.ear && u.kind !== "harvester") {
       const home = this.starts.slots[u.team];
       if (home && Math.hypot(u.x - home.x, u.y - home.y) < 16) this.warnBase(u.team, u.x, u.y);
-    } else if (u.team === this.ear && u.kind === "harvester") {
+    } else if (u.hp > 0 && u.team === this.ear && u.kind === "harvester") {
       this.say("Harvester under attack", "harv", 6);
       this.cue({ t: "voice", id: "harvester" });
     }
@@ -2534,6 +2563,7 @@ export class Sim {
     this.clearOcc(b);
     this.boom(b.tx + b.w / 2, b.ty + b.h / 2, 0.9);
     this.debris(b.tx + b.w / 2, b.ty + b.h / 2, 7);
+    spawnBuildingDebris(b.tx + b.w / 2, b.ty + b.h / 2, 8);
     this.blip("explosion", 0.08);
     this.impulse = Math.max(this.impulse, 0.7);
     if (b.team === 0) this.say(`${b.name} destroyed`);

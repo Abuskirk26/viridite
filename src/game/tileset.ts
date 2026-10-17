@@ -328,15 +328,15 @@ function relieve(
   wy: number,
   rock: readonly [number, number, number],
 ) {
-  const tone = 0.84 + n2(wx * 0.32, wy * 0.32) * 0.22;
+  const tone = 0.78 + n2(wx * 0.32, wy * 0.32) * 0.28; // stronger variation for close zoom
   r *= tone;
   g *= tone;
   b *= tone;
   const dhdx = (hR - hL) / (2 * dist);
   const dhdy = (hD - hU) / (2 * dist);
   const slope = Math.sqrt(dhdx * dhdx + dhdy * dhdy);
-  if (slope > 0.38) {
-    const k = Math.min(1, (slope - 0.38) / 0.7);
+  if (slope > 0.22) {
+    const k = Math.max(0, Math.min(1, (slope - 0.22) / 0.55));
     r = r * (1 - k) + rock[0] * k;
     g = g * (1 - k) + rock[1] * k;
     b = b * (1 - k) + rock[2] * k;
@@ -346,7 +346,7 @@ function relieve(
   const nz = 0.62;
   const inv = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz);
   const ndotl = Math.max(0, nx * inv * -0.46 + ny * inv * -0.55 + nz * inv * 0.7);
-  let light = 0.22 + 1.05 * ndotl;
+  let light = 0.15 + 1.25 * ndotl;
   const avg = (hL + hR + hU + hD) * 0.25;
   if (avg > h) light *= 1 - Math.min(0.62, (avg - h) * 1.8);
   if (h < 0.12) light *= 1 - ((0.12 - h) / 0.12) * 0.35;
@@ -354,7 +354,7 @@ function relieve(
   g *= light;
   b *= light;
   if (slope > 0.55 && ndotl > 0.55) {
-    const lip = (ndotl - 0.55) * Math.min(1, slope) * 0.85;
+    const lip = (ndotl - 0.5) * Math.min(1, slope) * 1.1;
     r += 70 * lip;
     g += 62 * lip;
     b += 48 * lip;
@@ -368,7 +368,7 @@ function relieve(
       b = b * (1 - f) + 244 * f;
     }
   }
-  const grain = (hash((wx * 6) | 0, (wy * 6) | 0) - 0.5) * 14;
+  const grain = (hash((wx * 8) | 0, (wy * 8) | 0) - 0.5) * (12 + Math.min(22, slope * 28));
   lit[0] = r + grain;
   lit[1] = g + grain;
   lit[2] = b + grain * 0.85;
@@ -421,6 +421,13 @@ function dress(
   if (tile === TILE_WRECK) {
     if ((fx > 0.12 && fx < 0.38 && fy > 0.32 && fy < 0.46) || (fx > 0.52 && fx < 0.84 && fy > 0.55 && fy < 0.68)) {
       return [74, 56, 36];
+    }
+  }
+  if (tile === TILE_ROCK || tile === TILE_CLIFF) {
+    const south = at(terrain, ix, iy + 1, gw, gh);
+    if (south !== TILE_ROCK && south !== TILE_CLIFF && fy > 0.62) {
+      const k = (fy - 0.62) / 0.38 * 0.35;
+      return [r * (1 - k) + 62 * k, g * (1 - k) + 54 * k, b * (1 - k) + 42 * k];
     }
   }
   return [r, g, b];
@@ -717,8 +724,18 @@ export function paintWaterSheen(
   if (tile !== TILE_DEEP && tile !== TILE_SHALLOW && tile !== TILE_FORD && tile !== TILE_WRECK) return;
   const deep = tile === TILE_DEEP || tile === TILE_WRECK;
   const roll = (time * 0.28 + hash(x, y) * 0.7 + y * 0.05) % 1;
-  ctx.fillStyle = deep ? "rgba(186, 214, 222, 0.1)" : "rgba(214, 236, 232, 0.16)";
-  ctx.fillRect(x, y + roll * 0.78, 1, 0.03);
+  // Softer sheen that reads at close tactical zoom
+  ctx.fillStyle = deep ? "rgba(186, 214, 222, 0.16)" : "rgba(214, 236, 232, 0.22)";
+  ctx.fillRect(x, y + roll * 0.68, 1, 0.05);
+  // Shore foam on shallow water so coasts meet the land cleanly
+  if (!deep) {
+    const foam = hash(x * 7 + 3, y * 5 + 1);
+    if (foam > 0.45) {
+      ctx.fillStyle = `rgba(230, 245, 240, ${0.08 + foam * 0.1})`;
+      const fy = y + 0.12 + (hash(x, y) * 0.5);
+      ctx.fillRect(x + 0.05, fy, 0.9, 0.035 + foam * 0.02);
+    }
+  }
 }
 
 export function paintOre(ctx: CanvasRenderingContext2D, x: number, y: number, amount: number, spent: boolean, time: number) {

@@ -7,11 +7,14 @@ import {
   TILE_DEEP,
   TILE_FORD,
   TILE_ROCK,
+  TILE_ROAD,
   TILE_SAND,
   TILE_SCRUB,
   TILE_SHALLOW,
   TILE_SHORE,
   TILE_SPENT,
+  TILE_HUT,
+  TILE_VALLEY,
   type CornerId,
   type MapId,
 } from "./data.ts";
@@ -369,11 +372,13 @@ function layLinks(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
 }
 
 function layCoast(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
+  // Right-side ocean wall with shore.
   for (let y = 1; y < MAP_H - 1; y++) {
     for (let x = 50; x < MAP_W - 1; x++) {
       terrain[idx(x, y)] = x >= 54 ? TILE_DEEP : x >= 52 ? TILE_SHALLOW : TILE_SHORE;
     }
   }
+  // Horizontal lagoon.
   for (let y = 30; y <= 33; y++) {
     for (let x = 1; x <= 51; x++) terrain[idx(x, y)] = TILE_DEEP;
   }
@@ -387,12 +392,32 @@ function layCoast(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
     }
     spans.push({ tx: bx, ty: by + 1, w: 3, h: 2 });
   }
+  const seed = 0xc0a57;
+  const rng = (x: number, y: number) => {
+    let n = Math.imul(x ^ seed, 374761393) + Math.imul(y ^ seed, 668265263);
+    n = Math.imul(n ^ (n >>> 13), 1274126177);
+    return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+  };
+  for (let y = 2; y < MAP_H - 2; y++) {
+    for (let x = 2; x < 50; x++) {
+      const t = terrain[idx(x, y)];
+      if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_BRIDGE || t === TILE_SHORE) continue;
+      const r = rng(x, y);
+      if (r < 0.018) terrain[idx(x, y)] = TILE_ROCK;
+      else if (r < 0.032) terrain[idx(x, y)] = TILE_SCRUB;
+      else if (r < 0.042) terrain[idx(x, y)] = TILE_VALLEY;
+      else if (r < 0.048) terrain[idx(x, y)] = TILE_HUT;
+      else if (r < 0.055) terrain[idx(x, y)] = TILE_ROAD;
+    }
+  }
   disk(terrain, crystal, 16, 44, 4, TILE_CRYSTAL, 860);
   disk(terrain, crystal, 22, 18, 3.2, TILE_CRYSTAL, 800);
   disk(terrain, crystal, 34, 46, 2.4, TILE_CRYSTAL, 720);
   disk(terrain, crystal, 28, 16, 2.2, TILE_CRYSTAL, 700);
   disk(terrain, crystal, 8, 22, 1.8, TILE_ROCK);
   disk(terrain, crystal, 12, 54, 1.6, TILE_ROCK);
+  disk(terrain, crystal, 26, 38, 2.2, TILE_CLIFF);
+  disk(terrain, crystal, 38, 24, 1.8, TILE_CLIFF);
   paintShore(terrain);
 }
 

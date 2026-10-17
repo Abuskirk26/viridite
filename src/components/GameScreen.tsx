@@ -33,7 +33,6 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { placeGridOn } from "@/game/lobby";
 import { earthOf } from "@/game/maps";
 import { loadDetail, loadRegion, type SatPatch } from "@/game/sat";
 import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, unlockAudio, bark, barkClass, subscribeAudioGate, subscribeMute } from "@/game/audio";
@@ -73,9 +72,9 @@ import {
 } from "@/game/lobby";
 import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
-import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, palmPoster, sheetLong } from "@/game/render";
+import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, palmPoster, placeChrome, sheetLong } from "@/game/render";
 import { ensureIso, iso } from "@/game/iso";
-import { Sim, footprintOrigin, shortPlaceReason, traceTiles, type Building, type SimSave } from "@/game/sim";
+import { Sim, footprintOrigin, ghostPlaceReason, traceTiles, type Building, type SimSave } from "@/game/sim";
 import { SheetBody, SheetHead } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
@@ -89,7 +88,7 @@ import { NetPlay, parseRoomCode } from "@/game/netplay";
 import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
 import { aiHeat } from "@/game/ai";
-import { clampCamera, fitZoom, minimapHit, openingZoom, screenToWorld, setViewPitch, viewPitch, worldToScreen, zoomAbout, type Camera, type View } from "@/game/view";
+import { clampCamera, fitZoom, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, viewPitch, worldToScreen, zoomAbout, type Camera, type View } from "@/game/view";
 
 const SAVE_KEY = "viridite-last-match";
 
@@ -106,11 +105,9 @@ function liftedWorld(cam: Camera, view: View, sx: number, sy: number, lift: bool
   return screenToWorld(cam, sx, lift ? sy - FINGER_LIFT : sy, view);
 }
 
-function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number, team: Team, lift: boolean) {
-  const world = liftedWorld(cam, view, sx, sy, lift);
-  const raw = footprintOrigin(kind, world.x, world.y);
-  const radius = kind === "gate" ? 3 : isFence(kind) ? 0 : 3;
-  return sim.snapFootprint(team, kind, raw.tx, raw.ty, radius);
+function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number) {
+  const world = screenToWorld(cam, sx, sy, view);
+  return footprintOrigin(kind, world.x, world.y);
 }
 
 type Phase = "menu" | "net" | "play" | "over" | "editor";
@@ -301,6 +298,8 @@ export function GameScreen() {
   const speedRef = useRef(1);
   const optsRef = useRef<SkirmishSetup>(DEFAULT_SETUP);
   const draftRef = useRef<PointerDraft>({ box: null, hoverX: 0, hoverY: 0, hovering: false, wallPts: [] });
+  const touchPlaceRef = useRef(false);
+  const shiftPlaceRef = useRef(false);
   const netRef = useRef<NetPlay | null>(null);
   const viewerRef = useRef(0);
   const chatRef = useRef<string | null>(null);
@@ -487,7 +486,7 @@ export function GameScreen() {
       y: sim.starts.player.y - 1,
       zoom: openingZoom(sim.mapSize),
     };
-    clampCamera(camRef.current, sim.gw, sim.gh);
+    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current);
     fittedRef.current = !!cam;
     fittedH.current = 0;
     fittedW.current = 0;
@@ -575,17 +574,90 @@ export function GameScreen() {
 
   useEffect(() => {
     if (phase !== "play") return;
+    const panKeys = new Set<string>();
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (e.key < "1" || e.key > "4") return;
-      e.preventDefault();
-      const i = Number(e.key) - 1;
-      if (e.ctrlKey || e.metaKey || e.shiftKey) saveGroupRef.current(i);
-      else recallGroupRef.current(i);
+      if (e.key === "Escape") {
+        if (placingRef.current) {
+          e.preventDefault();
+          setPlacing(null);
+        }
+        return;
+      }
+      if (e.key === "Shift") {
+        shiftPlaceRef.current = true;
+        return;
+      }
+      const k = e.key.toLowerCase();
+      if (k >= "1" && k <= "4") {
+        e.preventDefault();
+        const i = Number(k) - 1;
+        if (e.ctrlKey || e.metaKey || e.shiftKey) saveGroupRef.current(i);
+        else recallGroupRef.current(i);
+        return;
+      }
+      if (k === "h" || e.key === "Home") {
+        e.preventDefault();
+        const sim = simRef.current;
+        if (!sim) return;
+        const home = sim.starts.slots[viewerRef.current] ?? sim.starts.player;
+        camRef.current.x = home.x;
+        camRef.current.y = home.y;
+        camRef.current.vx = 0;
+        camRef.current.vy = 0;
+        clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
+        return;
+      }
+      if (["arrowup", "arrowdown", "arrowleft", "arrowright", "w", "a", "s", "d"].includes(k)) {
+        e.preventDefault();
+        panKeys.add(k);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Shift") shiftPlaceRef.current = false;
+      panKeys.delete(e.key.toLowerCase());
+    };
+    const applyKeys = () => {
+      if (phaseRef.current !== "play") return;
+      const cam = camRef.current;
+      const speed = 14;
+      let vx = 0;
+      let vy = 0;
+      if (panKeys.has("arrowleft") || panKeys.has("a")) vx -= speed;
+      if (panKeys.has("arrowright") || panKeys.has("d")) vx += speed;
+      if (panKeys.has("arrowup") || panKeys.has("w")) vy -= speed;
+      if (panKeys.has("arrowdown") || panKeys.has("s")) vy += speed;
+      if (vx || vy) {
+        cam.vx = vx;
+        cam.vy = vy;
+      }
+    };
+    const id = setInterval(applyKeys, 16);
+    const onMouse = (e: MouseEvent) => {
+      const canvas = canvasRef.current;
+      if (!canvas || placingRef.current) return;
+      const r = canvas.getBoundingClientRect();
+      const mx = e.clientX - r.left;
+      const my = e.clientY - r.top;
+      if (mx < 0 || my < 0 || mx > r.width || my > r.height) return;
+      const edge = 28;
+      const cam = camRef.current;
+      const speed = 12;
+      if (mx < edge) cam.vx = -speed;
+      else if (mx > r.width - edge) cam.vx = speed;
+      if (my < edge) cam.vy = -speed;
+      else if (my > r.height - edge) cam.vy = speed;
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("mousemove", onMouse);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("mousemove", onMouse);
+    };
   }, [phase]);
 
   const rollSetup = () => {
@@ -678,7 +750,7 @@ export function GameScreen() {
         const z = palm ? preferred : fitZoom(h, turning ? Math.min(preferred, h / 14) : preferred, w);
         zoomWish.current = z;
         camRef.current.zoom = z;
-        clampCamera(camRef.current, sim.gw, sim.gh);
+        clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current);
         fittedRef.current = true;
         fittedH.current = h;
         fittedW.current = w;
@@ -689,8 +761,9 @@ export function GameScreen() {
       const wish = zoomWish.current;
       if (wish > 0 && Math.abs(camRef.current.zoom - wish) > 0.03) {
         const next = camRef.current.zoom + (wish - camRef.current.zoom) * Math.min(1, dt * 10);
-        zoomAbout(camRef.current, w / 2, h / 2, viewRef.current, next, sim.gw, sim.gh);
+        zoomAbout(camRef.current, w / 2, h / 2, viewRef.current, next, sim.gw, sim.gh, wideField(sim.mapSize));
       }
+      stepInertia(camRef.current, dt, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
       if (!pausedRef.current && phaseRef.current === "play" && sim.outcome === "playing") {
         const net = netRef.current;
         if (net) {
@@ -748,8 +821,6 @@ export function GameScreen() {
             placingRef.current,
             draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2,
             draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2,
-            viewerRef.current as 0,
-            draftRef.current.hovering,
           )
         : null;
       let wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null = null;
@@ -837,7 +908,8 @@ export function GameScreen() {
           box: draftRef.current.box,
           shake: shakeRef.current,
           viewer: viewerRef.current,
-          placeGrid: placeGridOn(),
+          placeGrid: true,
+          touchPlace: touchPlaceRef.current,
         },
         alpha,
         field,
@@ -887,10 +959,59 @@ export function GameScreen() {
       onMinimap: (wx, wy) => {
         camRef.current.x = wx;
         camRef.current.y = wy;
-        clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64);
+        camRef.current.vx = 0;
+        camRef.current.vy = 0;
+        clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64, viewRef.current);
+      },
+      onJumpBase: () => {
+        const sim = simRef.current;
+        if (!sim) return;
+        const home = sim.starts.slots[viewerRef.current] ?? sim.starts.player;
+        camRef.current.x = home.x;
+        camRef.current.y = home.y;
+        camRef.current.vx = 0;
+        camRef.current.vy = 0;
+        clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
       },
       placing: () => !!placingRef.current,
       placingWall: () => !!placingRef.current && isFence(placingRef.current),
+      onPointerKind: (touch) => {
+        touchPlaceRef.current = touch;
+      },
+      placeUi: (sx, sy) => {
+        const sim = simRef.current;
+        const kind = placingRef.current;
+        if (!sim || !kind || isFence(kind) || !touchPlaceRef.current || !draftRef.current.hovering) return null;
+        const origin = aimedCell(sim, camRef.current, viewRef.current, kind, draftRef.current.hoverX, draftRef.current.hoverY);
+        const box = placeChrome(camRef.current, viewRef.current, origin.tx, origin.ty, BUILDINGS[kind].w);
+        const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
+        if (hit(box.confirm)) return "confirm";
+        if (hit(box.cancel)) return "cancel";
+        return null;
+      },
+      onPlaceUi: (action) => {
+        const sim = simRef.current;
+        const kind = placingRef.current;
+        if (action === "cancel" || !sim || !kind) {
+          setPlacing(null);
+          return;
+        }
+        const origin = aimedCell(
+          sim,
+          camRef.current,
+          viewRef.current,
+          kind,
+          draftRef.current.hoverX,
+          draftRef.current.hoverY,
+        );
+        const me = viewerRef.current as 0;
+        actRef.current("build", { kind, tx: origin.tx, ty: origin.ty }, () => {
+          const res = sim.tryPlace(me, kind, origin.tx, origin.ty);
+          if (res.ok) setPlacing(null);
+        });
+        if (netRef.current) setPlacing(null);
+        setFrame((n) => n + 1);
+      },
       onWall: (screenPts) => {
         const sim = simRef.current;
         const kind = placingRef.current;
@@ -929,7 +1050,7 @@ export function GameScreen() {
           if (u) bark(barkClass(u.kind), "select");
         }
       },
-      onTap: (sx, sy, isDouble) => {
+      onTap: (sx, sy, isDouble, shift) => {
         const sim = simRef.current;
         if (!sim || pausedRef.current || phaseRef.current !== "play") return;
         unlockAudio();
@@ -946,12 +1067,14 @@ export function GameScreen() {
         }
         if (placingRef.current) {
           const kind = placingRef.current;
-          const origin = aimedCell(sim, camRef.current, viewRef.current, kind, sx, sy, me, true);
+          if (isFence(kind)) return;
+          const origin = aimedCell(sim, camRef.current, viewRef.current, kind, sx, sy);
+          const keep = shift;
           actRef.current("build", { kind, tx: origin.tx, ty: origin.ty }, () => {
             const res = sim.tryPlace(me, kind, origin.tx, origin.ty);
-            if (res.ok) setPlacing(null);
+            if (res.ok && !keep) setPlacing(null);
           });
-          if (netRef.current) setPlacing(null);
+          if (netRef.current && !keep) setPlacing(null);
           setFrame((n) => n + 1);
           return;
         }
@@ -1057,16 +1180,14 @@ export function GameScreen() {
       placing,
       draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2,
       draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2,
-      viewer as 0,
-      draftRef.current.hovering,
     );
     if (isFence(placing)) {
       const step = sim.previewFence(viewer as 0, placing, [origin])[0];
       if (!step) return "Drag a line";
-      return step.ok ? "Drag a line" : shortPlaceReason(step.reason);
+      return step.ok ? "Drag a line" : ghostPlaceReason(step.reason);
     }
     const check = sim.canPlace(viewer as 0, placing, origin.tx, origin.ty);
-    if (!check.ok) return shortPlaceReason(check.reason);
+    if (!check.ok) return ghostPlaceReason(check.reason);
     const def = resolveBuilding(placing, sim.factionOf(viewer as 0));
     const power = def.powerUse > 0 ? `Power −${def.powerUse}` : def.powerOut > 0 ? `Power +${def.powerOut}` : "No power draw";
     return `${def.cost} credits · ${power}`;
@@ -1194,7 +1315,9 @@ export function GameScreen() {
     if (Math.abs(x - cam.x) > halfW * 0.75 || Math.abs(y - cam.y) > halfH * 0.75) {
       cam.x = x;
       cam.y = y;
-      clampCamera(cam, live.gw, live.gh);
+      cam.vx = 0;
+      cam.vy = 0;
+      clampCamera(cam, live.gw, live.gh, view);
     }
     sfx("select");
     setFrame((n) => n + 1);
@@ -1399,7 +1522,7 @@ export function GameScreen() {
                     if (!at) return;
                     camRef.current.x = at.x;
                     camRef.current.y = at.y;
-                    clampCamera(camRef.current, sim.gw, sim.gh);
+                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current);
                     setFrame((n) => n + 1);
                   }}
                 >

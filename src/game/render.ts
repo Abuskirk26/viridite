@@ -1,3 +1,4 @@
+import { stepParticles, drawParticles } from "./combat-fx.ts";
 import {
   BUILD_GAP,
   BUILDINGS,
@@ -30,7 +31,7 @@ import {
 } from "./data.ts";
 import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
-import { shortPlaceReason } from "./sim.ts";
+import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { minimapRect, viewPitch, worldToScreen, type Camera, type View } from "./view.ts";
 import { art, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
@@ -62,8 +63,10 @@ export interface DrawUi {
   shake: number;
   /** Seat whose fog and stealth the phone should draw. Local skirmish is 0. */
   viewer?: number;
-  /** Build-range squares. Off unless the player turns the guide on. */
+  /** Build-range squares and the tile grid, drawn while a structure is in hand. */
   placeGrid?: boolean;
+  /** Finger placement paints Confirm and Cancel beside the ghost. */
+  touchPlace?: boolean;
 }
 
 function hash(x: number, y: number): number {
@@ -218,7 +221,7 @@ export function drawGame(
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   const dpr = ctx.canvas.width / Math.max(1, view.w);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = "#070806";
+  ctx.fillStyle = THEATER === "snow" ? "#1a2830" : THEATER === "desert" ? "#1a1610" : "#0a1a22";
   ctx.fillRect(0, 0, view.w, view.h);
 
   ctx.save();
@@ -268,12 +271,23 @@ export function drawGame(
       } else if (!baked) {
         paintCell(ctx, sim.terrain, x, y, GW, GH, sim.theater, 0);
       }
-      if (f === 0) {
-        ctx.fillStyle = "rgba(5, 8, 6, 0.62)";
-        ctx.fillRect(x, y, 1.02, 1.02);
-      } else if (f === 1) {
-        ctx.fillStyle = "rgba(8, 10, 8, 0.42)";
-        ctx.fillRect(x, y, 1.02, 1.02);
+      if (f < 2) {
+        let edge = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const ni = (y + dy) * GW + (x + dx);
+            if (ni >= 0 && ni < fog.length && fog[ni] === 2) edge++;
+          }
+        }
+        const feather = Math.min(1, edge / 4);
+        if (f === 0) {
+          ctx.fillStyle = `rgba(4, 6, 5, ${0.72 - feather * 0.22})`;
+          ctx.fillRect(x, y, 1, 1);
+        } else {
+          ctx.fillStyle = `rgba(22, 26, 18, ${0.36 - feather * 0.1})`;
+          ctx.fillRect(x, y, 1, 1);
+        }
       }
     }
   }
@@ -480,6 +494,9 @@ export function drawGame(
     }
   }
 
+  stepParticles(0.016);
+  drawParticles(ctx, sim.time);
+
   if (ui.buildingId) {
     const b = sim.buildingById(ui.buildingId);
     if (b && b.hp > 0 && b.kind !== "span") {
@@ -537,7 +554,10 @@ export function drawGame(
     }
   }
 
-  if (ui.placing && ui.placeGrid) drawBuildHalo(ctx, sim);
+  if (ui.placing) {
+    drawPlaceGrid(ctx, x0, y0, x1, y1);
+    drawBuildHalo(ctx, sim);
+  }
 
   if (ui.wallRun && ui.wallRun.length) {
     ctx.lineWidth = 0.07;
@@ -569,13 +589,29 @@ export function drawGame(
     const bdef = sim.canPlace(VIEWER, ui.placing, origin.tx, origin.ty);
     const w = footprintSize(ui.placing).w;
     const h = footprintSize(ui.placing).h;
-    ctx.globalAlpha = 0.4;
+    ctx.globalAlpha = 0.45;
     ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
     ctx.fillRect(origin.tx, origin.ty, w, h);
     ctx.globalAlpha = 1;
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
-    ctx.lineWidth = 0.1;
-    ctx.strokeRect(origin.tx + 0.04, origin.ty + 0.04, w - 0.08, h - 0.08);
+    ctx.lineWidth = 0.12;
+    ctx.strokeRect(origin.tx + 0.03, origin.ty + 0.03, w - 0.06, h - 0.06);
+    // Grid lines so the blocked cells are obvious at close zoom
+    ctx.lineWidth = 0.04;
+    ctx.globalAlpha = 0.6;
+    for (let gx = 1; gx < w; gx++) {
+      ctx.beginPath();
+      ctx.moveTo(origin.tx + gx, origin.ty + 0.05);
+      ctx.lineTo(origin.tx + gx, origin.ty + h - 0.05);
+      ctx.stroke();
+    }
+    for (let gy = 1; gy < h; gy++) {
+      ctx.beginPath();
+      ctx.moveTo(origin.tx + 0.05, origin.ty + gy);
+      ctx.lineTo(origin.tx + w - 0.05, origin.ty + gy);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
     if (!isFence(ui.placing)) {
       drawDoorArrow(ctx, sim, {
         kind: ui.placing,
@@ -601,10 +637,12 @@ export function drawGame(
     const y = u.py + (u.y - u.py) * a;
     const o = airPictureOffset(u);
     const selected = ui.selected.includes(u.id);
+    const damaged = u.hp < u.maxHp * 0.98;
+    if (!selected && !damaged) continue;
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
     const lift = 1;
     const barY = s.y - Math.max(18, u.radius * cam.zoom * lift + 10);
-    const tone = u.hp >= u.maxHp ? shade(seatPaint(sim, u.team), 1.3) : undefined;
+    const tone = shade(seatPaint(sim, u.team), 1.15);
     bar(ctx, s.x, barY, u.hp / Math.max(1, u.maxHp), selected, tone);
     if (selected) {
       ctx.fillStyle = "#e7f6ea";
@@ -658,6 +696,64 @@ export function drawGame(
   }
 
   drawMinimap(ctx, sim, cam, view, ground, relief);
+}
+
+function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number) {
+  ctx.save();
+  ctx.strokeStyle = "rgba(232, 220, 180, 0.28)";
+  ctx.lineWidth = 0.03;
+  ctx.beginPath();
+  for (let x = x0; x <= x1 + 1; x++) {
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y1 + 1);
+  }
+  for (let y = y0; y <= y1 + 1; y++) {
+    ctx.moveTo(x0, y);
+    ctx.lineTo(x1 + 1, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function placeChrome(
+  cam: Camera,
+  view: View,
+  tx: number,
+  ty: number,
+  w: number,
+): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
+  const s = worldToScreen(cam, tx + w, ty, view);
+  let x = Math.round(s.x + 12);
+  let y = Math.round(s.y - 8);
+  const bw = 88;
+  const bh = 34;
+  if (x + bw > view.w - 4) x = Math.round(s.x - bw - 12);
+  if (y < 4) y = 4;
+  if (y + bh * 2 + 6 > view.h - 4) y = Math.max(4, view.h - (bh * 2 + 10));
+  return {
+    confirm: { x, y, w: bw, h: bh },
+    cancel: { x, y: y + bh + 6, w: bw, h: bh },
+  };
+}
+
+function paintPlaceChrome(
+  ctx: CanvasRenderingContext2D,
+  box: { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } },
+) {
+  const paint = (r: { x: number; y: number; w: number; h: number }, label: string, fill: string) => {
+    ctx.fillStyle = fill;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.strokeStyle = "#f3ead7";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+    ctx.fillStyle = "#14110e";
+    ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+  };
+  paint(box.confirm, "Confirm", "#7dce6a");
+  paint(box.cancel, "Cancel", "#e7b2a8");
 }
 
 /** Cells a finished structure can build from. Same Chebyshev gap as placement. */
@@ -753,11 +849,12 @@ function drawPlaceLabel(
     tx = ui.hover.tx;
     ty = ui.hover.ty;
     const power = def.powerUse > 0 ? `Power −${def.powerUse}` : def.powerOut > 0 ? `Power +${def.powerOut}` : "No power draw";
-    text = check.ok ? `${def.cost} credits` : shortPlaceReason(check.reason);
+    text = check.ok ? `${def.cost} credits` : ghostPlaceReason(check.reason);
     bad = !check.ok;
-    const s = worldToScreen(cam, tx + 0.5, ty, view);
+    const s = worldToScreen(cam, tx + def.w / 2, ty, view);
     const lines = check.ok ? [text, power] : [text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
+    if (ui.touchPlace) paintPlaceChrome(ctx, placeChrome(cam, view, tx, ty, def.w));
     return;
   } else return;
   const s = worldToScreen(cam, tx + 0.5, ty, view);
@@ -1043,16 +1140,16 @@ export function paintRelief(
   if (t === TILE_ROCK || t === TILE_CLIFF) {
     const south = neighborTile(terrain, x, y + 1, gw, gh);
     const drop = south !== TILE_ROCK && south !== TILE_CLIFF;
-    ctx.fillStyle = "rgba(255,244,220,0.3)";
-    ctx.fillRect(x, y, 1, 0.14);
-    ctx.fillStyle = "rgba(0,0,0,0.24)";
-    ctx.fillRect(x + 0.86, y, 0.16, drop ? 0.68 : 1);
+    ctx.fillStyle = "rgba(255,244,220,0.34)";
+    ctx.fillRect(x, y, 1, 0.16);
+    ctx.fillStyle = "rgba(0,0,0,0.28)";
+    ctx.fillRect(x + 0.84, y, 0.18, drop ? 0.72 : 1);
     if (!drop) return;
-    const face = t === TILE_CLIFF ? 0.36 : 0.24;
-    ctx.fillStyle = t === TILE_CLIFF ? "rgba(32,24,18,0.78)" : "rgba(22,16,12,0.62)";
+    const face = t === TILE_CLIFF ? 0.42 : 0.28;
+    ctx.fillStyle = t === TILE_CLIFF ? "rgba(28,20,14,0.82)" : "rgba(18,14,10,0.68)";
     ctx.fillRect(x, y + 1 - face, 1, face);
-    ctx.fillStyle = "rgba(255,236,210,0.28)";
-    ctx.fillRect(x, y + 1 - face, 1, 0.045);
+    ctx.fillStyle = "rgba(255,236,210,0.32)";
+    ctx.fillRect(x, y + 1 - face, 1, 0.05);
     if (t === TILE_CLIFF) {
       ctx.fillStyle = "rgba(0,0,0,0.4)";
       ctx.fillRect(x + 0.3, y + 1 - face + 0.06, 0.055, face - 0.08);
@@ -1072,11 +1169,21 @@ export function paintRelief(
     ctx.fillRect(x, y + 0.52, 1, 0.48);
     ctx.fillStyle = "rgba(170,214,232,0.16)";
     ctx.fillRect(x, y, 1, 0.1);
+    const north = neighborTile(terrain, x, y - 1, gw, gh);
+    if (north !== TILE_DEEP && north !== TILE_WRECK) {
+      ctx.fillStyle = "rgba(220,240,250,0.22)";
+      ctx.fillRect(x, y, 1, 0.08);
+    }
     return;
   }
   if (t === TILE_SHALLOW || t === TILE_FORD) {
     ctx.fillStyle = "rgba(0,28,40,0.2)";
     ctx.fillRect(x, y + 0.7, 1, 0.3);
+    const north = neighborTile(terrain, x, y - 1, gw, gh);
+    if (north !== TILE_SHALLOW && north !== TILE_DEEP && north !== TILE_FORD) {
+      ctx.fillStyle = "rgba(240,248,255,0.28)";
+      ctx.fillRect(x, y, 1, 0.06);
+    }
     return;
   }
   if (t === TILE_ROAD || t === TILE_BRIDGE) {
@@ -1109,12 +1216,15 @@ function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "c
 }
 
 function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, wide = false, fill?: string) {
-  const w = wide ? 46 : 32;
-  const h = wide ? 6 : 5;
+  const w = wide ? 36 : 28;
+  const h = wide ? 4 : 3;
   ctx.fillStyle = "#14110e";
   ctx.fillRect(x - w / 2, y, w, h);
   ctx.fillStyle = fill ?? (pct > 0.5 ? "#7dce6a" : pct > 0.25 ? "#e2b15a" : "#e15b48");
   ctx.fillRect(x - w / 2, y, Math.max(0, w * Math.max(0, Math.min(1, pct))), h);
+  ctx.strokeStyle = "#0c0a08";
+  ctx.lineWidth = 0.5;
+  ctx.strokeRect(x - w / 2, y, w, h);
 }
 
 function drawRock(ctx: CanvasRenderingContext2D, x: number, y: number, photo: boolean) {
@@ -2094,12 +2204,13 @@ function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: numb
     draw(gap * SOLID_LIFT, gap * SOLID_SHEAR);
   };
   drop(at(x, y + 1), (rise, shear) => {
+    if (rise < 0.22) return;
     const yb = y + 1;
     const wall = t === TILE_CLIFF ? (snow ? "#6a7c88" : "#3a342c") : t === TILE_ROCK ? (snow ? "#7d8d98" : "#4a433c") : snow ? "#9aa8b0" : "#6a6258";
     volumeQuad(ctx, x, yb, x + 1, yb, x + 1 + shear, yb - rise, x + shear, yb - rise, wall);
-    volumeQuad(ctx, x, yb - rise, x + 1, yb - rise, x + 1 + shear * 0.15, yb - rise - 0.06, x + shear * 0.15, yb - rise - 0.06, snow ? "#f4f7fa" : "rgba(236,226,206,0.55)");
-    ctx.fillStyle = "rgba(255,244,230,0.28)";
-    ctx.fillRect(x + shear, yb - rise, 0.12, rise);
+    if (t === TILE_CLIFF || t === TILE_ROCK) {
+      volumeQuad(ctx, x, yb - rise, x + 1, yb - rise, x + 1 + shear * 0.15, yb - rise - 0.04, x + shear * 0.15, yb - rise - 0.04, snow ? "#f4f7fa" : "rgba(236,226,206,0.45)");
+    }
   });
   drop(at(x + 1, y), (rise, shear) => {
     const xb = x + 1;
@@ -2680,6 +2791,10 @@ function drawBuilding(
       ctx.beginPath();
       ctx.ellipse(footX, footY, Math.max(0.4, b.w * 0.46), Math.max(0.16, b.h * 0.18), 0, 0, Math.PI * 2);
       ctx.stroke();
+      // Clear cell footprint so the blocked area is obvious at close zoom
+      ctx.strokeStyle = "rgba(244,247,234,0.55)";
+      ctx.lineWidth = 0.04;
+      ctx.strokeRect(b.tx, b.ty, b.w, b.h);
     }
     return;
   }

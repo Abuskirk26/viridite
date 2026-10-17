@@ -11,9 +11,10 @@
  *   - Drag on the ground: box-select, unless a phone is panning. On touch,
  *     one finger pans the field. Box-select is the Select button (selectMode).
  *     A mouse drag still draws the rectangle.
- *   - While placing a structure, a tap or drag drops the footprint above the
- *     finger (green = legal, red = the short reason). Pinch zooms and does not
- *     cancel the ghost. Only the Cancel button clears it.
+ *   - While placing a structure, the ghost follows the pointer and snaps to the
+ *     grid. A mouse click drops it (hold Shift to place another). Right-click
+ *     or Escape cancels. A finger only moves the ghost; Confirm or Cancel
+ *     beside it commits. Pinch zooms and does not cancel the ghost.
  *   - While placing a fence, drag along the ground. The ghost follows the
  *     finger. Lift to lay the run. Pinch zooms without dropping the tool.
  *   - Tap or drag the minimap (top right): jump the camera.
@@ -47,14 +48,21 @@ export interface InputHooks {
   warzone?: () => boolean;
   /** "delay" holds a ground tap so double-tap can become attack-move. */
   classify: (sx: number, sy: number) => "immediate" | "delay";
-  onTap: (sx: number, sy: number, isDouble: boolean) => void;
+  onTap: (sx: number, sy: number, isDouble: boolean, shift?: boolean) => void;
   onBox: (box: { x0: number; y0: number; x1: number; y1: number }) => void;
   onMinimap: (wx: number, wy: number) => void;
+  /** Double-tap on the minimap jumps the camera to the player's base. */
+  onJumpBase?: () => void;
   /** Touch pans with one finger unless this is true. Mouse drag still boxes. */
   selectMode?: () => boolean;
   placing?: () => boolean;
   /** Fence or structure ghost. */
   placingWall?: () => boolean;
+  /** True while the active pointer is a finger. */
+  onPointerKind?: (touch: boolean) => void;
+  /** Confirm / Cancel painted beside a touch ghost. */
+  placeUi?: (sx: number, sy: number) => "confirm" | "cancel" | null;
+  onPlaceUi?: (action: "confirm" | "cancel") => void;
   /** Fired after pinch or wheel so the battle can ease the +/- rocker to the same zoom. */
   onZoom?: (zoom: number) => void;
   /** Screen-space polyline. A tap is a one-point run. */
@@ -109,9 +117,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     el.setPointerCapture(e.pointerId);
     const p = local(e);
     pts.set(e.pointerId, { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, px: p.x, py: p.y, button: e.button });
-    hooks.draft.hoverX = p.x;
-    hooks.draft.hoverY = p.y;
-    hooks.draft.hovering = true;
+    hooks.onPointerKind?.(e.pointerType !== "mouse");
 
     if (pts.size >= 2) {
       clearTap();
@@ -129,13 +135,38 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     const hit = minimapHit(p.x, p.y, hooks.getView(), grid().w, grid().h, !!hooks.warzone?.());
     if (hit && e.button === 0) {
       mode = "minimap";
-      hooks.onMinimap(hit.x, hit.y);
+      const now = performance.now();
+      if (lastTap.pending && now - lastTap.t < 320 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 28) {
+        clearTap();
+        hooks.onJumpBase?.();
+      } else {
+        hooks.onMinimap(hit.x, hit.y);
+        lastTap = { t: now, x: p.x, y: p.y, pending: true };
+        tapTimer = setTimeout(() => {
+          lastTap.pending = false;
+          tapTimer = null;
+        }, 320);
+      }
       return;
     }
-    if (e.button === 1 || e.button === 2) {
+    if (e.button === 1 || (e.button === 2 && !hooks.placing?.())) {
       mode = "pan";
       return;
     }
+    if (e.button === 2 && hooks.placing?.()) {
+      mode = "pan";
+      hooks.onPlaceUi?.("cancel");
+      return;
+    }
+    const chrome = hooks.placing?.() && !hooks.placingWall?.() ? hooks.placeUi?.(p.x, p.y) : null;
+    if (chrome) {
+      mode = "pan";
+      hooks.onPlaceUi?.(chrome);
+      return;
+    }
+    hooks.draft.hoverX = p.x;
+    hooks.draft.hoverY = p.y;
+    hooks.draft.hovering = true;
     if (hooks.placingWall?.()) {
       mode = "wall";
       hooks.draft.wallPts = [{ x: p.x, y: p.y }];
@@ -149,18 +180,19 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onMove = (e: PointerEvent) => {
+    const p = local(e);
+    hooks.draft.hoverX = p.x;
+    hooks.draft.hoverY = p.y;
+    hooks.draft.hovering = true;
+    hooks.onPointerKind?.(e.pointerType !== "mouse");
     const cur = pts.get(e.pointerId);
     if (!cur) return;
-    const p = local(e);
     const dx = p.x - cur.x;
     const dy = p.y - cur.y;
     cur.px = cur.x;
     cur.py = cur.y;
     cur.x = p.x;
     cur.y = p.y;
-    hooks.draft.hoverX = p.x;
-    hooks.draft.hoverY = p.y;
-    hooks.draft.hovering = true;
 
     if (mode === "pinch") {
       const pair = pinchPair();
@@ -171,9 +203,10 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       const cam = hooks.camera;
       const view = hooks.getView();
       const g = grid();
+      const wz = !!hooks.warzone?.();
       cam.x -= (midX - prevMidX) / cam.zoom;
       cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
-      zoomAbout(cam, midX, midY, view, cam.zoom * (dist / prevDist), g.w, g.h);
+      zoomAbout(cam, midX, midY, view, cam.zoom * (dist / prevDist), g.w, g.h, wz);
       hooks.onZoom?.(cam.zoom);
       prevDist = dist;
       prevMidX = midX;
@@ -182,9 +215,17 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
 
     if (mode === "pan") {
-      hooks.camera.x -= dx / hooks.camera.zoom;
-      hooks.camera.y -= dy / (hooks.camera.zoom * viewPitch());
-      clampCamera(hooks.camera, grid().w, grid().h);
+      const cam = hooks.camera;
+      const view = hooks.getView();
+      const g = grid();
+      const wz = !!hooks.warzone?.();
+      const dxw = dx / cam.zoom;
+      const dyw = dy / (cam.zoom * viewPitch());
+      cam.x -= dxw;
+      cam.y -= dyw;
+      cam.vx = -dxw / 0.016;
+      cam.vy = -dyw / 0.016;
+      clampCamera(cam, g.w, g.h, view, wz);
       return;
     }
     if (mode === "minimap") {
@@ -204,9 +245,17 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
         const touchPan = e.pointerType !== "mouse" && !hooks.selectMode?.();
         if (touchPan) {
           mode = "pan";
-          hooks.camera.x -= (p.x - cur.px) / hooks.camera.zoom;
-          hooks.camera.y -= (p.y - cur.py) / (hooks.camera.zoom * viewPitch());
-          clampCamera(hooks.camera, grid().w, grid().h);
+          const cam = hooks.camera;
+          const view = hooks.getView();
+          const g = grid();
+          const wz = !!hooks.warzone?.();
+          const dxw = (p.x - cur.px) / cam.zoom;
+          const dyw = (p.y - cur.py) / (cam.zoom * viewPitch());
+          cam.x -= dxw;
+          cam.y -= dyw;
+          cam.vx = -dxw / 0.016;
+          cam.vy = -dyw / 0.016;
+          clampCamera(cam, g.w, g.h, view, wz);
         } else {
           mode = "box";
           hooks.draft.box = { x0: cur.sx, y0: cur.sy, x1: p.x, y1: p.y };
@@ -219,9 +268,9 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
   };
 
-  const fireTap = (sx: number, sy: number, isDouble: boolean) => {
+  const fireTap = (sx: number, sy: number, isDouble: boolean, shift = false) => {
     if (performance.now() < suppressUntil) return;
-    hooks.onTap(sx, sy, isDouble);
+    hooks.onTap(sx, sy, isDouble, shift);
   };
 
   const onUp = (e: PointerEvent) => {
@@ -257,7 +306,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     if (mode === "place") {
       mode = "none";
       if (performance.now() < suppressUntil) return;
-      fireTap(p.x, p.y, false);
+      if (e.pointerType !== "mouse") return;
+      fireTap(p.x, p.y, false, e.shiftKey);
       return;
     }
     if (mode === "box") {
@@ -298,7 +348,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     const view = hooks.getView();
     const g = grid();
     const factor = Math.exp(-e.deltaY * 0.0016);
-    zoomAbout(cam, p.x, p.y, view, cam.zoom * factor, g.w, g.h);
+    const wz = !!hooks.warzone?.();
+    zoomAbout(cam, p.x, p.y, view, cam.zoom * factor, g.w, g.h, wz);
     hooks.onZoom?.(cam.zoom);
   };
 
