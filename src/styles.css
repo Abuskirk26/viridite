@@ -1,0 +1,147 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Chakra Petch", "Arial Narrow", sans-serif;
+  --font-sans: "Sora", system-ui, sans-serif;
+  --color-field: #14110e;
+  --color-panel: #221c16;
+  --color-panel-2: #2c241c;
+  --color-ink: #f3ead7;
+  --color-muted: #b5a68e;
+  --color-brass: #c6a56a;
+  --color-brass-dim: #4a3d2c;
+  --color-crystal: #3dcc6e;
+  --color-crystal-ink: #062816;
+  --color-danger: #e15b48;
+  --color-concord: #7d8f3a;
+  --color-syndicate: #c45c32;
+  --color-faction-steel: #5b86b0;
+  --color-prism: #2ec4d6;
+  --color-gold: #e4c15a;
+  --color-gold-dim: #8d6d32;
+  --color-steel-top: #2a3128;
+  --color-steel-mid: #1a1f18;
+  --color-steel-bot: #10130f;
+  --color-steel-lo: #070806;
+  --color-well: #121410;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--color-field);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    touch-action: none;
+    overscroll-behavior: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse {
+      animation: none;
+    }
+  }
+}
+
+@keyframes deploy-pulse {
+  0%,
+  100% {
+    box-shadow: inset 0 0 0 2px var(--color-crystal);
+  }
+  50% {
+    box-shadow: inset 0 0 0 2px var(--color-brass);
+  }
+}
+
+@keyframes code-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-8px);
+  }
+  40% {
+    transform: translateX(8px);
+  }
+  60% {
+    transform: translateX(-6px);
+  }
+  80% {
+    transform: translateX(6px);
+  }
+}
+
+.pulse {
+  animation: deploy-pulse 1.4s ease-in-out infinite;
+}
+
+.code-shake {
+  animation: code-shake 0.4s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-shake {
+    animation: none;
+  }
+}
+
+/* Beveled steel, 1996 command-bar. Highlight on the top-left, shadow on the bottom-right. */
+.steel {
+  background: linear-gradient(
+    180deg,
+    var(--color-steel-top) 0%,
+    var(--color-steel-mid) 46%,
+    var(--color-steel-bot) 100%
+  );
+  color: var(--color-ink);
+  box-shadow:
+    inset 1px 1px 0 #3a4438,
+    inset -2px -2px 0 var(--color-steel-lo);
+}
+
+.steel-inset {
+  background: var(--color-well);
+  color: var(--color-gold);
+  box-shadow:
+    inset 2px 2px 0 #070806,
+    inset -1px -1px 0 var(--color-steel-mid);
+}
+
+.gold-readout {
+  color: var(--color-gold);
+  text-shadow: 0 1px 0 #3a2a08;
+}
+
+.bevel-btn {
+  background: linear-gradient(180deg, var(--color-steel-top) 0%, var(--color-steel-mid) 58%, var(--color-steel-bot) 100%);
+  color: var(--color-ink);
+  box-shadow:
+    inset 1px 1px 0 #3a4438,
+    inset -2px -2px 0 var(--color-steel-lo);
+}
+
+.bevel-btn:active:not(:disabled) {
+  box-shadow:
+    inset 2px 2px 0 var(--color-steel-lo),
+    inset -1px -1px 0 var(--color-steel-mid);
+}
+
+.bevel-btn:disabled {
+  color: var(--color-muted);
+  box-shadow: inset 1px 1px 0 #2a2c28;
+}
