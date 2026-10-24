@@ -40,7 +40,7 @@ import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
-import { ensureIso, iso, type IsoBank } from "./iso.ts";
+import { ensureIso, iso, isoMask, type IsoBank } from "./iso.ts";
 import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, writeTerrain } from "./tileset.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
@@ -3592,6 +3592,44 @@ function paintSeatBadges(
   }
 }
 
+const tintedMasks = new WeakMap<CanvasImageSource, Map<string, HTMLCanvasElement>>();
+
+/** White mask pixels take the seat color. Cached once per picture. */
+function tintedMask(img: CanvasImageSource, color: string): CanvasImageSource {
+  if (typeof document === "undefined") return img;
+  let byColor = tintedMasks.get(img);
+  if (!byColor) {
+    byColor = new Map();
+    tintedMasks.set(img, byColor);
+  }
+  const cached = byColor.get(color);
+  if (cached) return cached;
+  const size = sourceSize(img);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, size.w);
+  canvas.height = Math.max(1, size.h);
+  const c = canvas.getContext("2d", { willReadFrequently: true });
+  if (!c) return img;
+  c.drawImage(img, 0, 0, canvas.width, canvas.height);
+  let data: ImageData;
+  try {
+    data = c.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return img;
+  }
+  const px = data.data;
+  const [tr, tg, tb] = hexRgb(color);
+  for (let i = 0; i < px.length; i += 4) {
+    if ((px[i + 3] ?? 0) === 0) continue;
+    px[i] = ((px[i] ?? 0) * tr) / 255;
+    px[i + 1] = ((px[i + 1] ?? 0) * tg) / 255;
+    px[i + 2] = ((px[i + 2] ?? 0) * tb) / 255;
+  }
+  c.putImageData(data, 0, 0);
+  byColor.set(color, canvas);
+  return canvas;
+}
+
 function paintPlate(
   ctx: CanvasRenderingContext2D,
   img: CanvasImageSource,
@@ -3602,11 +3640,12 @@ function paintPlate(
   _outline = false,
   cast: "unit" | "hall" = "unit",
   color = "#2EC4F0",
+  mask: CanvasImageSource | null = null,
 ) {
   const plateSize = sourceSize(img);
   const aspect = plateSize.h / Math.max(1, plateSize.w);
   const h = w * aspect;
-  const picture = cast === "hall" ? tintedRoof(img, color) : img;
+  const picture = mask ? img : cast === "hall" ? tintedRoof(img, color) : img;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(flip ? -1 : 1, 1 / viewPitch());
@@ -3617,6 +3656,7 @@ function paintPlate(
   ctx.drawImage(picture, -w / 2, -h + o, w, h);
   ctx.restore();
   ctx.drawImage(picture, -w / 2, -h, w, h);
+  if (mask) ctx.drawImage(tintedMask(mask, color), -w / 2, -h, w, h);
   ctx.restore();
 }
 
@@ -3700,10 +3740,10 @@ function drawBuilding(
       ctx.beginPath();
       ctx.rect(footX - wide / 2, footY - h * p, wide, h * p + 0.08);
       ctx.clip();
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, isoMask(plate));
       ctx.restore();
     } else {
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, isoMask(plate));
     }
     ctx.globalAlpha = 1;
     paintStructureHurt(ctx, b, footX, footY, wide, time);
@@ -3935,7 +3975,7 @@ function drawUnit(
     return;
   }
   if (img) {
-    paintPlate(ctx, img, x, y + 0.04, wide, Math.cos(aim) < -0.15, true, "unit", color);
+    paintPlate(ctx, img, x, y + 0.04, wide, Math.cos(aim) < -0.15, true, "unit", color, plate ? isoMask(plate) : null);
     if (leaf) paintLeaf(ctx, x, y);
     return;
   }

@@ -60,6 +60,12 @@ const NAMES = [
 
 let bank: IsoBank | null = null;
 let started = false;
+const teamMasks = new Map<string, CanvasImageSource>();
+
+/** White mask for `<id>-team.png`, already keyed. Missing files stay absent. */
+export function isoMask(name: string): CanvasImageSource | null {
+  return teamMasks.get(name) ?? null;
+}
 
 function load(name: string): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
@@ -92,6 +98,12 @@ export function ensureIso(): void {
       next[name] = keySprite(loaded[i] as HTMLImageElement, `iso/${name}`);
     });
     bank = next;
+    await Promise.all(
+      NAMES.map(async (name) => {
+        const img = await load(`${name}-team`);
+        if (img) teamMasks.set(name, keySprite(img, `iso/${name}-team`));
+      }),
+    );
   })();
 }
 
