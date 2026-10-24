@@ -1656,8 +1656,8 @@ export function GameScreen() {
                 portrait
                   ? "h-11 shrink-0"
                   : short
-                    ? "z-30 h-8 shrink-0 overflow-x-auto"
-                    : "absolute top-0 left-0 z-30 h-8 overflow-x-auto"
+                    ? "z-30 h-8 shrink-0 overflow-visible"
+                    : "absolute top-0 left-0 z-30 h-8 overflow-visible"
               }`}
               style={portrait || short ? undefined : { right: "7.5rem" }}
               data-testid="resource-bar"
@@ -1667,16 +1667,22 @@ export function GameScreen() {
                 value={String(Math.floor(sim.credits[viewer] ?? 0))}
                 tone="text-gold"
                 compact={!portrait}
+                minW={portrait ? "6.5rem" : "5.75rem"}
               >
                 <Box className="size-3.5 text-gold" />
               </ResourcePill>
               <PowerPill sim={sim} team={viewer} compact={!portrait} />
-              {short && !portrait && (
+              {!portrait && (
                 <ResourcePill
                   label="Command points"
                   value={`${Math.floor(sim.commandLoad(viewer as 0, false))}/${sim.commandCap(viewer as 0)}`}
                   tone="text-ink"
                   compact
+                  minW="5.5rem"
+                  bar={{
+                    pct: sim.commandLoad(viewer as 0, false) / Math.max(1, sim.commandCap(viewer as 0)),
+                    hot: sim.commandLoad(viewer as 0, false) >= sim.commandCap(viewer as 0),
+                  }}
                 >
                   <span className="font-display text-xs text-brass">CP</span>
                 </ResourcePill>
@@ -1686,6 +1692,7 @@ export function GameScreen() {
                 value={sim.mode === "survive" ? clock(SURVIVE_SECONDS - sim.time) : clock(sim.time)}
                 tone="text-crystal"
                 compact={!portrait}
+                minW={portrait ? "5rem" : "4.5rem"}
               >
                 <Timer className="size-3.5 text-crystal" />
               </ResourcePill>
@@ -2924,28 +2931,51 @@ function ResourcePill({
   tone,
   children,
   compact = false,
+  minW,
+  bar,
 }: {
   label: string;
   value: string;
   tone: string;
   children: ReactNode;
   compact?: boolean;
+  minW?: string;
+  bar?: { pct: number; hot: boolean };
 }) {
   return (
     <div
-      className={`flex min-w-0 items-center gap-1 border border-brass-dim bg-field ${compact ? "h-7 px-1" : "h-9 px-1.5"}`}
+      className={`flex shrink-0 flex-col justify-center border border-brass-dim bg-field ${compact ? "h-8 px-1.5" : "h-9 px-1.5"}`}
+      style={minW ? { minWidth: minW } : undefined}
       aria-label={label}
     >
-      {children}
-      <span className={`truncate font-display tabular-nums ${tone} text-xs`}>{value}</span>
+      <div className="flex items-center gap-1">
+        {children}
+        <span className={`whitespace-nowrap font-display tabular-nums ${tone} text-xs`}>{value}</span>
+      </div>
+      {bar ? (
+        <div className="mt-0.5 h-0.5 w-full bg-well" aria-hidden>
+          <div
+            className={`h-full ${bar.hot ? "bg-danger" : "bg-crystal"}`}
+            style={{ width: `${Math.max(0, Math.min(100, Math.round(bar.pct * 100)))}%` }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function PowerPill({ sim, team, compact = false }: { sim: Sim; team: number; compact?: boolean }) {
   const p = sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0);
+  const pct = p.supply <= 0 ? 1 : Math.min(1, p.use / Math.max(1, p.supply));
   return (
-    <ResourcePill label="Power" value={`${p.supply}/${p.use}`} tone={p.low ? "text-danger" : "text-crystal"} compact={compact}>
+    <ResourcePill
+      label="Power"
+      value={`${p.supply}/${p.use}`}
+      tone={p.low ? "text-danger" : "text-crystal"}
+      compact={compact}
+      minW={compact ? "6.5rem" : "7.25rem"}
+      bar={{ pct, hot: p.low }}
+    >
       <Zap className={`${compact ? "size-3" : "size-3.5"} ${p.low ? "text-danger" : "text-crystal"}`} />
     </ResourcePill>
   );
