@@ -2616,24 +2616,19 @@ function paintRamp(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number
       uy = dy;
     }
   }
-  ctx.fillStyle = "rgba(112, 78, 44, 0.42)";
+  const ang = Math.atan2(uy, ux);
+  const grd = ctx.createLinearGradient(x + 0.5 - ux * 0.5, y + 0.55 - uy * 0.4, x + 0.5 + ux * 0.5, y + 0.55 + uy * 0.4);
+  grd.addColorStop(0, "rgba(72, 54, 32, 0.38)");
+  grd.addColorStop(0.55, "rgba(128, 96, 58, 0.22)");
+  grd.addColorStop(1, "rgba(168, 140, 96, 0.08)");
+  ctx.fillStyle = grd;
   ctx.beginPath();
-  ctx.ellipse(x + 0.5, y + 0.56, 0.4, 0.28, Math.atan2(uy, ux), 0, Math.PI * 2);
+  ctx.ellipse(x + 0.5, y + 0.58, 0.5, 0.34, ang, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "rgba(214, 176, 122, 0.9)";
-  const px = -uy;
-  const py = ux;
-  for (let i = 0; i < 3; i++) {
-    const t = 0.22 + i * 0.22;
-    const cx = x + 0.5 - ux * (t - 0.45);
-    const cy = y + 0.5 - uy * (t - 0.45);
-    ctx.beginPath();
-    ctx.moveTo(cx + ux * 0.14, cy + uy * 0.14);
-    ctx.lineTo(cx + px * 0.26 - ux * 0.08, cy + py * 0.26 - uy * 0.08);
-    ctx.lineTo(cx - px * 0.26 - ux * 0.08, cy - py * 0.26 - uy * 0.08);
-    ctx.closePath();
-    ctx.fill();
-  }
+  ctx.fillStyle = "rgba(48, 34, 20, 0.2)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.5 - ux * 0.12, y + 0.64 - uy * 0.08, 0.28, 0.1, ang, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 /** A cleared plot beside a deposit, away from the starting pads. */
@@ -2658,21 +2653,11 @@ function paintExpansion(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: n
     }
   }
   if (ore < 2 || open < 4) return;
-  ctx.fillStyle = "rgba(176, 138, 86, 0.38)";
+  const j = hash(x * 5, y * 3);
+  ctx.fillStyle = `rgba(120, 92, 52, ${0.1 + j * 0.08})`;
   ctx.beginPath();
-  ctx.ellipse(x + 0.5, y + 0.58, 0.42, 0.26, 0.15, 0, Math.PI * 2);
+  ctx.ellipse(x + 0.46 + j * 0.12, y + 0.6, 0.36 + j * 0.1, 0.18, j - 0.4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "rgba(62, 42, 24, 0.8)";
-  for (const [ox, oy] of [
-    [0.22, 0.28],
-    [0.78, 0.28],
-    [0.22, 0.78],
-    [0.78, 0.78],
-  ] as const) {
-    ctx.beginPath();
-    ctx.arc(x + ox, y + oy, 0.045, 0, Math.PI * 2);
-    ctx.fill();
-  }
 }
 
 /** A drop is a rock face that meets the ground above and below. Ramps stay slopes. */
@@ -2900,14 +2885,11 @@ function paintRoadNet(
       }
     }
   }
-  ctx.strokeStyle = "rgba(48, 34, 20, 0.55)";
-  ctx.lineWidth = 1.05;
+  ctx.strokeStyle = "rgba(86, 62, 34, 0.22)";
+  ctx.lineWidth = 0.34;
   ctx.stroke();
-  ctx.strokeStyle = "rgba(176, 132, 78, 0.98)";
-  ctx.lineWidth = 0.72;
-  ctx.stroke();
-  ctx.strokeStyle = "rgba(226, 198, 150, 0.55)";
-  ctx.lineWidth = 0.18;
+  ctx.strokeStyle = "rgba(140, 108, 64, 0.16)";
+  ctx.lineWidth = 0.16;
   ctx.stroke();
   ctx.restore();
 }
