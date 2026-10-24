@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
+import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import { DEPLOY_SECS, NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, viewPitch, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
@@ -1652,6 +1653,32 @@ test("armor multipliers: rifles are weak vs tanks, rockets punch tanks, cannons 
   assert.ok(rifleInf > rifleTank * 3, `rifle vs infantry ${rifleInf} vs tank ${rifleTank}`);
   assert.ok(rocketTank > rifleTank * 4, `rocket vs tank ${rocketTank} vs rifle ${rifleTank}`);
   assert.ok(artyHall > rifleHall * 5, `artillery vs hall ${artyHall} vs rifle ${rifleHall}`);
+});
+
+test("every skirmish map bakes grass, sand, or water instead of a flat fill", () => {
+  const ids = ["palm", "michigan", "plates", "links", "coast", "river", "isles", "dry"] as const;
+  for (const mapId of ids) {
+    const sim = new Sim({
+      mapId,
+      faction: "concord",
+      mode: "destroy",
+      fog: false,
+      crates: false,
+      cpu: [false, false, false, false],
+      seed: 1,
+    });
+    const w = 96;
+    const h = 96;
+    const pixels = new Uint8ClampedArray(w * h * 4);
+    writeTerrain(pixels, w, h, sim.terrain, sim.gw, sim.gh, sim.theater);
+    const rgb = new Uint8Array(w * h * 3);
+    for (let i = 0; i < w * h; i++) {
+      rgb[i * 3] = pixels[i * 4] ?? 0;
+      rgb[i * 3 + 1] = pixels[i * 4 + 1] ?? 0;
+      rgb[i * 3 + 2] = pixels[i * 4 + 2] ?? 0;
+    }
+    assert.equal(terrainFieldAlive(rgb), true, mapId);
+  }
 });
 
 

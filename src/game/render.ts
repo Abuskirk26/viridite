@@ -2144,6 +2144,7 @@ function uploadTex(gl: WebGLRenderingContext, data: Uint8Array, w: number, h: nu
 }
 
 let gpuCanvas: HTMLCanvasElement | null = null;
+let gpuDead = false;
 let matImg: HTMLImageElement | null = null;
 let matState: "idle" | "loading" | "ready" | "fail" = "idle";
 
@@ -2210,12 +2211,27 @@ function bakeTerrainGl(
   height: number,
   mats: HTMLImageElement,
 ): HTMLCanvasElement | null {
+  if (gpuDead) return null;
   if (!gpuCanvas) gpuCanvas = document.createElement("canvas");
   const canvas = gpuCanvas;
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   const gl = canvas.getContext("webgl", { antialias: false, preserveDrawingBuffer: true, alpha: false });
-  if (!gl) return null;
+  if (!gl || gl.isContextLost()) {
+    gpuDead = true;
+    return null;
+  }
+  if (!canvas.dataset.glLoss) {
+    canvas.dataset.glLoss = "1";
+    canvas.addEventListener("webglcontextlost", (ev) => {
+      ev.preventDefault();
+      gpuDead = true;
+    });
+    canvas.addEventListener("webglcontextrestored", () => {
+      gpuDead = false;
+      terrainProg = null;
+    });
+  }
   const linked = terrainProgram(gl);
   if (!linked) return null;
   const pack = packTerrain(terrain, w, h, theater);
@@ -2368,6 +2384,33 @@ export function bakeTerrain(
   writeTerrain(img.data, canvas.width, canvas.height, terrain, w, h, theater);
   ctx.putImageData(img, 0, 0);
   return canvas;
+}
+
+/** True when a baked sheet still has grass, sand, or water. A blank fill fails. */
+export function sheetFieldAlive(canvas: HTMLCanvasElement): boolean {
+  if (canvas.width < 16 || canvas.height < 16) return false;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false;
+  const spots: Array<[number, number]> = [
+    [0.22, 0.22],
+    [0.5, 0.5],
+    [0.78, 0.72],
+    [0.4, 0.8],
+  ];
+  const size = 16;
+  const rgb = new Uint8Array(spots.length * size * size * 3);
+  let o = 0;
+  for (const [fx, fy] of spots) {
+    const x = Math.max(0, Math.min(canvas.width - size, Math.floor(canvas.width * fx)));
+    const y = Math.max(0, Math.min(canvas.height - size, Math.floor(canvas.height * fy)));
+    const d = ctx.getImageData(x, y, size, size).data;
+    for (let i = 0; i < size * size; i++) {
+      rgb[o++] = d[i * 4] ?? 0;
+      rgb[o++] = d[i * 4 + 1] ?? 0;
+      rgb[o++] = d[i * 4 + 2] ?? 0;
+    }
+  }
+  return terrainFieldAlive(rgb);
 }
 
 function gradeTile(ctx: CanvasRenderingContext2D, x: number, y: number, t: number) {

@@ -83,7 +83,7 @@ import {
 } from "@/game/lobby";
 import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
-import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetLong } from "@/game/render";
+import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetFieldAlive, sheetLong } from "@/game/render";
 import { ensureIso, iso } from "@/game/iso";
 import { SheetBody, SheetHead } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
@@ -503,6 +503,7 @@ export function GameScreen() {
       const net = netRef.current;
       if (!net) {
         if (document.hidden) setPaused(true);
+        else if (sheetRef.current?.full && !sheetFieldAlive(sheetRef.current.full)) sheetRef.current = null;
         return;
       }
       net.setHidden(document.hidden);
@@ -530,6 +531,7 @@ export function GameScreen() {
         bar = Math.max(bar, Math.round(r.bottom));
       }
       setHostBar((prev) => (prev === bar ? prev : bar));
+      if (sheetRef.current?.full && !sheetFieldAlive(sheetRef.current.full)) sheetRef.current = null;
     };
     onResize();
     window.addEventListener("resize", onResize);
