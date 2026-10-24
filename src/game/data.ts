@@ -250,6 +250,12 @@ export const UNIT_CAP = 60;
 export const BUILDING_CAP = 40;
 /** One finger-drag lays at most this many fence tiles. */
 export const WALL_RUN_MAX = 40;
+/** Weapon range multiplier for a unit standing on high ground. */
+export const HIGH_RANGE = 1.12;
+/** Extra sight tiles from high ground, and it looks over cliffs. */
+export const HIGH_SIGHT = 1.6;
+/** Damage multiplier when the shooter stands above the target. */
+export const HIGH_AIM = 1.1;
 
 export const SEAT_NAME = ["You", "North", "East", "South"] as const;
 

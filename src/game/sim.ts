@@ -13,6 +13,9 @@ import {
   HQ_COST,
   HQ_CP,
   HQ_TIME,
+  HIGH_AIM,
+  HIGH_RANGE,
+  HIGH_SIGHT,
   airTier,
   HAUL_AT,
   MAP_SIZE,
@@ -2665,17 +2668,17 @@ export class Sim {
     const step = Math.min(speed * dt, dist);
     const nx = u.x + dx * step;
     const ny = u.y + dy * step;
-    if (this.passable(u, nx, ny)) {
+    if (this.passable(u, nx, ny) && this.gradeStep(u, nx, ny)) {
       u.x = nx;
       u.y = ny;
       u.facing = Math.atan2(dy, dx);
       u.stuck = 0;
       this.crushTree(u);
-    } else if (this.passable(u, nx, u.y)) {
+    } else if (this.passable(u, nx, u.y) && this.gradeStep(u, nx, u.y)) {
       u.x = nx;
       u.facing = Math.atan2(0, dx);
       u.stuck += dt;
-    } else if (this.passable(u, u.x, ny)) {
+    } else if (this.passable(u, u.x, ny) && this.gradeStep(u, u.x, ny)) {
       u.y = ny;
       u.facing = Math.atan2(dy, 0);
       u.stuck += dt;
@@ -2908,7 +2911,8 @@ export class Sim {
       u.ammo -= 1;
       if (u.ammo <= 0) this.beginRearm(u);
     }
-    const mul = this.navalMul(u, target);
+    const aim = this.highAim(u, pos.x, pos.y);
+    const mul = this.navalMul(u, target) * aim;
     if (u.shot === "hit") {
       const before = target.kind === "unit" ? target.u.hp : 0;
       this.applyDamage(target, u.damage * mul, u.vsInf, u.vsVeh, u.vsBld, u.vsAir, u.shot, u.team, u.kind, u.id);
@@ -3628,7 +3632,35 @@ export class Sim {
     const tx = x | 0;
     const ty = y | 0;
     if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return range;
-    return this.terrain[ty * this.gw + tx] === TILE_HIGH ? range * 1.12 : range;
+    return this.terrain[ty * this.gw + tx] === TILE_HIGH ? range * HIGH_RANGE : range;
+  }
+
+  /** 0 low ground, 1 ramp, 2 mesa. Cliffs are walls, not a step. */
+  private elevOf(x: number, y: number): number {
+    const tx = x | 0;
+    const ty = y | 0;
+    if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return 0;
+    const t = this.terrain[ty * this.gw + tx] ?? 0;
+    if (t === TILE_HIGH) return 2;
+    if (t === TILE_RAMP) return 1;
+    return 0;
+  }
+
+  /** Land units change grade by at most one. A ramp is the only way onto a mesa. */
+  private gradeStep(u: Unit, x: number, y: number): boolean {
+    if (u.loco === "air" || u.loco === "sea") return true;
+    return Math.abs(this.elevOf(u.x, u.y) - this.elevOf(x, y)) <= 1;
+  }
+
+  private gradeOk(u: Unit, x0: number, y0: number, x1: number, y1: number): boolean {
+    if (u.loco === "air" || u.loco === "sea") return true;
+    return Math.abs(this.elevOf(x0, y0) - this.elevOf(x1, y1)) <= 1;
+  }
+
+  /** Downhill shots hit a little harder. Aircraft and boats are not on the slope. */
+  private highAim(u: Unit, x: number, y: number): number {
+    if (u.loco === "air" || u.loco === "sea") return 1;
+    return this.elevOf(u.x, u.y) > this.elevOf(x, y) ? HIGH_AIM : 1;
   }
 
   /** Roads and bridges are the fast line. Ramps and fords are the slow cut. */
@@ -4069,7 +4101,8 @@ export class Sim {
     for (const u of this.units) {
       if (u.hp > 0 && !this.eliminated[u.team]) {
         const bonus = u.armor === "infantry" && this.marchLeft[u.team]! > 0 ? 2.2 : 0;
-        this.reveal(u.team, u.x, u.y, u.sight + bonus);
+        const high = u.loco !== "air" && u.loco !== "sea" && this.elevOf(u.x, u.y) >= 2 ? HIGH_SIGHT : 0;
+        this.reveal(u.team, u.x, u.y, u.sight + bonus + high);
       }
     }
     for (const b of this.buildings) {
@@ -4108,7 +4141,7 @@ export class Sim {
       const y = Math.floor(y0 + (y1 - y0) * t);
       if (x === Math.floor(x1) && y === Math.floor(y1)) continue;
       if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) return false;
-      if (blocksSight(this.terrain[y * this.gw + x] ?? 0)) return false;
+      if (blocksSight(this.terrain[y * this.gw + x] ?? 0) && this.elevOf(x0, y0) < 2) return false;
     }
     return true;
   }
@@ -4179,7 +4212,7 @@ export class Sim {
     if (this.pinned(u)) return;
     const nx = u.x + dx;
     const ny = u.y + dy;
-    if (this.passable(u, nx, ny)) {
+    if (this.passable(u, nx, ny) && this.gradeStep(u, nx, ny)) {
       u.x = nx;
       u.y = ny;
     }
@@ -4562,6 +4595,8 @@ export class Sim {
       y | 0,
       this.gw,
       this.gh,
+      undefined,
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     if (!path || path.length < 2) return null;
     let best: Building | null = null;
@@ -4610,6 +4645,7 @@ export class Sim {
       this.gw,
       this.gh,
       (tx, ty) => this.stepCost(tx, ty),
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     u.repath = 0.4 + (u.id % 5) * 0.07;
     if (!path) {
@@ -5039,6 +5075,8 @@ export class Sim {
       y | 0,
       this.gw,
       this.gh,
+      undefined,
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     return path !== null;
   }

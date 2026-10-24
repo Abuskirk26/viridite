@@ -1325,6 +1325,68 @@ test("a rifle on high ground reaches past its flat range", () => {
   assert.ok(Math.abs(rifle.x - 30.5) < 0.05, "did not need to close");
 });
 
+test("ramps are the only way up, and high ground sees over cliffs and hits harder", () => {
+  const sim = new Sim({
+    mapId: "basin",
+    faction: "concord",
+    mode: "destroy",
+    fog: true,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+  });
+  sim.time = 50;
+  const gw = sim.gw;
+  for (let y = 26; y <= 40; y++) {
+    for (let x = 26; x <= 40; x++) {
+      sim.terrain[y * gw + x] = TILE_SAND;
+      sim.crystal[y * gw + x] = 0;
+    }
+  }
+  sim.terrain[30 * gw + 32] = TILE_HIGH;
+  const tank = sim.spawnUnit(0, "tank", 32.5, 33.5);
+  assert.ok(tank);
+  sim.issueMove([tank.id], 32.5, 30.5, false);
+  assert.ok(!tank.path.some((p) => p.x === 32 && p.y === 30), "climbed a mesa with no ramp");
+  sim.terrain[31 * gw + 32] = TILE_RAMP;
+  sim.issueMove([tank.id], 32.5, 30.5, false);
+  assert.ok(
+    tank.path.some((p) => p.x === 32 && p.y === 30),
+    "ramp did not open the mesa",
+  );
+
+  sim.terrain[36 * gw + 29] = TILE_CLIFF;
+  const low = sim.spawnUnit(0, "rifle", 28.5, 36.5);
+  assert.ok(low);
+  for (const u of sim.units) if (u.team === 0 && u !== low) u.hp = 0;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.notEqual(sim.fog[0]![36 * gw + 31], 2, "low ground saw past the cliff");
+  sim.terrain[36 * gw + 28] = TILE_HIGH;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![36 * gw + 31], 2, "high ground did not see over the cliff");
+  low.hp = 0;
+
+  const foe = sim.spawnUnit(1, "rifle", 38.5, 38.5);
+  const flat = sim.spawnUnit(0, "rifle", 38.5, 39.3);
+  assert.ok(foe && flat);
+  const full = foe.hp;
+  sim.issueAttack([flat.id], foe.id);
+  sim.tick(0.1);
+  const flatHit = full - foe.hp;
+  assert.ok(flatHit > 0, "flat shot missed");
+  foe.hp = full;
+  flat.hp = 0;
+  sim.terrain[38 * gw + 40] = TILE_HIGH;
+  const up = sim.spawnUnit(0, "rifle", 40.5, 38.5);
+  assert.ok(up);
+  sim.issueAttack([up.id], foe.id);
+  sim.tick(0.1);
+  const highHit = full - foe.hp;
+  assert.ok(highHit > flatHit, `high ${highHit} vs flat ${flatHit}`);
+});
+
 test("friendly infantry spread instead of stacking into one blob", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
   sim.time = 50;
