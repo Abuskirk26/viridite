@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canBuild, canTrain, resolveBuilding, resolveUnit, spareFaction } from "./data.ts";
+import { buildNeed, canBuild, canTrain, resolveBuilding, resolveUnit, spareFaction } from "./data.ts";
 import { shareCode } from "./custom.ts";
 import { offersNavy } from "./editor.ts";
 import {
@@ -19,8 +19,11 @@ import {
   navyHidden,
   netRulesFromSetup,
   orderCorners,
+  loadSetup,
+  normalBotDefaults,
   parseSetup,
   randomSetup,
+  RULES_KEY,
   resolveMyMap,
   seatCap,
   toNewGame,
@@ -108,6 +111,38 @@ test("a new bot slot is Normal, and Normal does not push before 6:00", () => {
   const fresh = parseSetup({ mapId: "coast", player: "concord", enemy: "syndicate", difficulty: "easy" });
   assert.equal(fresh?.difficulty, "easy");
   assert.deepEqual(fresh?.skills, ["easy", "normal", "normal"]);
+  const memory = new Map<string, string>();
+  const store = {
+    getItem: (key: string) => memory.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      memory.set(key, value);
+    },
+    removeItem: (key: string) => {
+      memory.delete(key);
+    },
+    clear: () => memory.clear(),
+    key: (i: number) => [...memory.keys()][i] ?? null,
+    get length() {
+      return memory.size;
+    },
+  };
+  Object.defineProperty(globalThis, "localStorage", { value: store, configurable: true });
+  localStorage.setItem(
+    RULES_KEY,
+    JSON.stringify({ mapId: "coast", player: "concord", enemy: "syndicate", difficulty: "easy", skills: ["easy", "easy", "hard"] }),
+  );
+  const restored = loadSetup();
+  assert.equal(restored?.difficulty, "normal");
+  assert.deepEqual(restored?.skills, ["normal", "normal", "normal"]);
+  assert.deepEqual(normalBotDefaults().skills, ["normal", "normal", "normal"]);
+});
+
+test("a war factory card says it needs a refinery before you tap", () => {
+  const need = buildNeed("factory", "concord", (kind) => kind === "yard" || kind === "power");
+  assert.equal(need, "Needs Refinery");
+  assert.equal(buildNeed("factory", "concord", (kind) => kind === "yard" || kind === "power" || kind === "refinery"), "");
+  assert.equal(buildNeed("power", "concord", () => false), "Needs Yard");
+  assert.equal(buildNeed("gate", "concord", (kind) => kind === "yard"), "Needs wall");
 });
 
 test("saved setup remembers both factions", () => {

@@ -41,6 +41,7 @@ import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, un
 import {
   BUILDINGS,
   BUILD_ORDER,
+  buildNeed,
   FACTION_NAME,
   SEAT_NAME,
   SURVIVE_SECONDS,
@@ -107,15 +108,32 @@ function liftedWorld(cam: Camera, view: View, sx: number, sy: number, lift: bool
   return screenToWorld(cam, sx, lift ? sy - FINGER_LIFT : sy, view);
 }
 
-/** Enemy hall under a finger. A touch also samples above the contact, where the picture sits. */
+/**
+ * Enemy hall under the pointer. Touch samples the same building a mouse click
+ * would, then the picture above the finger. A bridge or a wall is only the
+ * target when no real building is under the contact.
+ */
 function pickStrike(sim: Sim, cam: Camera, view: View, sx: number, sy: number, touch: boolean, viewer: 0) {
   const lifts = touch ? [0, 44, 72] : [0];
+  let fence: Building | null = null;
   for (const lift of lifts) {
     const at = screenToWorld(cam, sx, sy - lift, view);
     const b = sim.pickBuilding(at.x, at.y, cam.zoom, viewer);
-    if (b && b.hp > 0 && b.rubble <= 0) return b;
+    if (!b || b.hp <= 0 || b.rubble > 0) continue;
+    if (!b.neutral && sim.allied(viewer, b.team)) continue;
+    if (b.kind === "span" || isFence(b.kind)) {
+      if (!fence) fence = b;
+      continue;
+    }
+    return b;
   }
-  return null;
+  return fence;
+}
+
+function buildCardNeed(sim: Sim, team: number, id: BuildingId): string {
+  return buildNeed(id, sim.factionOf(team as 0), (kind) =>
+    sim.buildings.some((b) => b.team === team && b.kind === kind && b.complete && b.hp > 0 && b.rubble <= 0),
+  );
 }
 
 function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number, lift = false) {
@@ -1719,7 +1737,7 @@ export function GameScreen() {
               </div>
             )}
             <div className="flex min-h-0 flex-1">
-            <div className="relative min-h-0 min-w-0 flex-1">
+            <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
               <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
               {sim.powerOf(viewer as 0).low && (
                 <div
@@ -1858,7 +1876,7 @@ export function GameScreen() {
                 </p>
               )}
               {!portrait && (
-                <p className="pointer-events-none absolute bottom-1 left-16 z-10 max-w-[62%] truncate steel-inset px-1.5 py-0.5 text-xs text-gold">
+                <p data-testid="battle-log" className={`pointer-events-none absolute left-16 z-20 max-w-[62%] truncate steel-inset px-1.5 py-0.5 text-xs text-gold ${short ? "bottom-1" : "bottom-14"}`}>
                   {stall || sim.logs[sim.logs.length - 1] || hintFor(sim, viewer as Team)}
                 </p>
               )}
@@ -1960,7 +1978,7 @@ export function GameScreen() {
                   title={(online ? seatResult(sim, viewer) : sim.outcome) === "win" ? "Victory" : "Defeat"}
                 >
                   <Scoreboard sim={sim} viewer={viewer} />
-                  <p className="max-w-xs text-center text-sm text-pretty text-muted">{sim.reason}</p>
+                  <p data-testid="match-reason" className="max-w-xs text-center text-sm text-pretty text-muted">{sim.reason}</p>
                   <div className="flex w-full shrink-0 gap-2">
                     <BarButton
                       label="Rematch"
@@ -2308,7 +2326,7 @@ function ProductionColumn({
   return (
     <aside
       data-testid="rts-column"
-      className="steel flex w-32 shrink-0 flex-col"
+      className="steel relative z-40 flex w-32 shrink-0 flex-col"
       style={{ paddingRight: "env(safe-area-inset-right)" }}
     >
       <div className="flex min-h-0 flex-1">
@@ -2354,6 +2372,7 @@ function ProductionColumn({
               <div className="grid grid-cols-2 gap-0.5">
                 {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
                   const def = BUILDINGS[id];
+                  const need = buildCardNeed(sim, team, id);
                   const broke = sim.credits[team] < def.cost;
                   const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
                   const Icon = BUILD_ICON[id];
@@ -2362,16 +2381,16 @@ function ProductionColumn({
                       key={id}
                       type="button"
                       data-testid={`build-${id}`}
+                      aria-label={need ? `${def.name}. ${need}` : def.name}
                       onClick={() => onPlace(id)}
-                      className={`bevel-btn flex h-10 flex-col items-center justify-center px-0.5 ${broke || low ? "text-muted" : "text-ink"}`}
+                      className={`bevel-btn flex h-10 flex-col items-center justify-center px-0.5 ${need || broke || low ? "text-muted" : "text-ink"}`}
                     >
                       <span className="flex items-center gap-1 font-display text-[10px] uppercase">
                         <Icon className="size-3.5" />
                         {def.short}
                       </span>
-                      <span className="text-[10px] text-gold tabular-nums">
-                        {def.cost}
-                        {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+                      <span className={`text-[9px] leading-none ${need ? "text-brass" : "text-gold tabular-nums"}`}>
+                        {need || `${def.cost}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
                       </span>
                     </button>
                   );
@@ -2396,7 +2415,6 @@ function ProductionColumn({
                       <X className="size-4" />
                     </BarButton>
                   )}
-                  <SellButton buildingId={selB} onConfirm={onSell} />
                 </div>
               </div>
             ) : (
@@ -2408,6 +2426,22 @@ function ProductionColumn({
               Cancel place
             </button>
           )}
+          {(() => {
+            const selected = selB != null ? sim.buildingById(selB) : undefined;
+            const sellable =
+              !!selected &&
+              selected.team === team &&
+              selected.hp > 0 &&
+              selected.complete &&
+              selected.rubble <= 0 &&
+              selected.kind !== "span";
+            if (!sellable || !selected) return null;
+            return (
+              <div className="p-1">
+                <SellButton buildingId={selected.id} onConfirm={onSell} />
+              </div>
+            );
+          })()}
         </div>
       </div>
     </aside>
@@ -3001,6 +3035,7 @@ function BuildColumn({
         )}
         {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
           const def = BUILDINGS[id];
+          const need = buildCardNeed(sim, team, id);
           const broke = sim.credits[team] < def.cost;
           const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
           const Icon = BUILD_ICON[id];
@@ -3010,6 +3045,7 @@ function BuildColumn({
               type="button"
               data-testid={`build-${id}`}
               data-build={id}
+              aria-label={need ? `${def.name}. ${need}` : def.name}
               onClick={() => {
                 if (drag.current.swallow || drag.current.moved) {
                   drag.current.swallow = false;
@@ -3018,11 +3054,11 @@ function BuildColumn({
                 }
                 onPlace(id);
               }}
-              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
+              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need || broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
             >
               <Icon className="size-4 shrink-0" />
               <span className="min-w-0 flex-1 whitespace-normal text-left text-[11px] leading-tight">{def.short}</span>
-              <span className="shrink-0 text-[11px] tabular-nums text-gold">{def.cost}</span>
+              <span className={`shrink-0 text-[11px] leading-tight ${need ? "text-brass" : "tabular-nums text-gold"}`}>{need || def.cost}</span>
             </button>
           );
         })}
@@ -3376,6 +3412,7 @@ function CommandBar({
     <>
       {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
         const def = BUILDINGS[id];
+        const need = buildCardNeed(sim, team, id);
         const broke = sim.credits[team] < def.cost;
         const low = sim.powerOf(team as 0).low && !isFence(id) && id !== "power" && id !== "advpower";
         const Icon = BUILD_ICON[id];
@@ -3384,16 +3421,16 @@ function CommandBar({
             key={id}
             type="button"
             data-testid={`build-${id}`}
+            aria-label={need ? `${def.name}. ${need}` : def.name}
             onClick={() => onPlace(id)}
             className={`bevel-btn flex h-16 w-16 shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${
-              broke || low ? "text-muted" : "text-ink"
+              need || broke || low ? "text-muted" : "text-ink"
             }`}
           >
             <Icon className="size-6" />
             <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{def.short}</span>
-            <span className="text-xs text-gold tabular-nums">
-              {def.cost}
-              {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+            <span className={`text-center text-[10px] leading-tight ${need ? "text-brass" : "text-gold tabular-nums"}`}>
+              {need || `${def.cost}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
             </span>
           </button>
         );
@@ -3821,7 +3858,7 @@ function Overlay({ title, children, wide = false }: { title: string; children: R
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2">
       <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
-        <h2 className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
+        <h2 data-testid="match-result" className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
     </div>

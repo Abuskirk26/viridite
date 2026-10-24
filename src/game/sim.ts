@@ -618,6 +618,10 @@ export class Sim {
   outcome: "playing" | "win" | "lose" = "playing";
   reason = "";
   hadYard: boolean[] = [false, false, false, false];
+  /** True after this seat has been told it is down to one real building. */
+  private lastWarn: boolean[] = [false, false, false, false];
+  /** Most real buildings this seat has had. A fresh yard is not "last building". */
+  private peakBase: number[] = [0, 0, 0, 0];
   eliminated: boolean[] = [false, false, false, false];
   /** Units this seat destroyed. */
   statKills: number[] = [0, 0, 0, 0];
@@ -1177,9 +1181,10 @@ export class Sim {
     if (kind === "dock" && !this.navy) return { ok: false, reason: "No harbor on this map" };
     if (!canBuild(kind, this.factionOf(team))) return { ok: false, reason: "Other faction" };
     if (this.structureCount(team) >= BUILDING_CAP) return { ok: false, reason: "Base full" };
-    if (def.requires && !this.buildings.some((b) => b.team === team && b.kind === def.requires && b.complete && b.hp > 0)) {
+    if (def.requires && !this.buildings.some((b) => b.team === team && b.kind === def.requires && b.complete && b.hp > 0 && b.rubble <= 0)) {
       return { ok: false, reason: `Needs ${BUILDINGS[def.requires].short}` };
     }
+    if (kind !== "yard" && !this.hasYard(team)) return { ok: false, reason: "Needs Yard" };
     if (!this.nearFriendly(team, tx, ty, def.w, def.h)) {
       return { ok: false, reason: "Too far from your buildings" };
     }
@@ -1465,6 +1470,13 @@ export class Sim {
         u.path = [];
         this.requestPath(u, p.x, p.y, true);
         continue;
+      }
+      if (target.kind === "building" && u.loco !== "air") {
+        const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+        if (!this.approachTile(target.b, u, reach, true)) {
+          if (u.team === this.ear) this.say("Can't reach that", "reach", 0.8);
+          continue;
+        }
       }
       u.order = { t: "attack", id: targetId };
       u.path = [];
@@ -2342,7 +2354,7 @@ export class Sim {
         this.stepAway(u, engage, dt);
         return;
       }
-      if (d <= this.reachOf(u.range, u.x, u.y, u.loco)) {
+      if (d <= this.reachOf(u.range, u.x, u.y, u.loco) + 0.2) {
         this.tryShoot(u, engage);
         this.faceTarget(u, engage);
         if (u.kind === "bomber" && u.ammo > 0) {
@@ -2532,12 +2544,16 @@ export class Sim {
       this.navigate(u, goal.x, goal.y, dt);
       return;
     }
-    const tile = this.approachTile(target.b, u, u.range);
+    const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+    const tile = this.approachTile(target.b, u, reach, u.repath <= 0);
     if (!tile) {
-      // No open tile within weapon range of the edge. The building's own tiles are not the reason.
-      if (u.order.t === "attack" && u.team === this.ear) u.blocked = Math.max(u.blocked, 0.45);
-      const p = this.targetPoint(target);
-      this.navigate(u, p.x, p.y, dt);
+      // No walkable tile within weapon range of the footprint edge. Do not walk into the building.
+      u.path = [];
+      if (u.order.t === "attack") {
+        u.blocked = 0.9;
+        u.order = { t: "idle" };
+        if (u.team === this.ear) this.say("Can't reach that", "reach", 0.8);
+      }
       return;
     }
     this.navigate(u, tile.x + 0.5, tile.y + 0.5, dt);
@@ -3813,6 +3829,7 @@ export class Sim {
     if (this.outcome !== "playing") return;
     for (let t = 0; t <= this.opponents; t++) {
       const team = t as Team;
+      this.noteLastBuilding(team);
       if (!this.eliminated[team] && this.campDown(team)) this.eliminate(team);
     }
     const sides = new Set<number>();
@@ -3825,14 +3842,14 @@ export class Sim {
       const won = side === mine && sides.size === 1;
       this.finish(
         won ? "win" : "lose",
-        won ? "Enemy Construction Yard destroyed" : "Construction Yard lost and no MCV remains",
+        won ? "Enemy eliminated — no living units or buildings" : "No living units or buildings remain",
       );
       return;
     }
     if (this.mode === "survive" && this.time >= this.surviveFor) {
       const mine = this.alliance[0] ?? 0;
       const up = [...sides].some((side) => side === mine);
-      this.finish(up ? "win" : "lose", up ? "Held the field" : "Construction Yard lost and no MCV remains");
+      this.finish(up ? "win" : "lose", up ? "Held the field" : "No living units or buildings remain");
       return;
     }
     if (this.mode === "destroy" && this.difficulty === "hard" && this.time >= HARD_CAP_SECS) {
@@ -3862,14 +3879,44 @@ export class Sim {
     }
   }
 
-  /** No yard and no MCV. Seat 0 falls at once so a 1v1 loss still lands on the next tick. */
+  /** A side is gone only when it has no living units and no real buildings. */
   private campDown(team: Team): boolean {
     if (this.eliminated[team]) return true;
-    const yard = this.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0);
-    const mcv = this.units.some((u) => u.team === team && u.kind === "mcv" && u.hp > 0);
-    if (yard || mcv) return false;
-    if (team === 0 || this.hadYard[team]) return true;
-    return this.time > 0.4;
+    if (this.units.some((u) => u.team === team && u.hp > 0)) return false;
+    if (this.baseCount(team) > 0) return false;
+    return true;
+  }
+
+  /** Walls, gates, bridges and rubble are not a base. */
+  private baseCount(team: Team): number {
+    let n = 0;
+    for (const b of this.buildings) {
+      if (b.team !== team || !this.countsAsBase(b)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  private countsAsBase(b: Building): boolean {
+    if (b.hp <= 0 || b.rubble > 0 || b.neutral) return false;
+    if (b.kind === "span" || b.kind === "wall" || b.kind === "gate" || b.kind === "sandbag") return false;
+    return true;
+  }
+
+  private hasYard(team: Team): boolean {
+    return this.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0 && b.rubble <= 0);
+  }
+
+  private noteLastBuilding(team: Team) {
+    if (this.eliminated[team]) return;
+    const n = this.baseCount(team);
+    const prev = this.peakBase[team] ?? 0;
+    if (n > prev) this.peakBase[team] = n;
+    if (n > 1) this.lastWarn[team] = false;
+    else if (n === 1 && prev > 1 && !this.lastWarn[team]) {
+      this.lastWarn[team] = true;
+      if (team === this.ear) this.say("Last building!");
+    }
   }
 
   private finish(outcome: "win" | "lose", reason: string) {
@@ -4482,26 +4529,33 @@ export class Sim {
     return false;
   }
 
-  /** Nearest open tile within weapon range of the footprint edge. The building's own tiles are never a block. */
-  private approachTile(b: Building, u: Unit, range = 4.4): { x: number; y: number } | null {
-    let best: { x: number; y: number } | null = null;
-    let bestD = Infinity;
-    const pad = Math.max(1, Math.ceil(range));
+  /**
+   * Nearest walkable tile within weapon range of the footprint edge.
+   * The building's own tiles are never a stand. When verify is set, the tile
+   * also has to be reachable on foot — an island inside the range does not count.
+   */
+  private approachTile(b: Building, u: Unit, range = 4.4, verify = false): { x: number; y: number } | null {
+    const spots: { x: number; y: number; d: number }[] = [];
+    const pad = Math.max(1, Math.ceil(range + 0.2));
     for (let y = b.ty - pad; y <= b.ty + b.h + pad - 1; y++) {
       for (let x = b.tx - pad; x <= b.tx + b.w + pad - 1; x++) {
         if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
         if (x >= b.tx && x < b.tx + b.w && y >= b.ty && y < b.ty + b.h) continue;
         if (!this.passable(u, x + 0.5, y + 0.5)) continue;
         const edge = distPointToRect(x + 0.5, y + 0.5, b);
-        if (edge > range + 0.05) continue;
-        const d = hypot(u.x, u.y, x + 0.5, y + 0.5);
-        if (d < bestD) {
-          bestD = d;
-          best = { x, y };
-        }
+        if (edge > range + 0.2) continue;
+        spots.push({ x, y, d: hypot(u.x, u.y, x + 0.5, y + 0.5) });
       }
     }
-    return best;
+    if (!spots.length) return null;
+    spots.sort((a, c) => a.d - c.d);
+    if (!verify) return spots[0]!;
+    for (let i = 0; i < spots.length && i < 8; i++) {
+      const s = spots[i]!;
+      if ((u.x | 0) === s.x && (u.y | 0) === s.y) return s;
+      if (this.reach(u, s.x + 0.5, s.y + 0.5)) return s;
+    }
+    return null;
   }
 
   private nearestFoe(

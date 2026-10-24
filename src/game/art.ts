@@ -42,14 +42,16 @@ function load(src: string): Promise<HTMLImageElement | null> {
   });
 }
 
-/** #C90485 plates on the boom and scaffold sheets. About 40 per channel. */
+/** #C90485 plates on the boom and scaffold sheets, plus the pink fringe around them. */
 const KEY_R = 0xc9;
 const KEY_G = 0x04;
 const KEY_B = 0x85;
-const KEY_TOL = 40;
+const KEY_TOL = 48;
 
-function nearKey(r: number, g: number, b: number): boolean {
-  return Math.abs(r - KEY_R) <= KEY_TOL && Math.abs(g - KEY_G) <= KEY_TOL && Math.abs(b - KEY_B) <= KEY_TOL;
+function magentaPlate(r: number, g: number, b: number): boolean {
+  if (Math.abs(r - KEY_R) <= KEY_TOL && Math.abs(g - KEY_G) <= KEY_TOL && Math.abs(b - KEY_B) <= KEY_TOL) return true;
+  // Fringe the key leaves behind. Fire is orange (blue stays low), so it is kept.
+  return g < 80 && r > 110 && b > 60 && r - g > 60 && b - g > 28 && b > r * 0.35 && g < r * 0.55;
 }
 
 /** Drop the magenta plate so drawImage does not flash a pink square. */
@@ -76,14 +78,23 @@ function punchKey(img: HTMLImageElement, label: string): CanvasImageSource {
   }
   const px = data.data;
   for (let i = 0; i < px.length; i += 4) {
-    if (px[i + 3] === 0) continue;
-    if (nearKey(px[i]!, px[i + 1]!, px[i + 2]!)) px[i + 3] = 0;
+    const r = px[i]!;
+    const g = px[i + 1]!;
+    const b = px[i + 2]!;
+    const a = px[i + 3]!;
+    if (a === 0 || magentaPlate(r, g, b)) {
+      // Zero the RGB too. A scaled drawImage bleeds the old magenta through alpha 0.
+      px[i] = 0;
+      px[i + 1] = 0;
+      px[i + 2] = 0;
+      px[i + 3] = 0;
+    }
   }
   ctx.putImageData(data, 0, 0);
   let left = 0;
   const after = ctx.getImageData(0, 0, w, h).data;
   for (let i = 0; i < after.length; i += 4) {
-    if (after[i + 3]! > 0 && nearKey(after[i]!, after[i + 1]!, after[i + 2]!)) left++;
+    if (after[i + 3]! > 0 && magentaPlate(after[i]!, after[i + 1]!, after[i + 2]!)) left++;
   }
   if (left > 0) console.warn(`VIRIDITE: ${label} still has a magenta plate (#C90485). Key lives in art.ts punchKey.`);
   return canvas;

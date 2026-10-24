@@ -133,10 +133,12 @@ export function aiThink(sim: Sim, team: Team = 1) {
     sim.aiIntent[team] = "expand";
     return;
   }
-  if (!yard?.complete) {
+  if (yard && !yard.complete) {
     sim.aiIntent[team] = "expand";
     return;
   }
+  // The yard is gone and there is no MCV to deploy. Keep training what still
+  // stands and keep shooting until that side has nothing left.
 
   for (const u of sim.units) {
     if (u.team === team && u.kind === "harvester" && u.hp > 0 && u.order.t === "idle") {

@@ -50,35 +50,31 @@ export function worldToScreen(cam: Camera, wx: number, wy: number, view: View): 
   };
 }
 
-/** Fallback tile sizes. Actual limits are computed from the view. */
+/** Fallback tile sizes. Battle limits are the band around BATTLE_TILE_PX. */
 export const ZOOM_MIN = 4;
 export const ZOOM_MAX = 180;
 
 /**
- * Tile span of the battle camera, counted across the view width.
- * A 915-wide landscape phone shows 20 tiles at max zoom-out and 10 at max zoom-in.
- * A 412-wide portrait phone shows 14 and 10. Wider glass keeps the same pixels per
- * tile, so a soldier is the same size on a phone, a tablet, and a desktop — the
- * bigger screen simply shows more tiles. The whole map is the minimap's job.
+ * Battle zoom stays near Art of War 3. 48 px per tile is home.
+ * Pinch can pull back to 0.8× or in to 1.6×. The same pixels per tile on a
+ * phone, a tablet, and a desktop — a wider glass shows more tiles, never the
+ * whole map. The map editor does not use this band.
  */
+export const BATTLE_TILE_PX = 48;
+const BATTLE_ZOOM_OUT = 0.8;
+const BATTLE_ZOOM_IN = 1.6;
 const REF_LAND_W = 915;
-const REF_PORT_W = 412;
-const TILES_IN = 10;
-const TILES_OUT_LAND = 20;
-const TILES_OUT_PORT = 14;
-/** 0 = zoomed in, 1 = zoomed out. Home sits 70% of the way toward zoomed out. */
-const HOME_TOWARD_OUT = 0.7;
+/** 0 = zoomed in, 1 = zoomed out. 0.6 lands on BATTLE_TILE_PX. */
+const HOME_TOWARD_OUT = 0.6;
 
 export function portraitView(view: View): boolean {
   return view.h > view.w;
 }
 
-/** Tiles across the width. Scales with the glass so pixels-per-tile stay fixed. */
+/** Tiles across the width. Pixels per tile stay fixed, so the count grows with the glass. */
 export function tileSpan(view: View, end: "in" | "out"): number {
-  const portrait = portraitView(view);
-  const ref = portrait ? REF_PORT_W : REF_LAND_W;
-  const base = end === "out" ? (portrait ? TILES_OUT_PORT : TILES_OUT_LAND) : TILES_IN;
-  return base * (Math.max(1, view.w) / ref);
+  const px = BATTLE_TILE_PX * (end === "out" ? BATTLE_ZOOM_OUT : BATTLE_ZOOM_IN);
+  return Math.max(1, view.w) / px;
 }
 
 /** Tiles across at a bias from zoomed-in (0) toward zoomed-out (1). */
@@ -112,15 +108,16 @@ export function tacticalHome(view: View): number {
  * zoom-out floor so the black void past the edge never enters.
  */
 export function zoomLimits(view: View, gw: number, gh: number, _warzone = false): { min: number; max: number } {
-  if (view.w < 8 || view.h < 8) return { min: ZOOM_MIN, max: ZOOM_MAX };
+  const homeMin = BATTLE_TILE_PX * BATTLE_ZOOM_OUT;
+  const homeMax = BATTLE_TILE_PX * BATTLE_ZOOM_IN;
+  if (view.w < 8 || view.h < 8) return { min: homeMin, max: homeMax };
   let min = view.w / Math.max(1, tileSpan(view, "out"));
   let max = view.w / Math.max(1, tileSpan(view, "in"));
   if (max < min) max = min;
+  // A zoom that frames the whole map is illegal. Raise the floor instead.
   const cover = Math.max(view.w / Math.max(1, gw), view.h / Math.max(1, gh * pitch)) * 1.004;
-  if (cover > min) min = cover;
+  if (cover > min) min = Math.min(cover, max);
   if (max < min) max = min;
-  min = Math.max(ZOOM_MIN, Math.min(min, ZOOM_MAX));
-  max = Math.max(min, Math.min(max, ZOOM_MAX));
   return { min, max };
 }
 
@@ -150,7 +147,7 @@ export function clampCamera(cam: Camera, gw = MAP_W, gh = MAP_H, view?: View, wa
 
 /**
  * Keep one world point under the same pixel while the zoom changes.
- * Pinch, wheel, and the +/- rocker all go through this.
+ * Pinch and the mouse wheel go through this. The speed − and + buttons do not.
  * Zooms toward the cursor or pinch midpoint.
  */
 export function zoomAbout(cam: Camera, sx: number, sy: number, view: View, next: number, gw = MAP_W, gh = MAP_H, warzone = false) {
