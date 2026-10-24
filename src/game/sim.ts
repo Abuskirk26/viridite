@@ -1429,12 +1429,13 @@ export class Sim {
     if (!target) return;
     const team = target.kind === "unit" ? target.u.team : target.b.team;
     const wreckedSpan = target.kind === "building" && target.b.kind === "span" && target.b.rubble > 0 && target.b.hp > 0;
+    const liveSpan = target.kind === "building" && target.b.kind === "span" && target.b.hp > 0;
     const neutralBuilding = target.kind === "building" && target.b.neutral && target.b.kind !== "span" && target.b.rubble <= 0;
     let any = false;
     let mine: Unit | null = null;
     const fighters: Unit[] = [];
     for (const u of this.idsToUnits(ids)) {
-      if (!wreckedSpan && !neutralBuilding && this.allied(u.team, team)) continue;
+      if (!liveSpan && !neutralBuilding && this.allied(u.team, team)) continue;
       if (target.kind === "unit" && target.u.loco === "air" && !u.hitsAir) {
         if (u.team === 0) this.say("Can't target aircraft", "noair", 0.7);
         continue;
@@ -2536,7 +2537,45 @@ export class Sim {
     this.navigate(u, tile.x + 0.5, tile.y + 0.5, dt);
   }
 
+  private standKind(u: Unit): "boat" | "amphib" | "infantry" | "vehicle" {
+    if (u.loco === "sea") return "boat";
+    if (u.loco === "amphib") return "amphib";
+    if (u.armor === "infantry") return "infantry";
+    return "vehicle";
+  }
+
+  /** The deck under this route is gone. Occupied tiles do not count — only the ground. */
+  private routeBroken(u: Unit): boolean {
+    if (u.loco === "air" || u.path.length === 0) return false;
+    const who = this.standKind(u);
+    for (const p of u.path) {
+      const i = p.y * this.gw + p.x;
+      if (i < 0 || i >= this.terrain.length) return true;
+      if (!allows(this.terrain[i] ?? 0, who, this.craters[i] ?? 0)) return true;
+    }
+    return false;
+  }
+
+  private stepOffWreck(u: Unit) {
+    if (u.loco === "air" || u.loco === "sea") return;
+    const tx = u.x | 0;
+    const ty = u.y | 0;
+    const t = this.terrain[ty * this.gw + tx] ?? 0;
+    if (t !== TILE_WRECK && t !== TILE_DEEP) return;
+    const tile = this.nearestDomainTile(u, tx, ty, 8);
+    if (!tile) return;
+    u.x = tile.x + 0.5;
+    u.y = tile.y + 0.5;
+    u.path = [];
+    u.repath = 0;
+  }
+
   private navigate(u: Unit, x: number, y: number, dt: number) {
+    this.stepOffWreck(u);
+    if (this.routeBroken(u)) {
+      u.path = [];
+      u.repath = 0;
+    }
     if (u.path.length === 0 && u.repath <= 0 && hypot(u.x, u.y, x, y) > 0.35) {
       this.requestPath(u, x, y, false);
       if (u.order.t === "idle") return;
@@ -3016,13 +3055,29 @@ export class Sim {
     else this.say(`Enemy ${b.name} destroyed`, "kb", 1.2);
   }
 
+  private spanDist(b: Building, x: number, y: number): number {
+    const cx = Math.max(b.tx, Math.min(x + 0.5, b.tx + b.w));
+    const cy = Math.max(b.ty, Math.min(y + 0.5, b.ty + b.h));
+    return Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+  }
+
+  /** Drop the deck that belongs to this span. A neighboring span keeps its own planks. */
   private collapseSpan(b: Building) {
+    const mine = (x: number, y: number) => {
+      const d = this.spanDist(b, x, y);
+      for (const o of this.buildings) {
+        if (o.id === b.id || o.kind !== "span" || o.hp <= 0 || o.rubble > 0) continue;
+        if (this.spanDist(o, x, y) + 0.2 < d) return false;
+      }
+      return true;
+    };
     const seen = new Uint8Array(this.gw * this.gh);
     const stack: number[] = [];
     const seed = (x: number, y: number) => {
       if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) return;
       const i = y * this.gw + x;
       if (seen[i] || this.terrain[i] !== TILE_BRIDGE) return;
+      if (!mine(x, y)) return;
       seen[i] = 1;
       stack.push(i);
     };
@@ -3037,6 +3092,14 @@ export class Sim {
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) seed(x + dx, y + dy);
       }
+    }
+    for (const u of this.units) {
+      if (u.hp <= 0) continue;
+      if (this.routeBroken(u)) {
+        u.path = [];
+        u.repath = 0;
+      }
+      this.stepOffWreck(u);
     }
   }
 

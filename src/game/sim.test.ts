@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
-import { NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
+import { DEPLOY_SECS, NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
@@ -1324,6 +1324,73 @@ test("World Plates and River Split cross by bridge, with roads and high ground",
     }
     assert.equal(crossed, true, `${mapId} path missed the bridge`);
   }
+});
+
+test("dropping one span wrecks its deck and moving units leave that route", () => {
+  const sim = new Sim({
+    mapId: "plates",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+    opponents: 1,
+  });
+  sim.time = DEPLOY_SECS;
+  const home = sim.starts.player;
+  const far = sim.starts.enemy;
+  const tank = sim.spawnUnit(0, "tank", home.x, home.y);
+  assert.ok(tank);
+  sim.issueMove([tank.id], far.x, far.y, false);
+  assert.ok(tank.path.length >= 2, "path");
+  const onBridge = tank.path.filter((p) => sim.terrain[p.y * sim.gw + p.x] === TILE_BRIDGE);
+  assert.ok(onBridge.length > 0, "route uses a bridge");
+  const spans = sim.buildings.filter((b) => b.kind === "span" && b.hp > 0 && b.rubble <= 0);
+  assert.ok(spans.length >= 2, "two spans");
+  let span = spans[0]!;
+  let best = Infinity;
+  for (const s of spans) {
+    for (const p of onBridge) {
+      const d = Math.hypot(p.x + 0.5 - (s.tx + s.w / 2), p.y + 0.5 - (s.ty + s.h / 2));
+      if (d < best) {
+        best = d;
+        span = s;
+      }
+    }
+  }
+  const other = spans.find((s) => s.id !== span.id);
+  assert.ok(other);
+  const otherTile = other.ty * sim.gw + other.tx;
+  assert.equal(sim.terrain[otherTile], TILE_BRIDGE);
+  let gx = span.tx;
+  let gy = span.ty + 2;
+  let found = false;
+  for (let r = 1; r < 8 && !found; r++) {
+    for (let dy = -r; dy <= r && !found; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const x = span.tx + dx;
+        const y = span.ty + dy;
+        if (x < 1 || y < 1 || x >= sim.gw - 1 || y >= sim.gh - 1) continue;
+        const t = sim.terrain[y * sim.gw + x];
+        if (t !== TILE_ROAD && t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_HIGH && t !== TILE_RAMP) continue;
+        gx = x;
+        gy = y;
+        found = true;
+        break;
+      }
+    }
+  }
+  const gun = sim.spawnUnit(0, "tank", gx + 0.5, gy + 0.5);
+  assert.ok(gun);
+  span.hp = 20;
+  sim.issueAttack([gun.id], span.id);
+  assert.equal(gun.order.t, "attack");
+  for (let i = 0; i < 40; i++) sim.tick(0.25);
+  assert.equal(sim.terrain[span.ty * sim.gw + span.tx], TILE_WRECK, "span deck is down");
+  assert.equal(sim.terrain[otherTile], TILE_BRIDGE, "the other span stays up");
+  for (let i = 0; i < 8; i++) sim.tick(0.2);
+  for (const p of tank.path) assert.notEqual(sim.terrain[p.y * sim.gw + p.x], TILE_WRECK, "path still crosses the wreck");
 });
 
 test("skirmish credits keep rising past storage, with no vault message", () => {
