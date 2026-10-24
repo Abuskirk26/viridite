@@ -1,31 +1,33 @@
 /** Painted miniatures. Drawn over the map. The box models stay only where a picture is missing. */
 
+import { keySprite } from "./art.ts";
+
 export interface IsoBank {
-  yard: HTMLImageElement;
-  power: HTMLImageElement;
-  barracks: HTMLImageElement;
-  factory: HTMLImageElement;
-  tower: HTMLImageElement;
-  refinery: HTMLImageElement;
-  supply: HTMLImageElement;
-  rifle: HTMLImageElement;
-  rocket: HTMLImageElement;
-  marksman: HTMLImageElement;
-  wader: HTMLImageElement;
-  vanguard: HTMLImageElement;
-  engineer: HTMLImageElement;
-  tank: HTMLImageElement;
-  medium: HTMLImageElement;
-  scout: HTMLImageElement;
-  razor: HTMLImageElement;
-  scatter: HTMLImageElement;
-  artillery: HTMLImageElement;
-  apc: HTMLImageElement;
-  harvester: HTMLImageElement;
-  heli: HTMLImageElement;
-  chinook: HTMLImageElement;
-  attackheli: HTMLImageElement;
-  bomber: HTMLImageElement;
+  yard: CanvasImageSource;
+  power: CanvasImageSource;
+  barracks: CanvasImageSource;
+  factory: CanvasImageSource;
+  tower: CanvasImageSource;
+  refinery: CanvasImageSource;
+  supply: CanvasImageSource;
+  rifle: CanvasImageSource;
+  rocket: CanvasImageSource;
+  marksman: CanvasImageSource;
+  wader: CanvasImageSource;
+  vanguard: CanvasImageSource;
+  engineer: CanvasImageSource;
+  tank: CanvasImageSource;
+  medium: CanvasImageSource;
+  scout: CanvasImageSource;
+  razor: CanvasImageSource;
+  scatter: CanvasImageSource;
+  artillery: CanvasImageSource;
+  apc: CanvasImageSource;
+  harvester: CanvasImageSource;
+  heli: CanvasImageSource;
+  chinook: CanvasImageSource;
+  attackheli: CanvasImageSource;
+  bomber: CanvasImageSource;
 }
 
 const NAMES = [
@@ -87,7 +89,7 @@ export function ensureIso(): void {
     }
     const next = {} as IsoBank;
     NAMES.forEach((name, i) => {
-      next[name] = loaded[i] as HTMLImageElement;
+      next[name] = keySprite(loaded[i] as HTMLImageElement, `iso/${name}`);
     });
     bank = next;
   })();

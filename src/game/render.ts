@@ -36,7 +36,7 @@ import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
-import { art, type Painted } from "./art.ts";
+import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, type IsoBank } from "./iso.ts";
 import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, writeTerrain } from "./tileset.ts";
@@ -2410,10 +2410,11 @@ function trimFilter(color: string): string {
   return `hue-rotate(${deg.toFixed(1)}deg)`;
 }
 
-function hallFrame(b: Building, img: HTMLImageElement) {
+function hallFrame(b: Building, img: CanvasImageSource) {
   const tall = b.kind === "tower" || b.kind === "aa" || b.kind === "radar";
   const dw = Math.max(b.w, b.h) * (tall ? 1.55 : 1.24);
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const size = sourceSize(img);
+  const aspect = size.h / Math.max(1, size.w);
   const dh = dw * aspect;
   return {
     x: b.tx + (b.w - dw) / 2,
@@ -2468,7 +2469,8 @@ function paintGrove(ctx: CanvasRenderingContext2D, x: number, y: number, stump: 
   const img = bank.jungle[pick < 0.5 ? 0 : bank.jungle.length - 1] ?? bank.jungle[0];
   if (!img) return false;
   const w = 1.55 + hash(x + 1, y + 3) * 0.85;
-  const hh = w * (img.naturalHeight / Math.max(1, img.naturalWidth));
+  const grove = sourceSize(img);
+  const hh = w * (grove.h / Math.max(1, grove.w));
   ctx.save();
   ctx.translate(x + 0.5, y + 0.94);
   ctx.scale(hash(x + 2, y + 5) > 0.5 ? -1 : 1, 1 / viewPitch());
@@ -3220,7 +3222,7 @@ let plateScratch: HTMLCanvasElement | null = null;
 
 function paintPlate(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  img: CanvasImageSource,
   x: number,
   y: number,
   w: number,
@@ -3229,7 +3231,8 @@ function paintPlate(
   cast: "unit" | "hall" = "unit",
   color = "#2F7DF6",
 ) {
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const plateSize = sourceSize(img);
+  const aspect = plateSize.h / Math.max(1, plateSize.w);
   const h = w * aspect;
   ctx.save();
   ctx.translate(x, y);
@@ -3250,7 +3253,7 @@ function paintPlate(
 /** Neutral body, with team color on the helmet, turret, or roof only. */
 function paintTeamTrim(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  img: CanvasImageSource,
   dx: number,
   dy: number,
   dw: number,
@@ -3266,7 +3269,8 @@ function paintTeamTrim(
   }
   const s = plateScratch.getContext("2d");
   if (!s) return false;
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const trimSize = sourceSize(img);
+  const aspect = trimSize.h / Math.max(1, trimSize.w);
   const ph = Math.max(1, Math.min(PLATE_SCRATCH_H, Math.round(PLATE_SCRATCH_W * aspect)));
   s.setTransform(1, 0, 0, 1, 0, 0);
   s.globalCompositeOperation = "source-over";
@@ -3397,7 +3401,8 @@ function drawBuilding(
     ctx.globalAlpha = low && b.complete ? 0.62 : 1;
     if (!b.complete) {
       const p = Math.max(0.08, 1 - b.buildLeft / Math.max(0.01, b.buildTotal));
-      const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+      const hallSize = sourceSize(img);
+      const aspect = hallSize.h / Math.max(1, hallSize.w);
       const h = (wide * aspect) / viewPitch();
       ctx.save();
       ctx.beginPath();
@@ -3628,7 +3633,8 @@ function drawUnit(
   const moving = Math.hypot(u.x - u.px, u.y - u.py) > 0.004;
   const plate = unitPlate(u.kind);
   const img = plate ? iso()?.[plate] : undefined;
-  const aspect = img && img.naturalWidth > 0 ? img.naturalHeight / Math.max(1, img.naturalWidth) : 1;
+  const unitSize = img ? sourceSize(img) : null;
+  const aspect = unitSize && unitSize.w > 0 ? unitSize.h / Math.max(1, unitSize.w) : 1;
   const wide = img ? unitPictureWidth(u.kind, aspect) : unitWorldSpan(u.kind);
   const ground = u.loco !== "air";
   if (ground) {
