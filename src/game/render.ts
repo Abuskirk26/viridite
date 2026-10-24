@@ -4201,27 +4201,93 @@ function minimapFogVeil(sim: Sim): HTMLCanvasElement | null {
   return canvas;
 }
 
-function paintMiniRoutes(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy: number, cell: number) {
-  const fog = sim.fog[VIEWER];
-  for (let y = 0; y < sim.gh; y++) {
-    for (let x = 0; x < sim.gw; x++) {
-      const i = y * sim.gw + x;
-      const t = sim.terrain[i] ?? 0;
-      let color = "";
-      if (t === TILE_BRIDGE) color = "#c4a06a";
-      else if (t === TILE_ROAD) color = "#8d6840";
-      else if (t === TILE_HIGH) color = "#e4dcc8";
-      else if (t === TILE_CLIFF) color = "#5c5348";
-      else if (t === TILE_RAMP) color = "#b08a58";
-      else continue;
-      const f = fog?.[i] ?? 0;
-      ctx.globalAlpha = f === 2 ? 1 : f === 1 ? 0.72 : 0.38;
-      ctx.fillStyle = color;
-      const pad = t === TILE_ROAD ? 0.35 : 0.45;
-      ctx.fillRect(ox + x * cell, oy + y * cell, cell + pad, cell + pad);
+let miniMarks: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+/** One pixel per tile, rebuilt when the ground changes. Forests, ore, and bridges sit on the photo. */
+function minimapMarks(sim: Sim): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  const key = `${sim.mapId}|${sim.gw}x${sim.gh}|${sim.groundRev}|${sim.theater}`;
+  if (miniMarks?.key === key) return miniMarks.canvas;
+  const canvas = miniMarks?.canvas ?? document.createElement("canvas");
+  if (canvas.width !== sim.gw) canvas.width = sim.gw;
+  if (canvas.height !== sim.gh) canvas.height = sim.gh;
+  const g = canvas.getContext("2d");
+  if (!g) return null;
+  const img = g.createImageData(sim.gw, sim.gh);
+  const d = img.data;
+  const n = sim.gw * sim.gh;
+  for (let i = 0; i < n; i++) {
+    const t = sim.terrain[i] ?? 0;
+    const ore = (sim.crystal[i] ?? 0) > 0;
+    let r = 0;
+    let gc = 0;
+    let b = 0;
+    let a = 0;
+    if (ore) {
+      r = 208;
+      gc = 138;
+      b = 58;
+      a = 235;
+    } else if (t === TILE_BRIDGE) {
+      r = 196;
+      gc = 154;
+      b = 96;
+      a = 235;
+    } else if (t === TILE_WRECK) {
+      r = 42;
+      gc = 32;
+      b = 24;
+      a = 200;
+    } else if (t === TILE_SCRUB || t === TILE_STUMP) {
+      r = 14;
+      gc = 72;
+      b = 28;
+      a = 210;
+    } else if (t === TILE_CLIFF || t === TILE_ROCK) {
+      r = 72;
+      gc = 62;
+      b = 52;
+      a = 80;
+    } else if (t === TILE_RAMP) {
+      r = 186;
+      gc = 146;
+      b = 88;
+      a = 150;
+    } else if (t === TILE_ROAD) {
+      r = 150;
+      gc = 112;
+      b = 68;
+      a = 90;
+    } else if (t === TILE_HIGH) {
+      r = 214;
+      gc = 204;
+      b = 176;
+      a = 50;
     }
+    const o = i * 4;
+    d[o] = r;
+    d[o + 1] = gc;
+    d[o + 2] = b;
+    d[o + 3] = a;
   }
-  ctx.globalAlpha = 1;
+  g.putImageData(img, 0, 0);
+  miniMarks = { key, canvas };
+  return canvas;
+}
+
+function paintMiniMarks(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy: number, size: number) {
+  const marks = minimapMarks(sim);
+  if (!marks) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(marks, ox, oy, size, size);
+  const shade = minimapFogVeil(sim);
+  if (shade) {
+    ctx.globalCompositeOperation = "multiply";
+    ctx.drawImage(shade, ox, oy, size, size);
+  }
+  ctx.restore();
 }
 
 function paintEnemySpawns(ctx: CanvasRenderingContext2D, sim: Sim, r: { x: number; y: number; s: number }) {
@@ -4270,27 +4336,10 @@ function drawMinimap(
   ctx.lineWidth = 2;
   ctx.strokeRect(r.x - 4, r.y - 4, r.s + 8, r.s + 8);
   const cell = r.s / sim.gw;
-  const fog = sim.fog[VIEWER];
   if (!ground && relief) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(relief, r.x, r.y, r.s, r.s);
-    const shade = minimapFogVeil(sim);
-    if (shade) {
-      ctx.save();
-      ctx.globalCompositeOperation = "multiply";
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(shade, r.x, r.y, r.s, r.s);
-      ctx.restore();
-    }
-    for (let y = 0; y < sim.gh; y++) {
-      for (let x = 0; x < sim.gw; x++) {
-        const i = y * sim.gw + x;
-        if ((fog[i] ?? 0) === 0 || (sim.crystal[i] ?? 0) <= 0) continue;
-        ctx.fillStyle = "#d08a3a";
-        ctx.fillRect(r.x + x * cell, r.y + y * cell, Math.max(1.5, cell), Math.max(1.5, cell));
-      }
-    }
     for (const b of sim.buildings) {
       if (b.hp <= 0 || !sim.buildingVisible(VIEWER, b)) continue;
       ctx.fillStyle = seatPaint(sim, b.team);
@@ -4303,21 +4352,15 @@ function drawMinimap(
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(sheet, r.x, r.y, r.s, r.s);
   } else {
-    const fog = sim.fog[VIEWER];
-    if (ground) ctx.drawImage(ground, r.x, r.y, r.s, r.s);
-    for (let y = 0; y < sim.gh; y++) {
-      for (let x = 0; x < sim.gw; x++) {
-        const i = y * sim.gw + x;
-        const t = sim.terrain[i];
-        const seen = (fog[i] ?? 0) === 2;
-        if (!ground) {
-          ctx.fillStyle = miniTone(t, (fog[i] ?? 0) === 2 ? sim.crystal[i] : 0, 2);
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (seen && sim.crystal[i] > 0) {
-          ctx.fillStyle = "#d08a3a";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (seen && t === TILE_ROCK) {
-          ctx.fillStyle = "rgba(20,16,12,0.75)";
+    if (ground) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(ground, r.x, r.y, r.s, r.s);
+    } else {
+      for (let y = 0; y < sim.gh; y++) {
+        for (let x = 0; x < sim.gw; x++) {
+          const i = y * sim.gw + x;
+          ctx.fillStyle = miniTone(sim.terrain[i] ?? 0, sim.crystal[i] ?? 0, 2);
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
         }
       }
@@ -4329,7 +4372,7 @@ function drawMinimap(
     }
   }
   }
-  paintMiniRoutes(ctx, sim, r.x, r.y, cell);
+  paintMiniMarks(ctx, sim, r.x, r.y, r.s);
   for (const c of sim.starts.corners) {
     const seat = seatAtCorner(sim, c.x, c.y);
     const cx = r.x + c.x * cell;
