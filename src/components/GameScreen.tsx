@@ -3068,8 +3068,10 @@ function BuildColumn({
         {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
           const def = BUILDINGS[id];
           const need = unmetNeed(sim, team, id);
-          const broke = sim.credits[team] < def.cost;
-          const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
+          const broke = !need && sim.credits[team] < def.cost;
+          const low = !need && power.low && !isFence(id) && id !== "power" && id !== "advpower";
+          const site = sim.buildings.find((b) => b.team === team && b.kind === id && b.hp > 0 && !b.complete && b.rubble <= 0);
+          const prog = site && site.buildTotal > 0 ? 1 - site.buildLeft / site.buildTotal : 0;
           const Icon = BUILD_ICON[id];
           return (
             <button
@@ -3087,14 +3089,20 @@ function BuildColumn({
                 }
                 onPlace(id);
               }}
-              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need || broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
+              className={`bevel-btn relative mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need ? "text-brass" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
             >
               <Icon className="size-4 shrink-0" />
               <span className="min-w-0 flex-1 text-left">
                 <span className="block whitespace-normal text-[11px] leading-tight">{def.short}</span>
                 {need ? <span className="block whitespace-normal text-[11px] leading-tight normal-case">{need}</span> : null}
+                {low ? <span className="block text-[11px] leading-tight text-brass normal-case">Low power</span> : null}
               </span>
-              <span className="shrink-0 text-[11px] tabular-nums text-gold">{def.cost}</span>
+              <span className={`shrink-0 text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>{def.cost}</span>
+              {site ? (
+                <span className="pointer-events-none absolute right-1 bottom-1 left-1 h-1 bg-well">
+                  <span className="block h-full bg-crystal" style={{ width: `${Math.max(4, Math.floor(prog * 100))}%` }} />
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -3578,7 +3586,9 @@ function TrainButton({
   const spec = resolveUnit(unitId, sim.factionOf(team as 0));
   const need = unitRequires(unitId);
   const unlocked = !need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
-  const afford = unlocked && sim.credits[team] >= spec.cost && building.queue.length < 5;
+  const broke = unlocked && sim.credits[team] < spec.cost;
+  const low = unlocked && sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0).low;
+  const afford = unlocked && !broke && building.queue.length < 5;
   const mark = UNIT_MARK[unitId];
   const queued = building.queue.filter((id) => id === unitId).length;
   const head = building.queue[0] === unitId;
@@ -3653,21 +3663,22 @@ function TrainButton({
         {icons ? null : (
           <span className={`flex min-w-0 flex-col leading-none ${tight ? "items-start" : "items-center"}`}>
             <span className="whitespace-nowrap font-display text-[11px] uppercase">{spec.short}</span>
-            <span className="whitespace-nowrap text-[11px] tabular-nums text-gold">
+            <span className={`whitespace-nowrap text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
               {unlocked ? (
                 <>
                   {spec.cost}
                   <span className="text-brass"> · {commandCost(spec)}</span>
+                  {low ? <span className="text-brass"> · low</span> : null}
                 </>
               ) : (
-                BUILDINGS[need!].short
+                `Needs ${BUILDINGS[need!].short}`
               )}
             </span>
           </span>
         )}
         {head && (
-          <span className="pointer-events-none absolute right-11 bottom-0 left-0 h-1 bg-well">
-            <span className="block h-full bg-crystal" style={{ width: `${Math.floor(p * 100)}%` }} />
+          <span className="pointer-events-none absolute right-11 bottom-0 left-0 h-1.5 bg-well">
+            <span className={`block h-full ${low ? "bg-danger" : "bg-crystal"}`} style={{ width: `${Math.floor(p * 100)}%` }} />
           </span>
         )}
       </button>
