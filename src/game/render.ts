@@ -717,36 +717,47 @@ export function drawGame(
       ctx.stroke();
       ctx.globalAlpha = 1;
     } else if (f.kind === "boom") {
-      const frames = art()?.boom;
-      if (frames && frames.length >= 6) {
-        const frame = Math.min(5, Math.floor(k * 6));
-        const size = Math.max(0.9, f.r * 2.6);
-        ctx.globalAlpha = k > 0.85 ? 1 - (k - 0.85) / 0.15 : 1;
-        ctx.drawImage(frames[frame]!, f.x - size / 2, f.y - size / 2, size, size);
-        ctx.globalAlpha = 1;
-      } else {
-        ctx.globalAlpha = 1 - k;
-        ctx.fillStyle = k < 0.35 ? "#fff1c4" : "#e25822";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y, Math.max(0.2, f.r * (0.35 + k * 0.9)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "#ffd27a";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y, Math.max(0.08, f.r * (0.18 + k * 0.25)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = (1 - k) * 0.55;
-        ctx.fillStyle = "rgba(28, 26, 24, 0.85)";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y - f.r * 0.35, Math.max(0.15, f.r * (0.45 + k * 0.4)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
+      const life = 1 - k;
+      const rad = Math.max(0.7, f.r * (1.15 + k * 1.35));
+      ctx.globalAlpha = life * 0.9;
+      ctx.strokeStyle = "#fff6d0";
+      ctx.lineWidth = 0.07;
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, rad * (0.45 + k * 0.7), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = k < 0.22 ? "#fff8e6" : k < 0.5 ? "#ffb03a" : "#e23b18";
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, rad * (k < 0.28 ? 0.48 : 0.32), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffe7a8";
+      ctx.beginPath();
+      ctx.arc(f.x, f.y, rad * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + 0.35;
+        const d = rad * (0.28 + k * 0.85);
+        ctx.save();
+        ctx.translate(f.x + Math.cos(a) * d, f.y + Math.sin(a) * d * 0.62);
+        ctx.rotate(a + k * 3);
+        ctx.fillStyle = i % 2 ? "#2a2018" : "#e8c48a";
+        ctx.fillRect(-0.09, -0.045, 0.18, 0.09);
+        ctx.restore();
       }
+      ctx.globalAlpha = life * 0.4;
+      ctx.fillStyle = "rgba(36, 32, 28, 0.9)";
+      ctx.beginPath();
+      ctx.arc(f.x + 0.05, f.y - rad * 0.22, rad * (0.28 + k * 0.35), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
     } else if (f.kind === "debris") {
       const travel = 1 - f.ttl / f.max;
+      ctx.save();
       ctx.globalAlpha = 1 - travel;
+      ctx.translate(f.x + f.x2 * travel, f.y + f.y2 * travel);
+      ctx.rotate(travel * 4);
       ctx.fillStyle = f.color;
-      ctx.fillRect(f.x + f.x2 * travel - 0.06, f.y + f.y2 * travel - 0.04, 0.12, 0.08);
-      ctx.globalAlpha = 1;
+      ctx.fillRect(-0.1, -0.06, 0.2, 0.12);
+      ctx.restore();
     } else {
       ctx.globalAlpha = 1 - k;
       ctx.fillStyle = k < 0.4 ? "#fff1c4" : "#e07a3a";
