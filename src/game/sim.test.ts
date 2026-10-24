@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
-import { Sim, shortPlaceReason, type Building } from "./sim.ts";
+import { NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
@@ -1387,6 +1387,23 @@ test("wiping the bot's buildings and units is a win", () => {
   sim.tick(0.2);
   assert.equal(sim.outcome, "win");
   assert.equal(sim.reason, "Enemy forces destroyed");
+});
+
+test("the bot keeps attacking after its construction yard falls", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, difficulty: "normal", cpu: [false, true, false, false] });
+  sim.time = NORMAL_PUSH_AT + 5;
+  sim.hadYard[1] = true;
+  for (const u of sim.units) if (u.team === 1) u.hp = 0;
+  const home = sim.starts.slots[1] ?? sim.starts.enemy;
+  for (let i = 0; i < 6; i++) sim.spawnUnit(1, "rifle", home.x + 0.8 + (i % 3), home.y + 0.8 + ((i / 3) | 0));
+  stubBuilding(sim, { kind: "power", team: 0, tx: Math.min(sim.gw - 4, Math.round(home.x) + 6), ty: Math.min(sim.gh - 4, Math.round(home.y)) });
+  const before = NORMAL_PUSH_AT;
+  aiThink(sim, 1);
+  assert.equal(NORMAL_PUSH_AT, before);
+  const pushed = sim.units.some(
+    (u) => u.team === 1 && u.hp > 0 && (u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove)),
+  );
+  assert.equal(pushed || sim.aiIntent[1] === "attack", true);
 });
 
 

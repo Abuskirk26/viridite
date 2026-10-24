@@ -3819,9 +3819,9 @@ function IconButton({
 
 function Overlay({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2" data-testid="match-end">
       <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
-        <h2 className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
+        <h2 data-testid="match-end-title" className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
     </div>

@@ -133,7 +133,9 @@ export function aiThink(sim: Sim, team: Team = 1) {
     sim.aiIntent[team] = "expand";
     return;
   }
-  if (!yard?.complete) {
+  // A yard that is still going up holds the opening. A yard that already fell does not.
+  const yardLost = !yard && sim.hadYard[team] && !mcv;
+  if (!yard?.complete && !yardLost) {
     sim.aiIntent[team] = "expand";
     return;
   }
