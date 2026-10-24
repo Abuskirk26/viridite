@@ -467,6 +467,13 @@ export function GameScreen() {
   }, [arming, strike]);
 
   useEffect(() => {
+    if (phase !== "play") return;
+    const blockMenu = (e: Event) => e.preventDefault();
+    window.addEventListener("contextmenu", blockMenu, true);
+    return () => window.removeEventListener("contextmenu", blockMenu, true);
+  }, [phase]);
+
+  useEffect(() => {
     if (sel.length > 0 || selB != null || placing) setTrayUp(false);
   }, [sel, selB, placing]);
 
@@ -1104,6 +1111,8 @@ export function GameScreen() {
       },
       onBox: (box) => {
         const sim = simRef.current;
+        setSelecting(false);
+        selectRef.current = false;
         if (!sim || pausedRef.current || placingRef.current || armRef.current) return;
         const a = screenToWorld(camRef.current, box.x0, box.y0, viewRef.current);
         const b = screenToWorld(camRef.current, box.x1, box.y1, viewRef.current);
@@ -1119,6 +1128,8 @@ export function GameScreen() {
       },
       onTap: (sx, sy, isDouble, shift) => {
         const sim = simRef.current;
+        setSelecting(false);
+        selectRef.current = false;
         if (!sim || pausedRef.current || phaseRef.current !== "play") return;
         unlockAudio();
         const world = screenToWorld(camRef.current, sx, sy, viewRef.current);
@@ -1400,6 +1411,8 @@ export function GameScreen() {
   const orderScatter = () => {
     const ids = sel.slice();
     act("scatter", { ids }, () => sim?.issueScatter(ids));
+    setSelecting(false);
+    selectRef.current = false;
     setArming(false);
   };
   const orderHarvest = () => {
@@ -1762,10 +1775,7 @@ export function GameScreen() {
                   raised={!portrait}
                   dock={land ? "bottom-2" : undefined}
                   onArmy={selectArmy}
-                  onBuild={() => {
-                    setBuildOpen((v) => !v);
-                    setProdTab("build");
-                  }}
+                  onBuild={openBuild}
                   onMove={() => {
                     selectRef.current = false;
                     armRef.current = false;
@@ -2396,7 +2406,6 @@ function ProductionColumn({
                       <X className="size-4" />
                     </BarButton>
                   )}
-                  <SellButton buildingId={selB} onConfirm={onSell} />
                 </div>
               </div>
             ) : (
@@ -2408,6 +2417,16 @@ function ProductionColumn({
               Cancel place
             </button>
           )}
+        </div>
+        <div className="shrink-0 border-t border-brass-dim p-1" data-testid="column-sell">
+          <SellButton
+            buildingId={selB}
+            disabled={(() => {
+              const b = selB != null ? sim.buildingById(selB) : undefined;
+              return !b || b.team !== team || b.rubble > 0 || !b.complete || b.kind === "span";
+            })()}
+            onConfirm={onSell}
+          />
         </div>
       </div>
     </aside>
@@ -3163,7 +3182,6 @@ function CommandBar({
   onRepair,
   onClear,
   onOpenBuild,
-  onSell,
   onToggleGate,
   onLoad,
   onUnload,
@@ -3333,9 +3351,6 @@ function CommandBar({
         <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
         </BarButton>
-        {building.team === team && (
-          <SellButton tile buildingId={building.id} onConfirm={onSell} />
-        )}
       </>
     );
   }
@@ -3357,9 +3372,6 @@ function CommandBar({
           <BarButton tile label={building.mending ? "Stop repair" : "Repair"} testId="cmd-repair" onClick={onRepair}>
             <Wrench className="size-5" /> {building.mending ? "Stop" : "Repair"}
           </BarButton>
-        )}
-        {!rubble && (
-          <SellButton tile buildingId={building.id} onConfirm={onSell} />
         )}
         <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
