@@ -845,7 +845,8 @@ test("a tap on the roof of a power plant still picks the building", () => {
   const roof = plant.ty + plant.h - hallPictureLift("power", plant.w, plant.h) + 0.2;
   const hit = sim.pickBuilding(plant.tx + plant.w / 2, roof, zoom, 0);
   assert.equal(hit?.id, plant.id);
-  const above = roof - 44 / zoom - 0.4;
+  const padY = 44 / zoom / viewPitch();
+  const above = roof - padY - 0.35;
   assert.equal(sim.pickBuilding(plant.tx + plant.w / 2, above, zoom, 0), null);
 });
 
