@@ -13,6 +13,8 @@
  */
 
 import {
+  CP_MAX,
+  HQ_COST,
   TILE_SHORE,
   resolveBuilding,
   resolveUnit,
@@ -210,6 +212,15 @@ function placeBase(sim: Sim, team: Team, stance: AiProfile) {
   const constructing = have.some((b) => !b.complete && !isPower(b.kind));
   const count = (k: BuildingId) => have.filter((b) => b.kind === k).length;
   const done = (k: BuildingId) => have.some((b) => b.kind === k && b.complete);
+  const lv = sim.commandLv[team] ?? 0;
+  if (done("barracks") && (sim.commandLeft[team] ?? 0) <= 0 && lv < CP_MAX && !constructing) {
+    const hq = HQ_COST[lv] ?? 0;
+    const spare = lv < 2 ? 900 : 2500;
+    if (sim.credits[team] > hq + spare) {
+      sim.raiseCommand(team);
+      return;
+    }
+  }
   const want = nextBuild(sim, team, stance, count, done);
   if (!want) return;
   if (constructing && want !== "power") return;

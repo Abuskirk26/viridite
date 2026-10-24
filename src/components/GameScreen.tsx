@@ -41,6 +41,10 @@ import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, un
 import {
   BUILDINGS,
   BUILD_ORDER,
+  CP_MAX,
+  HQ_COST,
+  HQ_TIME,
+  airTier,
   buildClock,
   supplyShare,
   FACTION_NAME,
@@ -177,8 +181,9 @@ function WarStrip({
   const worksWait = !worksOn && sim.worksCd[team]! > 0;
   const marchWait = !marchOn && sim.marchCd[team]! > 0;
   const raising = sim.commandLeft[team]! > 0;
-  const maxed = sim.commandLv[team]! >= 3;
-  const raiseCost = 600 + (sim.commandLv[team] ?? 0) * 450;
+  const lv = sim.commandLv[team] ?? 0;
+  const maxed = lv >= CP_MAX;
+  const raiseCost = HQ_COST[lv] ?? 0;
   const h = compact ? "h-8" : "h-11";
   return (
     <div
@@ -2388,6 +2393,9 @@ function ProductionColumn({
           <div className="min-h-0 flex-1 overflow-y-auto p-0.5">
             {active === "build" ? (
               <div className="grid grid-cols-2 gap-0.5">
+                <div className="col-span-2">
+                  <HqCard sim={sim} team={team} />
+                </div>
                 {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
                   const def = BUILDINGS[id];
                   const need = unmetNeed(sim, team, id);
@@ -3004,6 +3012,33 @@ function CraneMark() {
   );
 }
 
+function HqCard({ sim, team, dock = false }: { sim: Sim; team: number; dock?: boolean }) {
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const lv = sim.commandLv[seat] ?? 0;
+  const yard = sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
+  if (!yard || lv >= CP_MAX) return null;
+  const cost = HQ_COST[lv] ?? 0;
+  const time = HQ_TIME[lv] ?? 0;
+  const raising = (sim.commandLeft[seat] ?? 0) > 0;
+  const broke = sim.credits[team] < cost;
+  const price = raising ? "Rising" : `${cost} · ${buildClock(time)}`;
+  return (
+    <button
+      type="button"
+      data-testid="build-hq"
+      onClick={() => sim.raiseCommand(seat)}
+      className={
+        dock
+          ? `bevel-btn flex min-h-11 w-16 shrink-0 flex-col items-center justify-center px-1 ${broke && !raising ? "text-muted" : "text-ink"}`
+          : `bevel-btn relative mb-1 flex min-h-11 w-full items-center justify-between gap-2 px-2 font-display text-xs uppercase ${broke && !raising ? "text-brass" : "text-ink"}`
+      }
+    >
+      <span className="font-display text-[11px] uppercase">HQ {lv + 2}</span>
+      <span className={`text-[11px] leading-tight tabular-nums ${broke && !raising ? "text-danger" : "text-gold"}`}>{price}</span>
+    </button>
+  );
+}
+
 function BuildColumn({
   sim,
   team,
@@ -3077,6 +3112,7 @@ function BuildColumn({
         {!yard && (
           <p className="px-1 py-2 text-[11px] text-muted">No Construction Yard.</p>
         )}
+        <HqCard sim={sim} team={team} />
         {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
           const def = BUILDINGS[id];
           const need = unmetNeed(sim, team, id);
@@ -3465,6 +3501,7 @@ function CommandBar({
 
   return (
     <>
+      <HqCard sim={sim} team={team} dock />
       {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
         const def = BUILDINGS[id];
         const need = unmetNeed(sim, team, id);
@@ -3604,7 +3641,10 @@ function TrainButton({
   const spec = resolveUnit(unitId, sim.factionOf(team as 0));
   const tag = matchupTag(unitId);
   const need = unitRequires(unitId);
-  const unlocked = !need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const needTier = airTier(unitId);
+  const hqLocked = needTier > 1 + (sim.commandLv[seat] ?? 0);
+  const unlocked = !hqLocked && (!need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0));
   const broke = unlocked && sim.credits[team] < spec.cost;
   const low = unlocked && sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0).low;
   const afford = unlocked && !broke && building.queue.length < 5;
@@ -3628,7 +3668,13 @@ function TrainButton({
       <button
         type="button"
         data-testid={`train-${unitId}`}
-        aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command${tag ? `, ${tag.detail}` : ""}` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
+        aria-label={
+          hqLocked
+            ? `${spec.name}. HQ ${needTier}.`
+            : unlocked
+              ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command${tag ? `, ${tag.detail}` : ""}`
+              : `${spec.name}. Needs ${BUILDINGS[need!].name}.`
+        }
         disabled={!building.complete || !unlocked}
         onContextMenu={(e) => e.preventDefault()}
         style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "manipulation" }}
@@ -3683,7 +3729,9 @@ function TrainButton({
           <span className={`flex min-w-0 flex-col leading-none ${tight ? "items-start" : "items-center"}`}>
             <span className="whitespace-nowrap font-display text-[11px] uppercase">{spec.short}</span>
             <span className={`whitespace-nowrap text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
-              {unlocked ? (
+              {hqLocked ? (
+                `HQ ${needTier}`
+              ) : unlocked ? (
                 <>
                   {spec.cost}
                   <span className="text-brass"> · {commandCost(spec)}</span>

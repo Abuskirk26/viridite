@@ -106,7 +106,7 @@ test("power, refinery, and harvester loop", () => {
     }
   }
   assert.equal(powered, true, "found a power pad");
-  for (let i = 0; i < 90; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.power.time * 12; i++) sim.tick(0.1);
   assert.ok(sim.powerOf(0).supply >= 100, "dynamo online");
   assert.equal(sim.powerOf(0).low, false);
 
@@ -118,7 +118,7 @@ test("power, refinery, and harvester loop", () => {
     }
   }
   assert.equal(refined, true, "found a refinery pad");
-  for (let i = 0; i < 160; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.refinery.time * 12; i++) sim.tick(0.1);
   assert.ok(
     sim.units.some((u) => u.team === 0 && u.kind === "harvester"),
     "harvester spawned",
@@ -592,9 +592,9 @@ test("a trained rifle spawns at the exit and walks to the rally", () => {
     return false;
   };
   assert.equal(placeNear("power"), true, "power pad");
-  for (let i = 0; i < 80; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.power.time * 12; i++) sim.tick(0.1);
   assert.equal(placeNear("barracks"), true, "barracks pad");
-  for (let i = 0; i < 90; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.barracks.time * 12; i++) sim.tick(0.1);
   const hall = sim.buildings.find((b) => b.team === 0 && b.kind === "barracks" && b.complete);
   assert.ok(hall, "barracks finished");
   hall!.rallyX = hall!.tx + hall!.w / 2;
@@ -622,9 +622,9 @@ test("a rifle standing on the door does not swallow the next trainee", () => {
     return false;
   };
   assert.equal(placeNear("power"), true);
-  for (let i = 0; i < 80; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.power.time * 12; i++) sim.tick(0.1);
   assert.equal(placeNear("barracks"), true);
-  for (let i = 0; i < 90; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.barracks.time * 12; i++) sim.tick(0.1);
   const hall = sim.buildings.find((b) => b.team === 0 && b.kind === "barracks" && b.complete);
   assert.ok(hall);
   const door = sim.doorOf(hall!);
@@ -645,22 +645,25 @@ test("a rifle standing on the door does not swallow the next trainee", () => {
   }
 });
 
-test("low power halves training and shuts the tower", () => {
+test("a dead power grid stops training and turret fire", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false });
   const hall = stubBuilding(sim, { kind: "barracks", team: 0, tx: 8, ty: 8 });
   const plant = stubBuilding(sim, { kind: "power", team: 0, tx: 4, ty: 8 });
   plant.powerOut = 0;
   sim.credits[0] = 5000;
+  sim.time = DEPLOY_SECS;
   assert.equal(sim.powerOf(0).low, true);
+  assert.equal(sim.powerFactor(0), 0);
   assert.equal(sim.queueUnit(hall.id, "rifle").ok, true);
   for (let i = 0; i < 10; i++) sim.tick(0.1);
-  assert.ok(hall.prod > 0.4 && hall.prod < 0.7, `prod ${hall.prod} should be about half a second`);
+  assert.equal(hall.prod, 0);
   const tower = stubBuilding(sim, { kind: "tower", team: 0, tx: 12, ty: 8, complete: true });
+  tower.powerUse = 0;
   const foe = sim.spawnUnit(1, "rifle", 14, 9);
   assert.ok(foe);
   const hp = foe!.hp;
   for (let i = 0; i < 20; i++) sim.tick(0.1);
-  assert.equal(foe!.hp, hp, "tower fired while brown");
+  assert.equal(foe!.hp, hp, "tower fired with no power");
   assert.equal(tower.cooldown, 0);
 });
 
@@ -701,7 +704,7 @@ test("return order hauls a partial load home", () => {
       if (sim.tryPlace(0, "power", yard.tx + dx, yard.ty + dy).ok) placed = true;
     }
   }
-  for (let i = 0; i < 80; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.power.time * 12; i++) sim.tick(0.1);
   placed = false;
   for (let dy = -8; dy <= 8 && !placed; dy++) {
     for (let dx = -8; dx <= 8 && !placed; dx++) {
@@ -709,7 +712,7 @@ test("return order hauls a partial load home", () => {
     }
   }
   assert.equal(placed, true);
-  for (let i = 0; i < 160; i++) sim.tick(0.1);
+  for (let i = 0; i < BUILDINGS.refinery.time * 12; i++) sim.tick(0.1);
   const harvester = sim.units.find((u) => u.team === 0 && u.kind === "harvester" && u.hp > 0);
   assert.ok(harvester, "refinery harvester");
   harvester!.cargo = 120;
@@ -1096,6 +1099,28 @@ test("supply centers drip credits and command points cap the army", () => {
   assert.ok(sim.worksLeft[0]! > 0);
   sim.useBoost(0, "works");
   assert.ok(sim.worksCd[0]! > sim.worksLeft[0]!);
+});
+
+test("HQ tiers raise command and unlock air in order", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, cpu: [false, false, false, false] });
+  const yard = deployPlayer(sim);
+  stubBuilding(sim, { kind: "power", team: 0, tx: yard.tx + 4, ty: yard.ty, complete: true });
+  const pad = stubBuilding(sim, { kind: "helipad", team: 0, tx: yard.tx, ty: yard.ty + 4, complete: true });
+  sim.credits[0] = 50000;
+  sim.time = DEPLOY_SECS;
+  assert.equal(sim.commandCap(0), 20);
+  assert.equal(sim.queueUnit(pad.id, "chinook").reason, "HQ 2");
+  assert.equal(sim.queueUnit(pad.id, "attackheli").reason, "HQ 3");
+  assert.equal(sim.raiseCommand(0).ok, true);
+  sim.commandLeft[0] = 0.05;
+  sim.tick(0.1);
+  assert.equal(sim.commandLv[0], 1);
+  assert.equal(sim.commandCap(0), 40);
+  assert.equal(sim.queueUnit(pad.id, "chinook").ok, true);
+  assert.equal(sim.queueUnit(pad.id, "attackheli").reason, "HQ 3");
+  sim.commandLv[0] = 2;
+  assert.equal(sim.queueUnit(pad.id, "attackheli").ok, true);
+  assert.match(sim.queueUnit(pad.id, "bomber").reason, /HQ 4|Adv Power/);
 });
 
 test("later supply centers pay less and credits are not capped", () => {

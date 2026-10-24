@@ -232,10 +232,12 @@ export function supplyShare(index: number): number {
 export const YARD_DRIP = 2;
 /** Credits per second from a completed Silo. A bonus only — never a storage cap. */
 export const SILO_DRIP = 3;
-/** Starting command points. Each yard upgrade adds CP_STEP, up to CP_MAX times. */
-export const CP_BASE = 22;
-export const CP_STEP = 8;
-export const CP_MAX = 3;
+/** Five HQ tiers. Tier 1 is free with the yard. Each upgrade adds HQ_CP. */
+export const HQ_TIERS = 5;
+export const HQ_CP = 20;
+export const CP_MAX = HQ_TIERS - 1;
+export const HQ_COST = [400, 800, 1300, 1600] as const;
+export const HQ_TIME = [14, 18, 22, 26] as const;
 /** Heavy field haul lands on the center at this match time. */
 export const HAUL_AT = 210;
 /** Crystal pulled per second while a harvester sits on a field. */
@@ -1570,7 +1572,6 @@ export function unitRequires(id: UnitId): BuildingId | null {
     case "transport":
       return "advpower";
     case "bomber":
-    case "chinook":
       return "advpower";
     default:
       return null;
@@ -1580,7 +1581,7 @@ export function unitRequires(id: UnitId): BuildingId | null {
 export function trainedList(at: TrainAt, faction: FactionId): UnitId[] {
   const slice: Partial<Record<TrainAt, UnitId[]>> = {
     dock: ["gunboat", "frigate", "missile"],
-    helipad: ["attackheli", "bomber"],
+    helipad: ["chinook", "attackheli", "bomber"],
   };
   const order = slice[at] ?? UNIT_ORDER;
   return order.filter((id) => UNITS[id].trainedAt === at && canTrain(id, faction));
@@ -1588,6 +1589,14 @@ export function trainedList(at: TrainAt, faction: FactionId): UnitId[] {
 
 export function locoOf(u: { loco?: Loco }): Loco {
   return u.loco ?? "land";
+}
+
+/** HQ tier that unlocks this aircraft. 0 means the unit is not gated by HQ. Helicopters, then fighters, then bombers. */
+export function airTier(id: UnitId): number {
+  if (id === "chinook") return 2;
+  if (id === "attackheli") return 3;
+  if (id === "bomber") return 4;
+  return 0;
 }
 
 /** Command points a unit occupies. Infantry are cheap. Armor and air are not. */

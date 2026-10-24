@@ -9,9 +9,11 @@ import {
   BUILDINGS,
   BUILD_GAP,
   BUILD_ORDER,
-  CP_BASE,
   CP_MAX,
-  CP_STEP,
+  HQ_COST,
+  HQ_CP,
+  HQ_TIME,
+  airTier,
   HAUL_AT,
   MAP_SIZE,
   SEAT_NAME,
@@ -1279,6 +1281,12 @@ export class Sim {
       if (b.team === this.ear || b.team === 0) this.say(`Needs ${need}`, "tech", 0.8);
       return { ok: false, reason: `Needs ${need}` };
     }
+    const needTier = airTier(unitId);
+    const tier = 1 + (this.commandLv[b.team] ?? 0);
+    if (needTier > tier) {
+      if (b.team === this.ear || b.team === 0) this.say(`HQ ${needTier}`, "tech", 0.8);
+      return { ok: false, reason: `HQ ${needTier}` };
+    }
     if (b.kind === "helipad") {
       const parked = this.units.filter((u) => u.hp > 0 && u.home === b.id && u.loco === "air").length;
       if (parked + b.queue.length >= 3) return { ok: false, reason: "Pad holds 3" };
@@ -1312,9 +1320,9 @@ export class Sim {
     this.say("Rally set", "rally", 0.4);
   }
 
-  /** Flat army room. Skirmish does not sell a bigger cap mid-match. */
-  commandCap(_team: Team): number {
-    return CP_BASE + CP_MAX * CP_STEP;
+  /** Command points from the HQ tier. Extra yards do not stack. */
+  commandCap(team: Team): number {
+    return HQ_CP * (1 + (this.commandLv[team] ?? 0));
   }
 
   commandLoad(team: Team, includeQueue: boolean): number {
@@ -1363,13 +1371,14 @@ export class Sim {
     if ((this.commandLv[team] ?? 0) >= CP_MAX) return { ok: false, reason: "Command is maxed" };
     const yard = this.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
     if (!yard) return { ok: false, reason: "Needs a yard" };
-    const cost = 600 + (this.commandLv[team] ?? 0) * 450;
+    const lv = this.commandLv[team] ?? 0;
+    const cost = HQ_COST[lv] ?? HQ_COST[HQ_COST.length - 1] ?? 0;
     if (this.credits[team] < cost) {
       if (team === this.ear) this.say("Insufficient funds", "credits", 0.8);
       return { ok: false, reason: "Not enough credits" };
     }
     this.credits[team] -= cost;
-    this.commandLeft[team] = 14;
+    this.commandLeft[team] = HQ_TIME[lv] ?? HQ_TIME[HQ_TIME.length - 1] ?? 14;
     if (team === this.ear) this.say("Raising command");
     return { ok: true, reason: "" };
   }
