@@ -52,6 +52,14 @@ function nearKey(r: number, g: number, b: number): boolean {
   return Math.abs(r - KEY_R) <= KEY_TOL && Math.abs(g - KEY_G) <= KEY_TOL && Math.abs(b - KEY_B) <= KEY_TOL;
 }
 
+/** A failed read must not draw the raw plate. An empty frame is blank, never magenta. */
+function emptyPlate(w: number, h: number): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, w);
+  canvas.height = Math.max(1, h);
+  return canvas;
+}
+
 /** Drop the magenta plate so drawImage does not flash a pink square. */
 function punchKey(img: HTMLImageElement, label: string): CanvasImageSource {
   if (typeof document === "undefined") return img;
@@ -64,7 +72,7 @@ function punchKey(img: HTMLImageElement, label: string): CanvasImageSource {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) {
     console.warn(`VIRIDITE: could not key ${label}. The magenta plate lives in art.ts punchKey.`);
-    return img;
+    return emptyPlate(w, h);
   }
   ctx.drawImage(img, 0, 0);
   let data: ImageData;
@@ -72,7 +80,7 @@ function punchKey(img: HTMLImageElement, label: string): CanvasImageSource {
     data = ctx.getImageData(0, 0, w, h);
   } catch {
     console.warn(`VIRIDITE: could not read ${label}. The magenta plate lives in art.ts punchKey.`);
-    return img;
+    return emptyPlate(w, h);
   }
   const px = data.data;
   for (let i = 0; i < px.length; i += 4) {
