@@ -3329,7 +3329,7 @@ function clearOfBar(x: number, y: number, r: number, barX: number, barY: number,
   return hit ? bottom + r + 2 : y;
 }
 
-/** Filled seat shape. Outline stays 1–1.5 px. Size is in screen pixels. */
+/** Filled seat shape. Field badges carry a 2 px dark outline so the color is not the only tell. Size is in screen pixels. */
 export function paintTeamShape(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -3337,7 +3337,7 @@ export function paintTeamShape(
   size: number,
   color: string,
   shape: TeamShape,
-  line = 1.25,
+  line = 2,
 ) {
   const edge = Math.max(1, size / 2 - line / 2);
   ctx.save();
@@ -3358,7 +3358,7 @@ export function paintTeamShape(
     ctx.closePath();
   }
   ctx.fillStyle = color;
-  ctx.strokeStyle = "#14110e";
+  ctx.strokeStyle = "#1a1510";
   ctx.lineWidth = line;
   ctx.lineJoin = "round";
   ctx.fill();

@@ -1,6 +1,6 @@
 import { teamStyle } from "@/game/data";
 
-/** Seat mark from TEAM_STYLES. Shape is the colorblind tell. At least 12 px. */
+/** Seat mark from TEAM_STYLES. Shape is the colorblind tell. Lobby pips stay 12 px; field unit badges stay at least 14. */
 export function TeamPip({
   team,
   eliminated = false,
@@ -13,9 +13,9 @@ export function TeamPip({
   const style = teamStyle(team);
   const color = eliminated ? "#8d8478" : style.color;
   const s = Math.max(12, size);
-  const inset = 1.5;
-  const stroke = "#14110e";
-  const sw = 1.25;
+  const sw = 2;
+  const inset = sw / 2 + 0.25;
+  const stroke = "#1a1510";
   const mid = s / 2;
   const d = s / 2 - inset;
   const common = { fill: color, stroke, strokeWidth: sw, strokeLinejoin: "round" as const };

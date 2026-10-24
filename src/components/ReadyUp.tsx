@@ -485,7 +485,7 @@ function MapPreview({ setup, name }: { setup: SkirmishSetup; name: string }) {
       if (ctx) {
         const css = canvas.clientWidth || 64;
         const size = (12 * canvas.width) / css;
-        const line = Math.max(1, (1.25 * canvas.width) / css);
+        const line = Math.max(1, (2 * canvas.width) / css);
         for (const mark of painted) {
           paintTeamShape(ctx, mark.x, mark.y, size, mark.color, mark.shape, line);
         }
