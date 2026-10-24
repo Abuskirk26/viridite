@@ -1020,6 +1020,19 @@ export class Sim {
     return { supply, use, low: !!this.gridOn[team] && use > supply };
   }
 
+  /**
+   * Reserved power. 1 while the grid covers every building, 0 with no supply
+   * once a plant has run, otherwise supply / demand. The first plant still
+   * builds at full speed because the grid is not on yet.
+   */
+  powerFactor(team: Team): number {
+    const live = this.powerOf(team);
+    if (!this.gridOn[team]) return 1;
+    if (live.use <= live.supply) return 1;
+    if (live.supply <= 0) return 0;
+    return live.supply / live.use;
+  }
+
   storageOf(team: Team): number {
     let n = START_STORAGE;
     for (const b of this.buildings) {
@@ -2127,9 +2140,10 @@ export class Sim {
       if (b.team === this.ear) this.say("Repairs finished", "repair", 0.6);
       return;
     }
-    const low = this.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
+    const plant = b.kind === "power" || b.kind === "advpower";
+    const pace = plant ? 1 : this.powerFactor(b.team);
     const budget = Math.min(this.credits[b.team] | 0, Math.ceil((b.maxHp - b.hp) / 4));
-    const spend = Math.min(budget, Math.max(0, Math.round((low ? 4 : 8) * dt)));
+    const spend = Math.min(budget, Math.max(0, Math.round(8 * pace * dt)));
     if (spend <= 0) {
       if ((this.credits[b.team] | 0) < 1) {
         b.mending = false;
@@ -2150,11 +2164,10 @@ export class Sim {
       if (b.hp <= 0 || b.rubble > 0) continue;
       if (b.neutral || this.eliminated[b.team]) continue;
       if (!b.complete) {
-        const low = this.powerOf(b.team).low;
         const plant = b.kind === "power" || b.kind === "advpower";
         const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
-        const brown = low ? (plant ? 0.8 : 0.5) : 1;
-        b.buildLeft -= dt * brown * 1.25 * rush;
+        const pace = plant ? 1 : this.powerFactor(b.team);
+        b.buildLeft -= dt * pace * 1.25 * rush;
         const p = 1 - b.buildLeft / Math.max(0.01, b.buildTotal);
         b.hp = Math.max(1, b.maxHp * (0.12 + 0.88 * clamp01(p)));
         if (b.buildLeft <= 0) {
@@ -2185,10 +2198,9 @@ export class Sim {
       if (b.hit > 0) b.hit = Math.max(0, b.hit - dt);
       if (b.mending) this.tickRepair(b, dt);
       if (!b.queue.length) continue;
-      const low = this.powerOf(b.team).low;
       const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
       const burned = b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
-      b.prod += dt * (low ? 0.5 : 1) * rush * burned;
+      b.prod += dt * this.powerFactor(b.team) * rush * burned;
       const spec = resolveUnit(b.queue[0], this.factionOf(b.team));
       if (b.prod >= spec.time) {
         const kind = b.queue[0];
@@ -2838,8 +2850,9 @@ export class Sim {
     for (const b of this.buildings) {
       const aa = b.special === "aa";
       if ((b.kind !== "tower" && !aa) || !b.complete || b.hp <= 0) continue;
-      if (b.cooldown > 0) b.cooldown -= dt;
-      if (this.powerOf(b.team).low) continue;
+      const pace = this.powerFactor(b.team);
+      if (b.cooldown > 0) b.cooldown -= dt * pace;
+      if (pace <= 0) continue;
       const cx = b.tx + b.w / 2;
       const cy = b.ty + b.h / 2;
       const reach = this.reachOf(b.range, cx, cy, "ground");

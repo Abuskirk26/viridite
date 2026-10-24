@@ -328,7 +328,7 @@ function hintFor(sim: Sim, team: Team = 0): string {
   const done = (k: BuildingId) => sim.buildings.some((b) => b.team === team && b.kind === k && b.complete && b.hp > 0);
   if (!yard && mcv) return "Deploy the MCV a few tiles toward the center. The yard is your headquarters.";
   if (!yard) return "Yard lost. Train an MCV at the War Factory, then deploy it.";
-  if (!has("power")) return "Power Plant first. Low power stops supply income and shuts the base down.";
+  if (!has("power")) return "Power Plant first. Low power slows production and turret fire, and supply income stops.";
   if (!done("power")) return "Plant spinning up. Supply Centers wait on power.";
   if (!has("supply")) return "Build a Supply Center. It drips war material every second. Two of them win the opening.";
   if (!done("supply")) return "Supply Center rising. Hit Works to finish the opening faster.";
@@ -2943,7 +2943,7 @@ function ResourcePill({
   children: ReactNode;
   compact?: boolean;
   minW?: string;
-  bar?: { pct: number; hot: boolean };
+  bar?: { pct: number; hot: boolean; warn?: boolean };
 }) {
   return (
     <div
@@ -2958,7 +2958,7 @@ function ResourcePill({
       {bar ? (
         <div className="mt-0.5 h-0.5 w-full bg-well" aria-hidden>
           <div
-            className={`h-full ${bar.hot ? "bg-danger" : "bg-crystal"}`}
+            className={`h-full ${bar.hot ? "bg-danger" : bar.warn ? "bg-[#c9842a]" : "bg-crystal"}`}
             style={{ width: `${Math.max(0, Math.min(100, Math.round(bar.pct * 100)))}%` }}
           />
         </div>
@@ -2968,18 +2968,23 @@ function ResourcePill({
 }
 
 function PowerPill({ sim, team, compact = false }: { sim: Sim; team: number; compact?: boolean }) {
-  const p = sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0);
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const p = sim.powerOf(seat);
+  const factor = sim.powerFactor(seat);
+  const hot = factor < 0.67;
+  const warn = !hot && factor < 1;
   const pct = p.supply <= 0 ? 1 : Math.min(1, p.use / Math.max(1, p.supply));
+  const tone = hot ? "text-danger" : warn ? "text-[#c9842a]" : "text-crystal";
   return (
     <ResourcePill
       label="Power"
       value={`${p.supply}/${p.use}`}
-      tone={p.low ? "text-danger" : "text-crystal"}
+      tone={tone}
       compact={compact}
       minW={compact ? "6.5rem" : "7.25rem"}
-      bar={{ pct, hot: p.low }}
+      bar={{ pct, hot, warn }}
     >
-      <Zap className={`${compact ? "size-3" : "size-3.5"} ${p.low ? "text-danger" : "text-crystal"}`} />
+      <Zap className={`${compact ? "size-3" : "size-3.5"} ${tone}`} />
     </ResourcePill>
   );
 }

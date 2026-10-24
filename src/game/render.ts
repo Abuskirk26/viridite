@@ -1189,9 +1189,11 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
   for (const b of sim.buildings) {
     if (b.hp <= 0 || b.rubble > 0 || !sim.buildingVisible(VIEWER, b)) continue;
     const mine = sim.allied(b.team, VIEWER);
-    const low = sim.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
+    const plant = b.kind === "power" || b.kind === "advpower";
+    const pace = plant ? 1 : sim.powerFactor(b.team);
+    const low = pace < 1;
     const burned = b.complete && b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
-    const rate = (low ? 0.5 : 1) * burned;
+    const rate = Math.max(0.05, pace) * burned;
     let p = -1;
     let label = "";
     if (!b.complete) {

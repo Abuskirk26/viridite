@@ -1098,6 +1098,26 @@ test("supply centers drip credits and command points cap the army", () => {
   assert.ok(sim.worksCd[0]! > sim.worksLeft[0]!);
 });
 
+test("overdrawn power slows production and turret fire in proportion", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, cpu: [false, false, false, false] });
+  const yard = deployPlayer(sim);
+  const plant = stubBuilding(sim, { kind: "power", team: 0, tx: yard.tx + 4, ty: yard.ty, complete: true });
+  plant.powerOut = 100;
+  const barracks = stubBuilding(sim, { kind: "barracks", team: 0, tx: yard.tx, ty: yard.ty + 4, complete: true });
+  barracks.powerUse = 180;
+  const tower = stubBuilding(sim, { kind: "tower", team: 0, tx: yard.tx + 4, ty: yard.ty + 4, complete: true });
+  tower.powerUse = 0;
+  tower.cooldown = 2;
+  sim.time = DEPLOY_SECS;
+  assert.ok(Math.abs(sim.powerFactor(0) - 0.5) < 0.02, `factor ${sim.powerFactor(0)}`);
+  barracks.queue.push("rifle");
+  for (let i = 0; i < 10; i++) sim.tick(0.1);
+  assert.ok(barracks.prod > 0.35 && barracks.prod < 0.7, `train ${barracks.prod}`);
+  assert.ok(tower.cooldown > 1.3 && tower.cooldown < 1.7, `cooldown ${tower.cooldown}`);
+  barracks.powerUse = 0;
+  assert.equal(sim.powerFactor(0), 1);
+});
+
 test("repair spends credits and restores a damaged building", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false });
   const yard = deployPlayer(sim);
