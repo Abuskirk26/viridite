@@ -941,7 +941,7 @@ export function GameScreen() {
         wallRun = tiles.length ? sim.previewFence(me, kind, tiles) : null;
       }
       const alpha = pausedRef.current ? 1 : Math.max(0, Math.min(1, acc / 0.1));
-      const sheetKey = `b31:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
+      const sheetKey = `b32:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
       const had = sheetRef.current?.key === sheetKey;
       let pack = sheetRef.current;
       const big = Math.max(sim.gw, sim.gh);

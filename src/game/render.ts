@@ -1601,14 +1601,6 @@ function drawBush(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.fill();
 }
 
-function wetNeighbor(terrain: Uint8Array, x: number, y: number, dx: number, dy: number): boolean {
-  const nx = x + dx;
-  const ny = y + dy;
-  if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) return false;
-  const t = terrain[ny * GW + nx];
-  return t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD;
-}
-
 /** Satellite stays on the land. Water and ridges are painted on the same tiles the army uses. */
 function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
   const t = sim.terrain[y * sim.gw + x];
@@ -1629,27 +1621,12 @@ function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
       ctx.fillRect(x + 0.12, y + 0.35, 0.22, 0.08);
       ctx.fillRect(x + 0.55, y + 0.58, 0.28, 0.07);
     }
-    ctx.fillStyle = "rgba(236, 242, 236, 0.55)";
-    const bank = (nx: number, ny: number) => {
-      if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) return false;
-      const n = sim.terrain[ny * sim.gw + nx];
-      return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_BRIDGE;
-    };
-    if (bank(x, y - 1)) ctx.fillRect(x, y, 1, 0.16);
-    if (bank(x, y + 1)) ctx.fillRect(x, y + 0.84, 1, 0.16);
-    if (bank(x - 1, y)) ctx.fillRect(x, y, 0.16, 1);
-    if (bank(x + 1, y)) ctx.fillRect(x + 0.84, y, 0.16, 1);
     return;
   }
   if (t === TILE_ROCK || t === TILE_CLIFF) return;
   if (t === TILE_SHORE) {
-    ctx.fillStyle = "rgba(236, 228, 206, 0.28)";
+    ctx.fillStyle = "rgba(236, 228, 206, 0.22)";
     ctx.fillRect(x, y, 1, 1);
-    ctx.fillStyle = "rgba(244, 248, 244, 0.7)";
-    if (wetNeighbor(sim.terrain, x, y, 0, -1)) ctx.fillRect(x, y, 1, 0.2);
-    if (wetNeighbor(sim.terrain, x, y, 0, 1)) ctx.fillRect(x, y + 0.8, 1, 0.2);
-    if (wetNeighbor(sim.terrain, x, y, -1, 0)) ctx.fillRect(x, y, 0.2, 1);
-    if (wetNeighbor(sim.terrain, x, y, 1, 0)) ctx.fillRect(x + 0.8, y, 0.2, 1);
   }
 }
 
@@ -2040,15 +2017,15 @@ void main() {
   float light = 0.66 + 0.5 * ndotl + clamp((h - avg) * 0.7, -0.14, 0.16);
   vec3 col = albedo * light;
   col += vec3(0.16, 0.13, 0.1) * wet.x * ndotl * smoothstep(0.18, 0.72, slope);
-  float foam = smoothstep(0.02, 0.1, h) * (1.0 - smoothstep(0.16, 0.46, h));
-  foam *= wet.y + wet.z * 0.7;
-  foam *= 0.5 + 0.5 * n2(p * 2.4);
-  col = mix(col, vec3(0.95, 0.99, 0.98), clamp(foam * 1.2, 0.0, 1.0));
+  float foam = smoothstep(0.02, 0.16, h) * (1.0 - smoothstep(0.22, 0.7, h));
+  foam *= wet.y + wet.z * 0.55;
+  foam *= smoothstep(0.38, 0.72, n2(p * 1.15));
+  col = mix(col, vec3(0.86, 0.93, 0.92), clamp(foam * 0.42, 0.0, 0.35));
   float wetAmt = wet.y + wet.z;
   float dryEdge = dry.x + dry.y + dry.z + dry.w;
-  float coast = smoothstep(0.02, 0.28, wetAmt) * smoothstep(0.02, 0.34, dryEdge);
-  float lace = 0.28 + 0.72 * n2(vec2(p.x * 3.2 + n2(p * 0.7) * 2.4, p.y * 2.6));
-  col = mix(col, vec3(0.97, 0.99, 0.98), clamp(coast * lace * 1.15, 0.0, 1.0));
+  float coast = smoothstep(0.04, 0.4, wetAmt) * smoothstep(0.04, 0.46, dryEdge);
+  float lace = smoothstep(0.46, 0.82, n2(vec2(p.x * 0.85 + n2(p * 0.22) * 2.2, p.y * 0.7)));
+  col = mix(col, vec3(0.9, 0.96, 0.95), clamp(coast * lace * 0.4, 0.0, 0.32));
   float ford = mix(mix(nearId(i00, 12.0), nearId(i10, 12.0), k.x), mix(nearId(i01, 12.0), nearId(i11, 12.0), k.x), k.y);
   float ramp = mix(mix(nearId(i00, 15.0), nearId(i10, 15.0), k.x), mix(nearId(i01, 15.0), nearId(i11, 15.0), k.x), k.y);
   float high = mix(mix(nearId(i00, 21.0), nearId(i10, 21.0), k.x), mix(nearId(i01, 21.0), nearId(i11, 21.0), k.x), k.y);
@@ -2074,7 +2051,7 @@ void main() {
 }`;
 
 let terrainProg: { gl: WebGLRenderingContext; prog: WebGLProgram; buf: WebGLBuffer; id: number } | null = null;
-const SHADER_ID = 29;
+const SHADER_ID = 30;
 
 function terrainProgram(gl: WebGLRenderingContext) {
   if (terrainProg && terrainProg.gl === gl && terrainProg.id === SHADER_ID) return terrainProg;
@@ -2847,27 +2824,27 @@ function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
     const n = sim.terrain[ny * sim.gw + nx] ?? 0;
     return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_WRECK && n !== TILE_BRIDGE;
   };
-  const foam = THEATER === "snow" ? "rgba(244, 248, 252, 0.92)" : "rgba(246, 252, 248, 0.86)";
-  const wash = THEATER === "snow" ? "rgba(220, 232, 240, 0.45)" : "rgba(214, 232, 224, 0.4)";
-  const beads = (alongX: boolean, ox: number, oy: number) => {
-    ctx.fillStyle = wash;
-    if (alongX) ctx.fillRect(x, oy, 1, 0.12);
-    else ctx.fillRect(ox, y, 0.12, 1);
-    ctx.fillStyle = foam;
-    const n = 2 + ((hash(x + oy * 5, y + ox * 3) * 2) | 0);
-    for (let i = 0; i < n; i++) {
-      const h = hash(x * 3 + i * 5, y * 2 + i);
-      if (h < 0.18) continue;
+  const soft = THEATER === "snow" ? "rgba(226, 236, 242, 0.34)" : "rgba(214, 232, 226, 0.32)";
+  const body = THEATER === "snow" ? "rgba(244, 250, 252, 0.28)" : "rgba(236, 248, 244, 0.26)";
+  const wash = (alongX: boolean, edge: number) => {
+    for (let i = 0; i < 3; i++) {
+      const h1 = hash(x * 4 + i * 11, y * 3 + i + (alongX ? 1 : 5));
+      const h2 = hash(x + i * 5 + (alongX ? 2 : 8), y * 6 + 2);
+      if (h1 < 0.06) continue;
+      const along = (alongX ? x : y) + 0.05 + h1 * 0.9;
+      const perp = edge + (h2 - 0.42) * 0.36;
+      const wide = 0.26 + h1 * 0.38;
+      const thick = 0.09 + h2 * 0.16;
+      ctx.fillStyle = i === 1 ? body : soft;
       ctx.beginPath();
-      if (alongX) ctx.ellipse(x + 0.18 + h * 0.64, oy + 0.04, 0.11 + h * 0.08, 0.04, 0, 0, Math.PI * 2);
-      else ctx.ellipse(ox + 0.04, y + 0.18 + h * 0.64, 0.04, 0.11 + h * 0.08, 0, 0, Math.PI * 2);
+      ctx.ellipse(alongX ? along : perp, alongX ? perp : along, alongX ? wide : thick, alongX ? thick : wide, (h1 - 0.5) * 0.5, 0, Math.PI * 2);
       ctx.fill();
     }
   };
-  if (land(x, y - 1)) beads(true, x, y);
-  if (land(x, y + 1)) beads(true, x, y + 0.9);
-  if (land(x - 1, y)) beads(false, x, y);
-  if (land(x + 1, y)) beads(false, x + 0.9, y);
+  if (land(x, y - 1)) wash(true, y + 0.04);
+  if (land(x, y + 1)) wash(true, y + 0.96);
+  if (land(x - 1, y)) wash(false, x + 0.04);
+  if (land(x + 1, y)) wash(false, x + 0.96);
 }
 
 function paintBuilding(
