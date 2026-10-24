@@ -28,7 +28,9 @@ import {
   isFence,
   resolveBuilding,
   resolveUnit,
+  teamStyle,
   wideField,
+  type TeamShape,
   type BuildingId,
   type Team,
 } from "./data.ts";
@@ -774,7 +776,7 @@ export function drawGame(
     const b = sim.buildingById(ui.buildingId);
     if (b && b.hp > 0 && b.kind !== "span") {
       ctx.save();
-      ctx.strokeStyle = "#e7c56a";
+      ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 0.07;
       ctx.beginPath();
       ctx.ellipse(b.tx + b.w / 2, b.ty + b.h / 2, Math.max(0.55, b.w * 0.68), Math.max(0.4, b.h * 0.62), 0, 0, Math.PI * 2);
@@ -800,14 +802,12 @@ export function drawGame(
       ctx.restore();
     }
     if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
-      ctx.strokeStyle = "#f3ead7";
+      ctx.strokeStyle = seatPaint(sim, b.team);
       ctx.lineWidth = 0.06;
       ctx.beginPath();
       ctx.moveTo(b.tx + b.w / 2, b.ty + b.h / 2);
       ctx.lineTo(b.rallyX, b.rallyY);
       ctx.stroke();
-      ctx.fillStyle = "#f3ead7";
-      ctx.fillRect(b.rallyX - 0.15, b.rallyY - 0.15, 0.3, 0.3);
     }
   }
 
@@ -938,7 +938,7 @@ export function drawGame(
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
     if (damaged) {
       const pct = u.hp / u.maxHp;
-      bar(ctx, s.x, s.y - 18, pct, "troop", seatPaint(sim, u.team), selected ? `${Math.ceil(pct * 100)}%` : undefined);
+      bar(ctx, s.x, s.y - 18, pct, "troop", hpInk(pct), selected ? `${Math.ceil(pct * 100)}%` : undefined);
     }
     if (cargo) bar(ctx, s.x, s.y - (damaged ? 4 : 18), u.cargo / u.cargoMax, "troop", "#3dcc6e");
   }
@@ -952,7 +952,7 @@ export function drawGame(
     if (damaged || picked) {
       const pct = b.hp / b.maxHp;
       const tag = b.mending ? `Repair ${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}` : `${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}`;
-      bar(ctx, s.x, s.y - 16, pct, "hall", seatPaint(sim, b.team), tag);
+      bar(ctx, s.x, s.y - 16, pct, "hall", hpInk(pct), tag);
     }
     if (picked) {
       ctx.fillStyle = "#e7f6ea";
@@ -962,6 +962,8 @@ export function drawGame(
       ctx.fillText(b.name, s.x, s.y - 10);
     }
   }
+
+  paintSeatBadges(ctx, sim, cam, view, a, ui);
 
   const aimed = new Set<number>();
   for (const u of sim.units) {
@@ -1516,13 +1518,23 @@ function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "c
   ctx.fillText(mark, x, y - h * 0.45 + bob);
 }
 
+/** Health only. Teams never use these greens, yellows, or reds. */
+function hpInk(pct: number): string {
+  if (pct >= 0.6) return "#3dcc6e";
+  if (pct >= 0.3) return "#e6b325";
+  return "#e23b32";
+}
+
+const UNIT_BADGE_PX = 14;
+const HALL_BADGE_PX = 21;
+
 function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, size: "troop" | "hall" = "troop", fill?: string, label?: string) {
   const w = size === "hall" ? 44 : 28;
   const h = size === "hall" ? 6 : 5;
   const p = Math.max(0, Math.min(1, pct));
   ctx.fillStyle = "rgba(8, 6, 4, 0.9)";
   ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
-  ctx.fillStyle = fill ?? "#2F7DF6";
+  ctx.fillStyle = fill ?? hpInk(p);
   ctx.fillRect(x - w / 2, y, Math.max(2, w * p), h);
   if (!label) return;
   ctx.font = "bold 12px sans-serif";
@@ -2849,17 +2861,12 @@ function paintBuilding(
   return true;
 }
 
-function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color = "#fff6df", time = 0) {
-  const pulse = 0.22 + 0.08 * Math.sin(time * 4);
+function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, _color = "#ffffff", _time = 0) {
   ctx.save();
-  ctx.fillStyle = color;
-  ctx.globalAlpha = pulse;
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 0.05;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.02, r * 1.15, r * 0.46, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 0.8;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 0.045;
   ctx.stroke();
   ctx.restore();
 }
@@ -2873,8 +2880,8 @@ function drawStand(ctx: CanvasRenderingContext2D, x: number, y: number, radius: 
   ctx.beginPath();
   ctx.ellipse(x + 0.12, y + 0.1, rx, ry, 0.4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = shade(color, 1.2);
-  ctx.globalAlpha = 0.55;
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = 0.035;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.02, rx * 0.7, ry * 0.7, 0, 0, Math.PI * 2);
@@ -3216,9 +3223,216 @@ function unitPlate(kind: string): keyof IsoBank | null {
   return null;
 }
 
-const PLATE_SCRATCH_W = 128;
-const PLATE_SCRATCH_H = 300;
-let plateScratch: HTMLCanvasElement | null = null;
+const tintedRoofs = new WeakMap<CanvasImageSource, Map<string, HTMLCanvasElement>>();
+const roofAnchors = new WeakMap<CanvasImageSource, { nx: number; ny: number }>();
+const TINT_MAX_W = 320;
+
+function hexRgb(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function isRoofGray(r: number, g: number, b: number, a: number): boolean {
+  if (a < 48) return false;
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return lum >= 140 && Math.max(r, g, b) - Math.min(r, g, b) <= 50;
+}
+
+/** Light-gray roof and trim, tinted once per picture and seat color. */
+function tintedRoof(img: CanvasImageSource, color: string): CanvasImageSource {
+  if (typeof document === "undefined") return img;
+  let byColor = tintedRoofs.get(img);
+  if (!byColor) {
+    byColor = new Map();
+    tintedRoofs.set(img, byColor);
+  }
+  const cached = byColor.get(color);
+  if (cached) return cached;
+  const size = sourceSize(img);
+  const scale = Math.min(1, TINT_MAX_W / Math.max(1, size.w));
+  const cw = Math.max(1, Math.round(size.w * scale));
+  const ch = Math.max(1, Math.round(size.h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = cw;
+  canvas.height = ch;
+  const c = canvas.getContext("2d", { willReadFrequently: true });
+  if (!c) return img;
+  c.drawImage(img, 0, 0, cw, ch);
+  let data: ImageData;
+  try {
+    data = c.getImageData(0, 0, cw, ch);
+  } catch {
+    return img;
+  }
+  const px = data.data;
+  const [tr, tg, tb] = hexRgb(color);
+  let bestY = -1;
+  const grayAt: number[] = [];
+  for (let i = 0; i < px.length; i += 4) {
+    if (!isRoofGray(px[i]!, px[i + 1]!, px[i + 2]!, px[i + 3]!)) continue;
+    const p = i >> 2;
+    const py = (p / cw) | 0;
+    if (py > bestY) bestY = py;
+    grayAt.push(p);
+  }
+  if (!roofAnchors.has(img)) {
+    let sx = 0;
+    let sy = 0;
+    let sn = 0;
+    for (const p of grayAt) {
+      const py = (p / cw) | 0;
+      if (py < bestY - 2) continue;
+      sx += p % cw;
+      sy += py;
+      sn++;
+    }
+    roofAnchors.set(img, sn > 0 ? { nx: sx / sn / cw, ny: sy / sn / ch } : { nx: 0.68, ny: 0.48 });
+  }
+  for (const p of grayAt) {
+    const i = p << 2;
+    px[i] = px[i]! * 0.6 + tr * 0.4;
+    px[i + 1] = px[i + 1]! * 0.6 + tg * 0.4;
+    px[i + 2] = px[i + 2]! * 0.6 + tb * 0.4;
+  }
+  c.putImageData(data, 0, 0);
+  byColor.set(color, canvas);
+  return canvas;
+}
+
+/** Front eave of the light-gray roof, in picture space. Nearest the camera. */
+function roofFront(img: CanvasImageSource, color: string): { nx: number; ny: number } {
+  tintedRoof(img, color);
+  return roofAnchors.get(img) ?? { nx: 0.68, ny: 0.48 };
+}
+
+function hallBadgeWorld(b: Building, img: CanvasImageSource, color: string): { x: number; y: number } {
+  const { nx, ny } = roofFront(img, color);
+  const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+  const size = sourceSize(img);
+  const aspect = size.h / Math.max(1, size.w);
+  const imgH = wide * aspect;
+  const footX = b.tx + b.w / 2;
+  const footY = b.ty + b.h - 0.02;
+  return {
+    x: footX + (nx - 0.5) * wide,
+    y: footY + ((ny - 1) * imgH) / viewPitch(),
+  };
+}
+
+/** Push a screen badge below a health bar when the two would overlap. */
+function clearOfBar(x: number, y: number, r: number, barX: number, barY: number, barW: number, barH: number): number {
+  const left = barX - barW / 2 - 1;
+  const right = barX + barW / 2 + 1;
+  const top = barY - 1;
+  const bottom = barY + barH + 1;
+  const hit = x + r > left && x - r < right && y + r > top && y - r < bottom;
+  return hit ? bottom + r + 2 : y;
+}
+
+/** Filled seat shape. Outline stays 1–1.5 px. Size is in screen pixels. */
+export function paintTeamShape(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  shape: TeamShape,
+  line = 1.25,
+) {
+  const edge = Math.max(1, size / 2 - line / 2);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  if (shape === "circle") ctx.arc(0, 0, edge, 0, Math.PI * 2);
+  else if (shape === "square") ctx.rect(-edge, -edge, edge * 2, edge * 2);
+  else if (shape === "diamond") {
+    ctx.moveTo(0, -edge);
+    ctx.lineTo(edge, 0);
+    ctx.lineTo(0, edge);
+    ctx.lineTo(-edge, 0);
+    ctx.closePath();
+  } else {
+    ctx.moveTo(0, -edge);
+    ctx.lineTo(edge * 0.92, edge);
+    ctx.lineTo(-edge * 0.92, edge);
+    ctx.closePath();
+  }
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#14110e";
+  ctx.lineWidth = line;
+  ctx.lineJoin = "round";
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Screen-space seat marks. Constant size, above health bars, not a hit target. */
+function paintSeatBadges(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  cam: Camera,
+  view: View,
+  alpha: number,
+  ui: DrawUi,
+) {
+  const a = Math.max(0, Math.min(1, alpha));
+  const pad = HALL_BADGE_PX;
+  for (const u of sim.units) {
+    if (u.hp <= 0 || !sim.visibleUnit(VIEWER, u)) continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const o = airPictureOffset(u);
+    const s = worldToScreen(cam, x + o.x, y + o.y, view);
+    if (s.x < -pad || s.y < -pad || s.x > view.w + pad || s.y > view.h + pad) continue;
+    const style = teamStyle(u.team);
+    const barY = s.y - 18;
+    const badgeY = barY - 1 - 2 - UNIT_BADGE_PX / 2;
+    paintTeamShape(ctx, s.x, badgeY, UNIT_BADGE_PX, seatPaint(sim, u.team), style.shape);
+  }
+  for (const b of sim.buildings) {
+    if (b.hp <= 0 || b.rubble > 0 || isFence(b.kind) || b.kind === "span") continue;
+    if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
+    const plate = hallPlate(b.kind);
+    const img = plate ? iso()?.[plate] : undefined;
+    const color = seatPaint(sim, b.team);
+    const style = teamStyle(b.team);
+    let sx: number;
+    let sy: number;
+    if (img) {
+      const at = hallBadgeWorld(b, img, color);
+      const s = worldToScreen(cam, at.x, at.y, view);
+      sx = s.x;
+      sy = s.y - 4;
+    } else {
+      const corners: [number, number][] = [
+        [b.tx, b.ty],
+        [b.tx + b.w, b.ty],
+        [b.tx, b.ty + b.h],
+        [b.tx + b.w, b.ty + b.h],
+      ];
+      let near = worldToScreen(cam, corners[0]![0], corners[0]![1], view);
+      for (let i = 1; i < corners.length; i++) {
+        const s = worldToScreen(cam, corners[i]![0], corners[i]![1], view);
+        if (s.y > near.y) near = s;
+      }
+      const top = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
+      sx = near.x;
+      sy = near.y + (top.y - near.y) * 0.32;
+    }
+    const bar = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
+    sy = clearOfBar(sx, sy, HALL_BADGE_PX / 2, bar.x, bar.y - 16, 44, 6);
+    if (sx < -pad || sy < -pad || sx > view.w + pad || sy > view.h + pad) continue;
+    paintTeamShape(ctx, sx, sy, HALL_BADGE_PX, color, style.shape);
+  }
+  if (ui.buildingId) {
+    const b = sim.buildingById(ui.buildingId);
+    if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
+      const s = worldToScreen(cam, b.rallyX, b.rallyY, view);
+      const style = teamStyle(b.team);
+      paintTeamShape(ctx, s.x, s.y, UNIT_BADGE_PX, seatPaint(sim, b.team), style.shape);
+    }
+  }
+}
 
 function paintPlate(
   ctx: CanvasRenderingContext2D,
@@ -3229,11 +3443,12 @@ function paintPlate(
   flip: boolean,
   _outline = false,
   cast: "unit" | "hall" = "unit",
-  color = "#2F7DF6",
+  color = "#2EC4F0",
 ) {
   const plateSize = sourceSize(img);
   const aspect = plateSize.h / Math.max(1, plateSize.w);
   const h = w * aspect;
+  const picture = cast === "hall" ? tintedRoof(img, color) : img;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(flip ? -1 : 1, 1 / viewPitch());
@@ -3241,118 +3456,31 @@ function paintPlate(
   ctx.save();
   ctx.filter = "brightness(0)";
   ctx.globalAlpha = 0.45;
-  ctx.drawImage(img, -w / 2, -h + o, w, h);
+  ctx.drawImage(picture, -w / 2, -h + o, w, h);
   ctx.restore();
-  if (!paintTeamTrim(ctx, img, -w / 2, -h, w, h, color, cast)) {
-    ctx.drawImage(img, -w / 2, -h, w, h);
-  }
-  if (cast === "hall" || w > 0.75) paintFlag(ctx, w, h, color, cast);
+  ctx.drawImage(picture, -w / 2, -h, w, h);
   ctx.restore();
 }
 
-/** Neutral body, with team color on the helmet, turret, or roof only. */
-function paintTeamTrim(
-  ctx: CanvasRenderingContext2D,
-  img: CanvasImageSource,
-  dx: number,
-  dy: number,
-  dw: number,
-  dh: number,
-  ink: string,
-  cast: "unit" | "hall",
-): boolean {
-  if (typeof document === "undefined") return false;
-  if (!plateScratch) {
-    plateScratch = document.createElement("canvas");
-    plateScratch.width = PLATE_SCRATCH_W;
-    plateScratch.height = PLATE_SCRATCH_H;
-  }
-  const s = plateScratch.getContext("2d");
-  if (!s) return false;
-  const trimSize = sourceSize(img);
-  const aspect = trimSize.h / Math.max(1, trimSize.w);
-  const ph = Math.max(1, Math.min(PLATE_SCRATCH_H, Math.round(PLATE_SCRATCH_W * aspect)));
-  s.setTransform(1, 0, 0, 1, 0, 0);
-  s.globalCompositeOperation = "source-over";
-  s.globalAlpha = 1;
-  s.filter = "none";
-  s.clearRect(0, 0, PLATE_SCRATCH_W, ph);
-  s.drawImage(img, 0, 0, PLATE_SCRATCH_W, ph);
-  s.save();
-  s.globalCompositeOperation = "source-atop";
-  s.fillStyle = ink;
-  s.globalAlpha = cast === "hall" ? 0.62 : 0.8;
-  s.fillRect(0, 0, PLATE_SCRATCH_W, ph);
-  s.restore();
-  const band = cast === "hall" ? 0.42 : 0.36;
-  s.save();
-  s.beginPath();
-  s.rect(0, 0, PLATE_SCRATCH_W, ph * band);
-  s.clip();
-  s.globalCompositeOperation = "source-atop";
-  s.fillStyle = ink;
-  s.globalAlpha = 0.95;
-  s.fillRect(0, 0, PLATE_SCRATCH_W, ph * band);
-  s.restore();
-  s.globalCompositeOperation = "source-over";
-  s.globalAlpha = 1;
-  ctx.drawImage(plateScratch, 0, 0, PLATE_SCRATCH_W, ph, dx, dy, dw, dh);
-  return true;
-}
-
-/** Small flag so the side still reads when the trim band is in shadow. */
-function paintFlag(ctx: CanvasRenderingContext2D, w: number, h: number, ink: string, cast: "unit" | "hall") {
-  const fw = Math.max(0.08, w * (cast === "unit" ? 0.28 : 0.18));
-  const fh = Math.max(0.04, h * (cast === "unit" ? 0.08 : 0.055));
-  const x0 = w * (cast === "unit" ? 0.02 : 0.16);
-  const y0 = -h * (cast === "unit" ? 0.96 : 0.9);
-  const pole = Math.max(0.015, w * 0.035);
-  ctx.fillStyle = "#14110e";
-  ctx.fillRect(x0, y0, pole, h * (cast === "unit" ? 0.18 : 0.12));
-  ctx.fillStyle = ink;
-  ctx.fillRect(x0 + pole, y0, fw, fh);
-  ctx.strokeStyle = "#14110e";
-  ctx.lineWidth = Math.max(0.012, w * 0.02);
-  ctx.strokeRect(x0 + pole, y0, fw, fh);
-}
-
-/** Team ring under a troop. Selected troops get the gold ground hex. */
+/** Base ring under a troop, tinted 35% with the seat color. Selection is a white ring. */
 function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
-  const rx = Math.max(selected ? 0.46 : 0.34, wide * (selected ? 0.72 : 0.9));
-  const ry = Math.max(0.1, rx * 0.4);
+  const rx = Math.max(0.34, wide * 0.72);
+  const ry = Math.max(0.1, rx * 0.38);
   ctx.save();
-  if (!selected) {
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(0.04, wide * 0.07);
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-  ctx.translate(x, y + 0.03);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = Math.max(0.035, wide * 0.05);
   ctx.beginPath();
-  const reach = Math.max(0.5, rx);
-  for (let i = 0; i < 6; i++) {
-    const a = -Math.PI / 2 + (i * Math.PI) / 3;
-    const px = Math.cos(a) * reach;
-    const py = Math.sin(a) * reach * 0.42;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fillStyle = "rgba(242, 194, 48, 0.16)";
-  ctx.fill();
-  ctx.strokeStyle = "#f2c230";
-  ctx.globalAlpha = 1;
-  ctx.lineWidth = Math.max(0.045, wide * 0.06);
+  ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
   ctx.stroke();
+  if (selected) {
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(0.045, wide * 0.055);
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx + 0.08, ry + 0.04, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -3415,16 +3543,8 @@ function drawBuilding(
     }
     ctx.globalAlpha = 1;
     paintStructureHurt(ctx, b, footX, footY, wide, time);
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 0.16;
-    ctx.globalAlpha = 0.95;
-    ctx.strokeRect(b.tx + 0.05, b.ty + b.h - 0.28, Math.max(0.4, b.w - 0.1), 0.2);
-    ctx.fillStyle = color;
-    ctx.fillRect(b.tx + 0.08, b.ty + b.h - 0.24, Math.max(0.32, b.w - 0.16), 0.12);
-    ctx.restore();
     if (selected) {
-      ctx.strokeStyle = "#f4f7ea";
+      ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 0.05;
       ctx.beginPath();
       ctx.ellipse(footX, footY, Math.max(0.35, b.w * 0.42), Math.max(0.14, b.h * 0.16), 0, 0, Math.PI * 2);
@@ -3539,7 +3659,7 @@ function paintCollapse(ctx: CanvasRenderingContext2D, b: Building, x: number, y:
 
 function paintCaptureRing(ctx: CanvasRenderingContext2D, x: number, y: number, progress: number) {
   ctx.save();
-  ctx.strokeStyle = "#2F7DF6";
+  ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 0.06;
   ctx.beginPath();
   ctx.arc(x, y, 0.35, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
@@ -3592,7 +3712,7 @@ function airPictureOffset(u: Unit): { x: number; y: number } {
   return { x: -0.52 * lift, y: -0.7 * lift };
 }
 
-function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number, color = "#2F7DF6") {
+function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number, color = "#2EC4F0") {
   const lift = airLift(u);
   const span = unitWorldSpan(u.kind);
   const ox = x + 0.16 + 0.42 * lift;
@@ -3609,7 +3729,7 @@ function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: num
   ctx.ellipse(ox, oy, rx, ry, 0.18, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = 0.04;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.04, Math.max(0.28, span * 0.42), Math.max(0.1, span * 0.16), 0, 0, Math.PI * 2);
@@ -3647,7 +3767,6 @@ function drawUnit(
   // The battle camera stays close. A dot is only for a sprite that would
   // be smaller than a finger-tip, which this zoom range does not reach.
   if (wide * zoom < 8) {
-    paintSideIcon(ctx, x, y, wide, color);
     if (leaf) paintLeaf(ctx, x, y);
     return;
   }
@@ -3658,23 +3777,6 @@ function drawUnit(
   }
   paintSolidUnit(ctx, u, x, y, color, selected, time, aim, moving, THEATER === "snow", VIEWER);
   if (selected) paintUnitMark(ctx, x, y + 0.04, wide, color, true);
-}
-
-/** Far-zoom mark. Infantry stay a smaller dot than a tank. */
-function paintSideIcon(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string) {
-  const foot = wide < 0.55;
-  ctx.save();
-  ctx.fillStyle = "#100c08";
-  ctx.beginPath();
-  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.7, 0, Math.PI * 2);
-  else ctx.ellipse(x, y - wide * 0.2, wide * 0.42, wide * 0.24, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.5, 0, Math.PI * 2);
-  else ctx.ellipse(x, y - wide * 0.2, wide * 0.3, wide * 0.16, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
 }
 
 function paintLeaf(ctx: CanvasRenderingContext2D, x: number, y: number) {
@@ -4074,11 +4176,14 @@ function drawMinimap(
     const seat = seatAtCorner(sim, c.x, c.y);
     const cx = r.x + c.x * cell;
     const cy = r.y + c.y * cell;
-    ctx.fillStyle = seat >= 0 ? seatPaint(sim, seat) : "rgba(237,230,217,0.45)";
-    ctx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
-    ctx.strokeStyle = "#100e0c";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(cx - 2.5, cy - 2.5, 5, 5);
+    if (seat >= 0) paintTeamShape(ctx, cx, cy, 6, seatPaint(sim, seat), teamStyle(seat).shape, 1);
+    else {
+      ctx.fillStyle = "rgba(237,230,217,0.45)";
+      ctx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
+      ctx.strokeStyle = "#100e0c";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx - 2.5, cy - 2.5, 5, 5);
+    }
   }
   for (const u of sim.units) {
     if (!sim.minimapUnit(VIEWER, u)) continue;
@@ -4086,25 +4191,8 @@ function drawMinimap(
     const cy = r.y + u.y * cell;
     const foe = !sim.allied(u.team, VIEWER);
     const combat = foe && u.damage > 0 && u.kind !== "harvester";
-    ctx.fillStyle = seatPaint(sim, u.team);
-    if (u.loco === "air") {
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - (combat ? 3.4 : 2.6));
-      ctx.lineTo(cx + (combat ? 3 : 2.3), cy);
-      ctx.lineTo(cx, cy + (combat ? 3.4 : 2.6));
-      ctx.lineTo(cx - (combat ? 3 : 2.3), cy);
-      ctx.closePath();
-      ctx.fill();
-      continue;
-    }
-    if (combat) {
-      ctx.fillStyle = "#fff1e4";
-      ctx.fillRect(cx - 2.4, cy - 2.4, 4.8, 4.8);
-      ctx.fillStyle = seatPaint(sim, u.team);
-      ctx.fillRect(cx - 1.3, cy - 1.3, 2.6, 2.6);
-      continue;
-    }
-    ctx.fillRect(cx - 1, cy - 1, 2.2, 2.2);
+    const dot = combat ? 7 : 5;
+    paintTeamShape(ctx, cx, cy, dot, seatPaint(sim, u.team), teamStyle(u.team).shape, 1);
   }
   for (const c of sim.crates) {
     if (c.x < 0) continue;
@@ -4128,14 +4216,8 @@ function drawMinimap(
     if (!sim.buildingVisible(VIEWER, b)) continue;
     const cx = r.x + (b.tx + b.w / 2) * cell;
     const cy = r.y + (b.ty + b.h / 2) * cell;
-    ctx.fillStyle = "#e5483b";
-    ctx.beginPath();
-    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = "#fff";
+    paintTeamShape(ctx, cx, cy, 9, seatPaint(sim, b.team), teamStyle(b.team).shape, 1);
+    ctx.fillStyle = "#14110e";
     ctx.font = "8px sans-serif";
     ctx.textAlign = "center";
     ctx.fillText("B", cx, cy + 2);

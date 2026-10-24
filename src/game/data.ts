@@ -304,11 +304,24 @@ export const FACTION_COLOR: Record<FactionId, string> = {
   prism: "#12e6ff",
 };
 
-/** Battlefield sides. The local player is always blue. Not the faction chip colors. */
-export const SIDE_BLUE = "#2F7DF6";
-export const SIDE_RED = "#E5483B";
-export const SIDE_GREEN = "#3FBF5A";
-export const SIDE_YELLOW = "#F2C230";
+/**
+ * One seat style for the whole game. Red and green stay on health bars.
+ * Shape is the colorblind tell: circle, triangle, square, diamond.
+ */
+export type TeamShape = "circle" | "triangle" | "square" | "diamond";
+export type TeamStyle = { readonly seat: 1 | 2 | 3 | 4; readonly color: string; readonly shape: TeamShape };
+
+export const TEAM_STYLES: readonly TeamStyle[] = [
+  { seat: 1, color: "#2EC4F0", shape: "circle" },
+  { seat: 2, color: "#FF7A1A", shape: "triangle" },
+  { seat: 3, color: "#9B5CFF", shape: "square" },
+  { seat: 4, color: "#F2D02E", shape: "diamond" },
+];
+
+export function teamStyle(team: number): TeamStyle {
+  const i = ((team % TEAM_STYLES.length) + TEAM_STYLES.length) % TEAM_STYLES.length;
+  return TEAM_STYLES[i]!;
+}
 
 /** Olive plates in the unit art. Spin is how far a seat sits from that green. */
 const PLATE_HUE = 78;

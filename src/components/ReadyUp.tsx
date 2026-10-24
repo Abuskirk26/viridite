@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Dices, Swords } from "lucide-react";
-import { FACTION_COLOR, FACTION_NAME, MAP_H, MAP_W, theaterOf, type AiDifficulty, type FactionId, type MapId, type Theater } from "@/game/data";
+import { FACTION_COLOR, FACTION_NAME, MAP_H, MAP_W, teamStyle, theaterOf, type AiDifficulty, type FactionId, type MapId, type Theater } from "@/game/data";
 import { generateMap, MAP_LIST, plantCorners, waterKind } from "@/game/maps";
-import { paintDocThumb } from "@/game/render";
+import { paintDocThumb, paintTeamShape } from "@/game/render";
+import { TeamPip } from "@/components/TeamPip";
 import {
   CREDIT_CHOICES,
   DIFFICULTY_CHOICES,
@@ -138,7 +139,10 @@ export function ReadyUp({
 
       <div className="grid min-h-0 flex-1 grid-cols-2 gap-2 overflow-hidden px-2 py-1">
         <section data-testid="ready-seats" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
-          <p className="font-display text-xs uppercase tracking-wide text-muted">You</p>
+          <div className="flex items-center gap-2">
+            <TeamPip team={0} />
+            <p className="font-display text-xs uppercase tracking-wide text-muted">P1 · You</p>
+          </div>
           <FactionPick label="You" faction={setup.player} onPick={(id) => onChange({ player: id, ...normalBotDefaults() })} />
           <p className="truncate font-display text-xs uppercase tracking-wide text-gold">{mapName}</p>
           <div className="flex gap-1 overflow-x-auto">
@@ -184,6 +188,12 @@ export function ReadyUp({
           </div>
           {seats.slice(1).map((seat, index) => (
             <div key={seat.key} className="flex flex-col gap-1">
+              <div className="flex items-center gap-2">
+                <TeamPip team={index + 1} />
+                <p className="font-display text-[10px] uppercase tracking-wide text-muted">
+                  P{index + 2} · {seat.label}
+                </p>
+              </div>
               <FactionPick label={seat.label} faction={seat.faction} onPick={(id) => setBot(index as 0 | 1 | 2, id)} />
               <div className="flex gap-1">
                 {DIFFICULTY_CHOICES.map((id) => (
@@ -440,16 +450,19 @@ function seatMarks(setup: SkirmishSetup, corners: { x: number; y: number }[], cu
   const starts = customStarts
     ? customStarts.slice(0, seats)
     : orderCorners(corners, setup.start, seats, () => 0);
-  const factions: FactionId[] = [setup.player, setup.bots[0], setup.bots[1], setup.bots[2]];
   const coOp = setup.teams === "tvt";
   const labels = ["You", coOp ? "Enemy" : "Bot", coOp ? "Ally" : "Bot", "Bot"];
-  return starts.map((at, i) => ({
-    x: at.x,
-    y: at.y,
-    color: FACTION_COLOR[factions[i] ?? setup.enemy],
-    label: labels[i] ?? "Bot",
-    you: i === 0,
-  }));
+  return starts.map((at, i) => {
+    const style = teamStyle(i);
+    return {
+      x: at.x,
+      y: at.y,
+      color: style.color,
+      shape: style.shape,
+      label: labels[i] ?? "Bot",
+      you: i === 0,
+    };
+  });
 }
 
 /** Small field thumb, centered between the teams. */
@@ -470,15 +483,11 @@ function MapPreview({ setup, name }: { setup: SkirmishSetup; name: string }) {
       paintDocThumb(canvas, { ...thumb, starts: painted });
       const ctx = canvas.getContext("2d");
       if (ctx) {
-        const r = Math.max(1.6, thumb.w / 26);
+        const css = canvas.clientWidth || 64;
+        const size = (12 * canvas.width) / css;
+        const line = Math.max(1, (1.25 * canvas.width) / css);
         for (const mark of painted) {
-          ctx.beginPath();
-          ctx.arc(mark.x, mark.y, r, 0, Math.PI * 2);
-          ctx.fillStyle = mark.color;
-          ctx.fill();
-          ctx.lineWidth = mark.you ? 0.7 : 0.35;
-          ctx.strokeStyle = mark.you ? "#f4f0e6" : "#14110e";
-          ctx.stroke();
+          paintTeamShape(ctx, mark.x, mark.y, size, mark.color, mark.shape, line);
         }
       }
     }, 0);

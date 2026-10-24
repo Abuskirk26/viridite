@@ -51,10 +51,7 @@ import {
   normalizeSize,
   normalizeStart,
   normalizeTeams,
-  SIDE_BLUE,
-  SIDE_GREEN,
-  SIDE_RED,
-  SIDE_YELLOW,
+  teamStyle,
   otherFaction,
   resolveBuilding,
   resolveUnit,
@@ -926,23 +923,16 @@ export class Sim {
   }
 
   /**
-   * Battlefield paint. The local viewer is blue, an ally is green, the first
-   * enemy is red, and the next enemy is yellow. A fallen commander goes gray.
+   * Seat paint from TEAM_STYLES. Slot 0 is cyan, then orange, purple, yellow.
+   * A fallen commander goes gray. Red and green are health, never a team.
    */
-  seatColor(team: number, viewer = this.ear): string {
+  seatColor(team: number, _viewer = this.ear): string {
     if (this.eliminated[team]) return "#8d8478";
-    const who = team > 3 ? 3 : team;
-    if (who === viewer) return SIDE_BLUE;
-    if (this.allied(who, viewer)) return SIDE_GREEN;
-    const foes: number[] = [];
-    for (let t = 0; t < 4; t++) {
-      if (t === viewer || this.allied(t, viewer)) continue;
-      foes.push(t);
-    }
-    const i = foes.indexOf(who);
-    if (i <= 0) return SIDE_RED;
-    if (i === 1) return "#F27A30";
-    return SIDE_GREEN;
+    return teamStyle(team).color;
+  }
+
+  seatShape(team: number) {
+    return teamStyle(team).shape;
   }
 
   /** Same alliance. Free-for-all is never friendly across seats. One opponent matches the old 1v1. */

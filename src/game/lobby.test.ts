@@ -360,15 +360,19 @@ test("four factions keep their colors, rosters, and spare seats", () => {
   assert.equal(sim.factionOf(1), "syndicate");
   assert.equal(sim.factionOf(2), "steel");
   assert.equal(sim.factionOf(3), "prism");
-  assert.equal(sim.seatColor(0), "#2F7DF6");
-  assert.equal(sim.seatColor(1), "#E5483B");
-  assert.equal(sim.seatColor(2), "#F27A30");
-  assert.equal(sim.seatColor(3), "#3FBF5A");
+  assert.equal(sim.seatColor(0), "#2EC4F0");
+  assert.equal(sim.seatColor(1), "#FF7A1A");
+  assert.equal(sim.seatColor(2), "#9B5CFF");
+  assert.equal(sim.seatColor(3), "#F2D02E");
+  assert.equal(sim.seatShape(0), "circle");
+  assert.equal(sim.seatShape(1), "triangle");
+  assert.equal(sim.seatShape(2), "square");
+  assert.equal(sim.seatShape(3), "diamond");
   const teams = new Sim({ mapId: "basin", faction: "concord", enemy: "syndicate", opponents: 3, teams: "tvt", mode: "destroy", fog: false });
-  assert.equal(teams.seatColor(0), "#2F7DF6");
-  assert.equal(teams.seatColor(2), "#3FBF5A");
-  assert.equal(teams.seatColor(1), "#E5483B");
-  assert.equal(teams.seatColor(3), "#F27A30");
+  assert.equal(teams.seatColor(0), "#2EC4F0");
+  assert.equal(teams.seatColor(1), "#FF7A1A");
+  assert.equal(teams.seatColor(2), "#9B5CFF");
+  assert.equal(teams.seatColor(3), "#F2D02E");
 });
 
 test("loading viridite-skirmish-rules always starts every bot at Normal", () => {

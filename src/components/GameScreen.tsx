@@ -81,6 +81,7 @@ import { ensureIso, iso } from "@/game/iso";
 import { SheetBody, SheetHead } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
+import { TeamPip } from "@/components/TeamPip";
 import { SkirmishLobby } from "@/components/SkirmishLobby";
 import { doctrineOf, packById, type SheetTab } from "@/game/doctrine";
 import { MapEditor } from "@/components/MapEditor";
@@ -3906,7 +3907,7 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
             className={`mt-1 grid grid-cols-[1.5fr_0.7fr_0.8fr_0.8fr_0.55fr] items-center gap-x-1 border px-1 py-1.5 ${you ? "border-gold bg-field" : "border-brass-dim"}`}
           >
             <div className="flex min-w-0 items-center gap-1">
-              <span className="h-7 w-1 shrink-0" style={{ background: sim.seatColor(row.t) }} />
+              <TeamPip team={row.t} eliminated={!!sim.eliminated[row.t]} />
               {champ ? <Star className="size-3.5 shrink-0 text-gold" aria-label="Winner" /> : null}
               <span className="truncate font-display text-xs uppercase text-ink">{you ? "You" : (SEAT_NAME[row.t] ?? "Bot")}</span>
             </div>
