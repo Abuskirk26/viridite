@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { TILE_CLEAR, TILE_DEEP } from "./data.ts";
+import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import {
   clampCamera,
   hallDrawMul,
@@ -115,4 +117,29 @@ test("one scale table: infantry smaller than tanks, tanks smaller than halls, sa
   assert.ok(tankW > unitPictureWidth("rifle", 963 / 431) * 3, "a tank is much wider than a soldier");
   assert.ok(tankW < barracksW, "a tank is narrower than a barracks");
   assert.ok(tankH < barracksW * (911 / 770), "a tank is shorter than a barracks");
+});
+
+test("a terrain sheet has land or water, and a flat navy fill does not", () => {
+  const gw = 8;
+  const gh = 8;
+  const terrain = new Uint8Array(gw * gh);
+  for (let i = 0; i < terrain.length; i++) terrain[i] = i < 32 ? TILE_CLEAR : TILE_DEEP;
+  const w = 32;
+  const h = 32;
+  const pixels = new Uint8ClampedArray(w * h * 4);
+  writeTerrain(pixels, w, h, terrain, gw, gh, "temperate");
+  const rgb = new Uint8Array(w * h * 3);
+  for (let i = 0; i < w * h; i++) {
+    rgb[i * 3] = pixels[i * 4] ?? 0;
+    rgb[i * 3 + 1] = pixels[i * 4 + 1] ?? 0;
+    rgb[i * 3 + 2] = pixels[i * 4 + 2] ?? 0;
+  }
+  assert.equal(terrainFieldAlive(rgb), true);
+  const blank = new Uint8Array(24 * 24 * 3);
+  for (let i = 0; i < 24 * 24; i++) {
+    blank[i * 3] = 10;
+    blank[i * 3 + 1] = 26;
+    blank[i * 3 + 2] = 34;
+  }
+  assert.equal(terrainFieldAlive(blank), false);
 });

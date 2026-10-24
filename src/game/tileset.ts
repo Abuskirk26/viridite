@@ -495,6 +495,30 @@ function clampByte(n: number): number {
   return n < 0 ? 0 : n > 255 ? 255 : n | 0;
 }
 
+/**
+ * A real field has land or water and a spread of brightness.
+ * A lost WebGL sheet is one dark fill (navy or black) and fails this.
+ */
+export function terrainFieldAlive(rgb: ArrayLike<number>): boolean {
+  const n = Math.floor(rgb.length / 3);
+  if (n < 16) return false;
+  let minL = 255;
+  let maxL = 0;
+  let land = 0;
+  let water = 0;
+  for (let i = 0; i < n; i++) {
+    const r = rgb[i * 3] ?? 0;
+    const g = rgb[i * 3 + 1] ?? 0;
+    const b = rgb[i * 3 + 2] ?? 0;
+    const l = 0.3 * r + 0.5 * g + 0.2 * b;
+    if (l < minL) minL = l;
+    if (l > maxL) maxL = l;
+    if (g > r + 8 && g > 45) land++;
+    if (b > r + 10 && b > g && b > 40) water++;
+  }
+  return maxL - minL > 12 && (land > n * 0.05 || water > n * 0.05);
+}
+
 /** Height-shaded field. One surface, lit from the northwest. Used by the match bake. */
 export function writeTerrain(
   pixels: Uint8ClampedArray,

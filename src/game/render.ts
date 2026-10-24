@@ -41,7 +41,7 @@ import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, w
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
-import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, writeTerrain } from "./tileset.ts";
+import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, terrainFieldAlive, writeTerrain } from "./tileset.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
 export function frameScale(): number {
@@ -2224,6 +2224,31 @@ function bakeTerrainGl(
   return canvas;
 }
 
+/** Copy the GL bake into a 2D sheet. A blank buffer falls through to the CPU field. */
+function snapshotTerrain(src: HTMLCanvasElement): HTMLCanvasElement | null {
+  const probe = document.createElement("canvas");
+  probe.width = 24;
+  probe.height = 24;
+  const px = probe.getContext("2d", { willReadFrequently: true });
+  if (!px) return null;
+  px.drawImage(src, 0, 0, 24, 24);
+  const data = px.getImageData(0, 0, 24, 24).data;
+  const rgb = new Uint8Array(24 * 24 * 3);
+  for (let i = 0; i < 24 * 24; i++) {
+    rgb[i * 3] = data[i * 4] ?? 0;
+    rgb[i * 3 + 1] = data[i * 4 + 1] ?? 0;
+    rgb[i * 3 + 2] = data[i * 4 + 2] ?? 0;
+  }
+  if (!terrainFieldAlive(rgb)) return null;
+  const out = document.createElement("canvas");
+  out.width = src.width;
+  out.height = src.height;
+  const ctx = out.getContext("2d", { alpha: false });
+  if (!ctx) return null;
+  ctx.drawImage(src, 0, 0);
+  return out;
+}
+
 /** Paint the field once. The match draws a slice of this, not every tile, every tick. */
 export function bakeTerrain(
   terrain: Uint8Array,
@@ -2241,7 +2266,8 @@ export function bakeTerrain(
     if (matState !== "fail") return null;
   } else {
     const gpu = bakeTerrainGl(terrain, w, h, theater, width, height, mats);
-    if (gpu) return gpu;
+    const shot = gpu ? snapshotTerrain(gpu) : null;
+    if (shot) return shot;
   }
   const canvas = document.createElement("canvas");
   canvas.width = width;
