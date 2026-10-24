@@ -1641,23 +1641,7 @@ function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
     if (bank(x + 1, y)) ctx.fillRect(x + 0.84, y, 0.16, 1);
     return;
   }
-  if ((t === TILE_ROCK || t === TILE_CLIFF) && x > 0 && y > 0 && x < sim.gw - 1 && y < sim.gh - 1) {
-    ctx.fillStyle = "rgba(28, 32, 26, 0.62)";
-    ctx.fillRect(x, y, 1, 1);
-    ctx.fillStyle = "rgba(92, 96, 88, 0.55)";
-    ctx.beginPath();
-    ctx.moveTo(x + 0.08, y + 0.78);
-    ctx.lineTo(x + 0.38, y + 0.28);
-    ctx.lineTo(x + 0.62, y + 0.7);
-    ctx.fill();
-    ctx.fillStyle = "rgba(214, 210, 198, 0.7)";
-    ctx.beginPath();
-    ctx.moveTo(x + 0.38, y + 0.28);
-    ctx.lineTo(x + 0.5, y + 0.18);
-    ctx.lineTo(x + 0.58, y + 0.42);
-    ctx.fill();
-    return;
-  }
+  if (t === TILE_ROCK || t === TILE_CLIFF) return;
   if (t === TILE_SHORE) {
     ctx.fillStyle = "rgba(236, 228, 206, 0.28)";
     ctx.fillRect(x, y, 1, 1);
@@ -2525,61 +2509,106 @@ function volumeQuad(
   ctx.fill();
 }
 
-/** The ground leaves the picture here. A drop is a wall in the same height the buildings use. */
+function rockTone(n: number, snow: boolean): string {
+  if (snow) return n > 0.72 ? "#8ea0ac" : n > 0.4 ? "#667684" : "#3e4c58";
+  return n > 0.74 ? "#8d7c68" : n > 0.42 ? "#6b5c4c" : "#3c342c";
+}
+
+/** Jagged rock columns. The crest and the foot overlap the ground so the edge is not a box. */
+function paintRockFace(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  rise: number,
+  shear: number,
+  alongX: boolean,
+  snow: boolean,
+  seed: number,
+) {
+  const span = Math.max(0.2, alongX ? x1 - x0 : y1 - y0);
+  const cols = 4 + ((hash(seed, alongX ? 3 : 9) * 3) | 0);
+  const strata = snow ? "rgba(18, 26, 32, 0.3)" : "rgba(20, 14, 10, 0.34)";
+  for (let i = 0; i < cols; i++) {
+    const u0 = i / cols;
+    const u1 = Math.min(1, (i + 1) / cols + (hash(seed + i, 2) - 0.5) * 0.08);
+    const jag = (k: number) => (hash(seed + i * 5 + k, 6) - 0.5) * 0.22;
+    const top0 = (hash(seed + i, 11) - 0.42) * 0.2;
+    const top1 = (hash(seed + i + 1, 13) - 0.42) * 0.2;
+    const bot0 = hash(seed + i, 19) * 0.22;
+    const bot1 = hash(seed + i + 1, 23) * 0.22;
+    const n = hash(seed + i * 9, 29);
+    const color = rockTone(n, snow);
+    if (alongX) {
+      const ax0 = x0 + span * u0 + jag(1);
+      const ax1 = x0 + span * u1 + jag(2);
+      volumeQuad(ctx, ax0, y1 + bot0, ax1, y1 + bot1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
+      if (n > 0.48) {
+        const band = 0.28 + hash(seed + i, 31) * 0.4;
+        volumeQuad(
+          ctx,
+          ax0,
+          y1 - rise * band,
+          ax1,
+          y1 - rise * band,
+          ax1 + shear * (1 - band),
+          y1 - rise * (band + 0.1),
+          ax0 + shear * (1 - band),
+          y1 - rise * (band + 0.1),
+          strata,
+        );
+      }
+      if (hash(seed + i, 41) > 0.28) {
+        ctx.fillStyle = snow && hash(seed + i, 43) > 0.72 ? "rgba(236, 244, 248, 0.55)" : rockTone(0.8, snow);
+        ctx.beginPath();
+        ctx.ellipse(
+          ax0 + shear * 0.92,
+          y1 - rise + top0 * 0.4,
+          0.08 + hash(seed + i, 47) * 0.1,
+          0.045 + hash(seed + i, 53) * 0.04,
+          0.3,
+          0,
+          Math.PI * 2,
+        );
+        ctx.fill();
+      }
+    } else {
+      const ay0 = y0 + span * u0 + jag(1);
+      const ay1 = y0 + span * u1 + jag(2);
+      volumeQuad(ctx, x1, ay0 + bot0 * 0.3, x1, ay1 + bot1 * 0.3, x1 + shear, ay1 - rise + top1, x1 + shear, ay0 - rise + top0, color);
+    }
+  }
+  ctx.fillStyle = snow ? "rgba(16, 22, 26, 0.28)" : "rgba(10, 8, 6, 0.3)";
+  const pebbles = alongX ? 3 : 2;
+  for (let i = 0; i < pebbles; i++) {
+    const h = hash(seed + i * 3, 77);
+    ctx.beginPath();
+    if (alongX) ctx.ellipse(x0 + span * (0.12 + h * 0.76), y1 + 0.12 + h * 0.1, 0.16 + h * 0.22, 0.055, 0.15, 0, Math.PI * 2);
+    else ctx.ellipse(x1 + 0.12 + h * 0.1, y0 + span * (0.18 + h * 0.64), 0.07, 0.14 + h * 0.12, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+/** A drop is a rock face that meets the ground above and below. Ramps stay slopes. */
 function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
   const t = sim.terrain[y * sim.gw + x] ?? 0;
+  if (t === TILE_RAMP) return;
   const h = tileElev(t);
   const at = (nx: number, ny: number) => {
     if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) return h;
     return tileElev(sim.terrain[ny * sim.gw + nx] ?? 0);
   };
   const snow = THEATER === "snow";
-  const drop = (edge: number, draw: (rise: number, shear: number) => void) => {
-    const gap = h - edge;
-    if (gap < 0.16) return;
-    draw(gap * SOLID_LIFT, gap * SOLID_SHEAR);
-  };
-  drop(at(x, y + 1), (rise, shear) => {
-    if (rise < 0.22) return;
-    const yb = y + 1;
-    const wall = t === TILE_CLIFF ? (snow ? "#4a5e6c" : "#241c16") : t === TILE_ROCK ? (snow ? "#6a7c88" : "#3c342c") : snow ? "#8a98a2" : "#5c5348";
-    volumeQuad(ctx, x, yb, x + 1, yb, x + 1 + shear, yb - rise, x + shear, yb - rise, wall);
-    volumeQuad(
-      ctx,
-      x,
-      yb,
-      x + 1,
-      yb,
-      x + 1 + shear * 0.4,
-      yb - rise * 0.42,
-      x + shear * 0.4,
-      yb - rise * 0.42,
-      "rgba(8, 6, 4, 0.34)",
-    );
-    if (t === TILE_CLIFF || t === TILE_ROCK) {
-      volumeQuad(
-        ctx,
-        x - 0.02,
-        yb - rise,
-        x + 1.02,
-        yb - rise,
-        x + 1.02 + shear * 0.08,
-        yb - rise - 0.09,
-        x - 0.02 + shear * 0.08,
-        yb - rise - 0.09,
-        snow ? "#f4f8fb" : "rgba(244, 232, 206, 0.94)",
-      );
-    }
-  });
-  drop(at(x + 1, y), (rise, shear) => {
-    const xb = x + 1;
-    volumeQuad(ctx, xb, y, xb, y + 1, xb + shear, y + 1 - rise, xb + shear, y - rise, t === TILE_CLIFF ? "#1a1612" : "#2a241e");
-  });
-  if ((t === TILE_CLIFF || t === TILE_ROCK) && h - at(x, y + 1) > 0.4) {
-    ctx.fillStyle = "rgba(8, 10, 8, 0.4)";
-    ctx.beginPath();
-    ctx.ellipse(x + 0.62, y + 1.24, 0.9, 0.24, 0.12, 0, Math.PI * 2);
-    ctx.fill();
+  const south = h - at(x, y + 1);
+  if (south >= 0.2) {
+    const rise = south * SOLID_LIFT;
+    if (rise >= 0.2) paintRockFace(ctx, x, y, x + 1, y + 1, rise, south * SOLID_SHEAR, true, snow, x * 17 + y);
+  }
+  const east = h - at(x + 1, y);
+  if (east >= 0.28) {
+    const rise = east * SOLID_LIFT;
+    if (rise >= 0.24) paintRockFace(ctx, x, y, x + 1, y + 1, rise, east * SOLID_SHEAR * 0.85, false, snow, x * 13 + y * 3);
   }
 }
 
