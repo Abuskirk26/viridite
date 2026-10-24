@@ -197,7 +197,7 @@ export function paintPreview(
         ctx.fillRect(x * s, y * s, s, s);
       }
       if (map.crystal[i] > 0) {
-        ctx.fillStyle = "#3dcc6e";
+        ctx.fillStyle = "#d08a3a";
         ctx.fillRect(x * s, y * s, s, s);
       }
     }
@@ -214,12 +214,12 @@ let fogTmp: Float32Array | null = null;
 
 function fogAlpha(state: number): number {
   if (state === 2) return 0;
-  if (state === 1) return 58;
-  return 168;
+  if (state === 1) return 42;
+  return 112;
 }
 
 function sampleFog(fog: Uint8Array, wx: number, wy: number, gw: number, gh: number): number {
-  if (wx < 0 || wy < 0 || wx > gw - 1 || wy > gh - 1) return 196;
+  if (wx < 0 || wy < 0 || wx > gw - 1 || wy > gh - 1) return 132;
   const x0 = wx | 0;
   const y0 = wy | 0;
   const x1 = Math.min(gw - 1, x0 + 1);
@@ -257,7 +257,7 @@ function blurBox(src: Float32Array, dst: Float32Array, w: number, h: number, hor
 function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefined, cam: Camera, view: View, gw: number, gh: number) {
   if (!fog || fog.length < gw * gh || view.w < 8 || view.h < 8) return;
   const pitch = viewPitch();
-  const maxSide = 200;
+  const maxSide = 220;
   const aspect = view.w / view.h;
   const bw = Math.max(72, aspect >= 1 ? maxSide : Math.round(maxSide * aspect));
   const bh = Math.max(72, aspect >= 1 ? Math.round(maxSide / aspect) : maxSide);
@@ -283,10 +283,10 @@ function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefin
     }
   }
   if (peak < 1) return;
+  blurBox(src, tmp, bw, bh, true, 8);
+  blurBox(tmp, src, bw, bh, false, 8);
   blurBox(src, tmp, bw, bh, true, 5);
   blurBox(tmp, src, bw, bh, false, 5);
-  blurBox(src, tmp, bw, bh, true, 3);
-  blurBox(tmp, src, bw, bh, false, 3);
   if (!fogCanvas) fogCanvas = document.createElement("canvas");
   if (fogCanvas.width !== bw) fogCanvas.width = bw;
   if (fogCanvas.height !== bh) fogCanvas.height = bh;
@@ -297,10 +297,10 @@ function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefin
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     const a = src[i] ?? 0;
-    data[o] = 10;
-    data[o + 1] = 16;
-    data[o + 2] = 22;
-    data[o + 3] = a < 1 ? 0 : a > 210 ? 210 : a;
+    data[o] = 52;
+    data[o + 1] = 68;
+    data[o + 2] = 82;
+    data[o + 3] = a < 1 ? 0 : a > 150 ? 150 : a;
   }
   fx.putImageData(img, 0, 0);
   ctx.save();
@@ -1266,7 +1266,7 @@ function miniRgb(t: number, crystal: number, fog: number, x = 0, y = 0): [number
   if (t === TILE_ROCK || t === TILE_CLIFF) return [120, 108, 96];
   if (t === TILE_RAMP) return [168, 136, 88];
   if (t === TILE_HIGH) return THEATER === "snow" ? [214, 224, 232] : [150, 132, 96];
-  if (crystal > 0) return [61, 204, 110];
+  if (crystal > 0) return [208, 138, 58];
   if (t === TILE_SCRUB || t === TILE_STUMP) return seen ? [22, 82, 34] : [12, 40, 18];
   if (t === TILE_ROUGH || t === TILE_VALLEY) return seen ? [62, 92, 48] : [28, 46, 24];
   if (THEATER === "snow") return [228, 236, 244];
@@ -1689,22 +1689,22 @@ function paintFieldProps(
   const shell = isShell(t);
   const raised = t === TILE_CLIFF || t === TILE_ROCK || t === TILE_RAMP || t === TILE_HIGH;
   if (!wet && !tree && !shell && !raised && t !== TILE_ROAD && t !== TILE_BRIDGE && ore <= 0 && t !== TILE_SPENT && mark <= 0) return "";
-  if (wet && !baked) {
-    paintWaterSheen(ctx, t, x, y, sim.time);
+  if (wet) {
+    if (!baked) paintWaterSheen(ctx, t, x, y, sim.time);
     paintShoreLip(ctx, sim, x, y);
   }
   if (t === TILE_ROAD) return "";
   if (t === TILE_BRIDGE) return "";
   if (mark > 0 && !shell) paintCrater(ctx, x, y, mark);
   if (tree) {
-    const lonely =
-      !scrubAt(sim, x - 1, y) && !scrubAt(sim, x + 1, y) && !scrubAt(sim, x, y - 1) && !scrubAt(sim, x, y + 1);
-    const rep = ((x ^ y) & 1) === 0;
-    if (treeBudget && (lonely || rep)) {
-      if (!paintGrove(ctx, x, y, t === TILE_STUMP)) paintTree(ctx, x, y, t === TILE_STUMP);
-      if (raised) paintVolume(ctx, sim, x, y);
-      return "tree";
-    }
+    // Every scrub tile blocks movement, so every scrub tile draws a tree.
+    // The grove sprite is the expensive one; past the budget a flat canopy still marks the block.
+    ctx.save();
+    ctx.translate((hash(x + 2, y) - 0.5) * 0.22, (hash(x, y + 5) - 0.5) * 0.1);
+    if (!(treeBudget && paintGrove(ctx, x, y, t === TILE_STUMP))) paintTree(ctx, x, y, t === TILE_STUMP);
+    ctx.restore();
+    if (raised) paintVolume(ctx, sim, x, y);
+    return "tree";
   }
   if (raised) paintVolume(ctx, sim, x, y);
   if (shell && shellBudget) {
@@ -1713,11 +1713,6 @@ function paintFieldProps(
   }
   if (ore > 0 || t === TILE_SPENT) paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i));
   return "";
-}
-
-function scrubAt(sim: Sim, x: number, y: number): boolean {
-  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return false;
-  return (sim.terrain[y * sim.gw + x] ?? 0) === TILE_SCRUB;
 }
 
 function paintFieldProp(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "wreck" | "fence" | "crate", time: number) {
@@ -1955,6 +1950,15 @@ vec3 wetOf(float id) {
   if (abs(id - 8.0) < 0.45) return vec3(0.0, 0.12, 0.0);
   return vec3(0.0);
 }
+float nearId(float id, float want) {
+  return 1.0 - step(0.45, abs(id - want));
+}
+float walkOf(float id) {
+  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45) return 1.0;
+  if (abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45) return 1.0;
+  if (abs(id - 15.0) < 0.45 || abs(id - 21.0) < 0.45) return 1.0;
+  return 0.0;
+}
 float beachId(float id) {
   if (abs(id - 5.0) < 0.45 || abs(id - 6.0) < 0.45 || abs(id - 8.0) < 0.45) return 1.0;
   if (abs(id - 12.0) < 0.45 || abs(id - 20.0) < 0.45 || abs(id - 9.0) < 0.45) return 1.0;
@@ -2020,7 +2024,8 @@ void main() {
   vec3 grass = matTex(0.0, p);
   grass = vec3(grass.r * 0.92, grass.g * 1.08, grass.b * 0.75);
   float tuft = n2(p * 0.33);
-  grass = mix(grass, grass * vec3(0.94, 1.05, 0.9), tuft * 0.22);
+  grass = mix(grass, grass * vec3(0.82, 1.1, 0.78), tuft * 0.38);
+  grass = mix(grass, grass * vec3(1.06, 0.92, 0.84), n2(p * 0.11 + vec2(2.0, 8.0)) * 0.28);
   vec3 dirt = matTex(1.0, p);
   vec3 sand = matTex(2.0, p);
   vec3 snow = matTex(3.0, p);
@@ -2054,27 +2059,24 @@ void main() {
   float foam = smoothstep(0.02, 0.1, h) * (1.0 - smoothstep(0.16, 0.46, h));
   foam *= wet.y + wet.z * 0.7;
   foam *= 0.5 + 0.5 * n2(p * 2.4);
-  col = mix(col, vec3(0.94, 0.98, 0.97), foam * 0.88);
+  col = mix(col, vec3(0.95, 0.99, 0.98), clamp(foam * 1.2, 0.0, 1.0));
   float wetAmt = wet.y + wet.z;
   float dryEdge = dry.x + dry.y + dry.z + dry.w;
-  float coast = smoothstep(0.02, 0.38, wetAmt) * smoothstep(0.02, 0.46, dryEdge);
-  float lace = 0.32 + 0.68 * n2(vec2(p.x * 3.2 + n2(p * 0.7) * 2.4, p.y * 2.6));
-  col = mix(col, vec3(0.96, 0.99, 0.97), coast * lace * 0.92);
-  float id = idOf(floor(world));
-  vec2 fr = fract(world);
-  if (abs(id - 12.0) < 0.45) {
-    col = mix(col, vec3(0.78, 0.70, 0.46), smoothstep(0.12, 0.28, fr.y) * (1.0 - smoothstep(0.72, 0.88, fr.y)) * 0.7);
-  } else if (abs(id - 15.0) < 0.45) {
-    col = mix(col, vec3(0.62, 0.50, 0.32), 0.2);
-  } else if (abs(id - 21.0) < 0.45) {
-    col = mix(col, vec3(0.9, 0.93, 0.96), 0.22);
-    col *= 1.06;
-  } else if (abs(id - 3.0) < 0.45 || abs(id - 16.0) < 0.45) {
-    col = mix(col, vec3(0.22, 0.42, 0.16), 0.16);
-  }
-  float walk = 0.0;
-  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45 || abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45 || abs(id - 15.0) < 0.45 || abs(id - 21.0) < 0.45) walk = 1.0;
-  col += vec3(0.04, 0.05, 0.012) * walk;
+  float coast = smoothstep(0.02, 0.28, wetAmt) * smoothstep(0.02, 0.34, dryEdge);
+  float lace = 0.28 + 0.72 * n2(vec2(p.x * 3.2 + n2(p * 0.7) * 2.4, p.y * 2.6));
+  col = mix(col, vec3(0.97, 0.99, 0.98), clamp(coast * lace * 1.15, 0.0, 1.0));
+  float ford = mix(mix(nearId(i00, 12.0), nearId(i10, 12.0), k.x), mix(nearId(i01, 12.0), nearId(i11, 12.0), k.x), k.y);
+  float ramp = mix(mix(nearId(i00, 15.0), nearId(i10, 15.0), k.x), mix(nearId(i01, 15.0), nearId(i11, 15.0), k.x), k.y);
+  float high = mix(mix(nearId(i00, 21.0), nearId(i10, 21.0), k.x), mix(nearId(i01, 21.0), nearId(i11, 21.0), k.x), k.y);
+  float scrub = mix(mix(nearId(i00, 3.0) + nearId(i00, 16.0), nearId(i10, 3.0) + nearId(i10, 16.0), k.x), mix(nearId(i01, 3.0) + nearId(i01, 16.0), nearId(i11, 3.0) + nearId(i11, 16.0), k.x), k.y);
+  vec2 fr = fract(p);
+  col = mix(col, vec3(0.78, 0.70, 0.46), ford * smoothstep(0.12, 0.28, fr.y) * (1.0 - smoothstep(0.72, 0.88, fr.y)) * 0.7);
+  col = mix(col, vec3(0.62, 0.50, 0.32), ramp * 0.2);
+  col = mix(col, vec3(0.9, 0.93, 0.96), high * 0.22);
+  col *= mix(1.0, 1.06, high);
+  col = mix(col, vec3(0.18, 0.36, 0.14), clamp(scrub, 0.0, 1.0) * 0.14);
+  float walk = mix(mix(walkOf(i00), walkOf(i10), k.x), mix(walkOf(i01), walkOf(i11), k.x), k.y);
+  col += vec3(0.035, 0.045, 0.01) * walk;
   float hCast = hAt(p - vec2(1.35, 1.7));
   float dropSh = smoothstep(0.18, 0.85, hCast - h);
   dropSh *= 1.0 - clamp(wet.y + wet.z, 0.0, 1.0);
@@ -2088,7 +2090,7 @@ void main() {
 }`;
 
 let terrainProg: { gl: WebGLRenderingContext; prog: WebGLProgram; buf: WebGLBuffer; id: number } | null = null;
-const SHADER_ID = 28;
+const SHADER_ID = 29;
 
 function terrainProgram(gl: WebGLRenderingContext) {
   if (terrainProg && terrainProg.gl === gl && terrainProg.id === SHADER_ID) return terrainProg;
@@ -2288,7 +2290,7 @@ function gradeTile(ctx: CanvasRenderingContext2D, x: number, y: number, t: numbe
   else if (t === TILE_SHALLOW || t === TILE_FORD) color = "#3aa0a4";
   else if (t === TILE_SHORE) color = "#e4c99a";
   else if (t === TILE_ROCK || t === TILE_CLIFF) color = "#7a7368";
-  else if (t === TILE_CRYSTAL) color = "#3dcc6e";
+  else if (t === TILE_CRYSTAL) color = "#d08a3a";
   else if (THEATER === "snow") color = "#e4eef4";
   else if (THEATER === "temperate" || t === TILE_SCRUB) color = "#3f8a38";
   ctx.save();
@@ -2540,20 +2542,43 @@ function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: numb
   drop(at(x, y + 1), (rise, shear) => {
     if (rise < 0.22) return;
     const yb = y + 1;
-    const wall = t === TILE_CLIFF ? (snow ? "#6a7c88" : "#3a342c") : t === TILE_ROCK ? (snow ? "#7d8d98" : "#4a433c") : snow ? "#9aa8b0" : "#6a6258";
+    const wall = t === TILE_CLIFF ? (snow ? "#4a5e6c" : "#241c16") : t === TILE_ROCK ? (snow ? "#6a7c88" : "#3c342c") : snow ? "#8a98a2" : "#5c5348";
     volumeQuad(ctx, x, yb, x + 1, yb, x + 1 + shear, yb - rise, x + shear, yb - rise, wall);
+    volumeQuad(
+      ctx,
+      x,
+      yb,
+      x + 1,
+      yb,
+      x + 1 + shear * 0.4,
+      yb - rise * 0.42,
+      x + shear * 0.4,
+      yb - rise * 0.42,
+      "rgba(8, 6, 4, 0.34)",
+    );
     if (t === TILE_CLIFF || t === TILE_ROCK) {
-      volumeQuad(ctx, x, yb - rise, x + 1, yb - rise, x + 1 + shear * 0.15, yb - rise - 0.04, x + shear * 0.15, yb - rise - 0.04, snow ? "#f4f7fa" : "rgba(236,226,206,0.45)");
+      volumeQuad(
+        ctx,
+        x - 0.02,
+        yb - rise,
+        x + 1.02,
+        yb - rise,
+        x + 1.02 + shear * 0.08,
+        yb - rise - 0.09,
+        x - 0.02 + shear * 0.08,
+        yb - rise - 0.09,
+        snow ? "#f4f8fb" : "rgba(244, 232, 206, 0.94)",
+      );
     }
   });
   drop(at(x + 1, y), (rise, shear) => {
     const xb = x + 1;
-    volumeQuad(ctx, xb, y, xb, y + 1, xb + shear, y + 1 - rise, xb + shear, y - rise, t === TILE_CLIFF ? "#241e1a" : "#2e2924");
+    volumeQuad(ctx, xb, y, xb, y + 1, xb + shear, y + 1 - rise, xb + shear, y - rise, t === TILE_CLIFF ? "#1a1612" : "#2a241e");
   });
-  if (t === TILE_CLIFF && h - at(x, y + 1) > 0.4) {
-    ctx.fillStyle = "rgba(10, 12, 10, 0.28)";
+  if ((t === TILE_CLIFF || t === TILE_ROCK) && h - at(x, y + 1) > 0.4) {
+    ctx.fillStyle = "rgba(8, 10, 8, 0.4)";
     ctx.beginPath();
-    ctx.ellipse(x + 0.7, y + 1.28, 0.72, 0.2, 0.15, 0, Math.PI * 2);
+    ctx.ellipse(x + 0.62, y + 1.24, 0.9, 0.24, 0.12, 0, Math.PI * 2);
     ctx.fill();
   }
 }
@@ -2793,11 +2818,27 @@ function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
     const n = sim.terrain[ny * sim.gw + nx] ?? 0;
     return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_WRECK && n !== TILE_BRIDGE;
   };
-  ctx.fillStyle = THEATER === "snow" ? "rgba(236, 244, 248, 0.72)" : "rgba(232, 244, 236, 0.55)";
-  if (land(x, y - 1)) ctx.fillRect(x, y, 1, 0.07);
-  if (land(x, y + 1)) ctx.fillRect(x, y + 0.93, 1, 0.07);
-  if (land(x - 1, y)) ctx.fillRect(x, y, 0.07, 1);
-  if (land(x + 1, y)) ctx.fillRect(x + 0.93, y, 0.07, 1);
+  const foam = THEATER === "snow" ? "rgba(244, 248, 252, 0.92)" : "rgba(246, 252, 248, 0.86)";
+  const wash = THEATER === "snow" ? "rgba(220, 232, 240, 0.45)" : "rgba(214, 232, 224, 0.4)";
+  const beads = (alongX: boolean, ox: number, oy: number) => {
+    ctx.fillStyle = wash;
+    if (alongX) ctx.fillRect(x, oy, 1, 0.12);
+    else ctx.fillRect(ox, y, 0.12, 1);
+    ctx.fillStyle = foam;
+    const n = 2 + ((hash(x + oy * 5, y + ox * 3) * 2) | 0);
+    for (let i = 0; i < n; i++) {
+      const h = hash(x * 3 + i * 5, y * 2 + i);
+      if (h < 0.18) continue;
+      ctx.beginPath();
+      if (alongX) ctx.ellipse(x + 0.18 + h * 0.64, oy + 0.04, 0.11 + h * 0.08, 0.04, 0, 0, Math.PI * 2);
+      else ctx.ellipse(ox + 0.04, y + 0.18 + h * 0.64, 0.04, 0.11 + h * 0.08, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+  if (land(x, y - 1)) beads(true, x, y);
+  if (land(x, y + 1)) beads(true, x, y + 0.9);
+  if (land(x - 1, y)) beads(false, x, y);
+  if (land(x + 1, y)) beads(false, x + 0.9, y);
 }
 
 function paintBuilding(
@@ -4129,7 +4170,7 @@ function drawMinimap(
       for (let x = 0; x < sim.gw; x++) {
         const i = y * sim.gw + x;
         if ((fog[i] ?? 0) === 0 || (sim.crystal[i] ?? 0) <= 0) continue;
-        ctx.fillStyle = "#3dcc6e";
+        ctx.fillStyle = "#d08a3a";
         ctx.fillRect(r.x + x * cell, r.y + y * cell, Math.max(1.5, cell), Math.max(1.5, cell));
       }
     }
@@ -4156,7 +4197,7 @@ function drawMinimap(
           ctx.fillStyle = miniTone(t, (fog[i] ?? 0) === 2 ? sim.crystal[i] : 0, 2);
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
         } else if (seen && sim.crystal[i] > 0) {
-          ctx.fillStyle = "#3dcc6e";
+          ctx.fillStyle = "#d08a3a";
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
         } else if (seen && t === TILE_ROCK) {
           ctx.fillStyle = "rgba(20,16,12,0.75)";

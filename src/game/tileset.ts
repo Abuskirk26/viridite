@@ -813,29 +813,38 @@ export function paintOre(
     return;
   }
   const fill = Math.max(0.18, Math.min(1, amount / 1400));
-  const n = 2 + ((hash(x + 3, y + 1) * 3) | 0);
+  ctx.fillStyle = "rgba(62, 32, 12, 0.34)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.5, y + 0.62, 0.32 + fill * 0.08, 0.14, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const n = 3 + ((hash(x + 3, y + 1) * 3) | 0);
   const bob = Math.sin(time * 2 + x + y) * 0.015;
+  const body = fill > 0.65 ? "#d08a3a" : fill > 0.35 ? "#a85a22" : "#6e3a16";
   for (let i = 0; i < n; i++) {
     const hx = hash(x * 5 + i * 13, y * 3 + 4);
     const hy = hash(x + i * 7, y * 9 + 2);
-    if (hx < 0.18) continue;
-    const px = x + 0.18 + hx * 0.64;
-    const py = y + 0.22 + hy * 0.52 + bob;
-    const s = (0.07 + fill * 0.13) * (0.65 + hy * 0.7);
+    if (hx < 0.12) continue;
+    const px = x + 0.16 + hx * 0.68;
+    const py = y + 0.2 + hy * 0.5 + bob;
+    const s = (0.09 + fill * 0.16) * (0.7 + hy * 0.65);
     const rot = hash(x + i, y + 11) * Math.PI;
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(rot);
-    ctx.fillStyle = fill > 0.7 ? "#b7f0c4" : fill > 0.4 ? "#2f9a52" : "#1c6b38";
     ctx.beginPath();
-    ctx.moveTo(0, -s * 1.35);
-    ctx.lineTo(s * 0.42, -s * 0.15);
-    ctx.lineTo(s * 0.22, s);
-    ctx.lineTo(-s * 0.38, s * 0.45);
+    ctx.moveTo(0, -s * 1.45);
+    ctx.lineTo(s * 0.46, -s * 0.12);
+    ctx.lineTo(s * 0.2, s * 1.05);
+    ctx.lineTo(-s * 0.42, s * 0.48);
     ctx.closePath();
+    ctx.fillStyle = body;
+    ctx.strokeStyle = "#1a1510";
+    ctx.lineWidth = 0.045;
+    ctx.lineJoin = "round";
     ctx.fill();
-    ctx.fillStyle = "rgba(230, 255, 236, 0.55)";
-    ctx.fillRect(-s * 0.08, -s * 0.7, s * 0.12, s * 0.28);
+    ctx.stroke();
+    ctx.fillStyle = "#f6e2b4";
+    ctx.fillRect(-s * 0.08, -s * 0.85, s * 0.14, s * 0.32);
     ctx.restore();
   }
   if (spark) {

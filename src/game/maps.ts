@@ -1209,7 +1209,7 @@ function nearSegment(x: number, y: number, x0: number, y0: number, x1: number, y
   return (x - px) * (x - px) + (y - py) * (y - py) < r * r;
 }
 
-/** A few mirrored rocks that do not sit on a camp, a bridge, or the road into the middle. */
+/** Mirrored boulder clusters along cliff feet and a few off the lane. Camps and the road in stay open. */
 function seedFairRocks(
   terrain: Uint8Array,
   crystal: Uint16Array,
@@ -1220,32 +1220,85 @@ function seedFairRocks(
 ) {
   const cx = gw / 2;
   const cy = gh / 2;
-  const place = (x: number, y: number) => {
-    if (x < 3 || y < 3 || x >= gw - 3 || y >= gh - 3) return;
-    if (nearPad(pads, x, y, 9)) return;
+  const ortho = [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const;
+  const openGround = (t: number) => t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH;
+  const hostile = (n: number) =>
+    n === TILE_BRIDGE ||
+    n === TILE_DEEP ||
+    n === TILE_SHALLOW ||
+    n === TILE_FORD ||
+    n === TILE_RAMP ||
+    n === TILE_ROAD ||
+    n === TILE_WRECK;
+  const onLane = (x: number, y: number) => {
     for (const p of pads) {
-      if (nearSegment(x + 0.5, y + 0.5, p.x, p.y, cx, cy, 2.2)) return;
+      if (nearSegment(x + 0.5, y + 0.5, p.x, p.y, cx, cy, 2.8)) return true;
     }
-    const i = y * gw + x;
-    if ((crystal[i] ?? 0) > 0) return;
-    const t = terrain[i] ?? 0;
-    if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH) return;
-    for (const [dx, dy] of [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ] as const) {
-      const n = terrain[(y + dy) * gw + (x + dx)] ?? 0;
-      if (n === TILE_BRIDGE || n === TILE_DEEP || n === TILE_SHALLOW || n === TILE_FORD || n === TILE_CLIFF) return;
-    }
-    terrain[i] = TILE_ROCK;
+    return false;
   };
-  for (let n = 0; n < 3; n++) {
-    const x = 6 + ((dressHash(n, 4, salt) * (gw * 0.3)) | 0);
-    const y = 6 + ((dressHash(7, n, salt) * (gh - 14)) | 0);
+  const canRock = (x: number, y: number) => {
+    if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) return false;
+    if (nearPad(pads, x, y, 9) || onLane(x, y)) return false;
+    const i = y * gw + x;
+    if ((crystal[i] ?? 0) > 0) return false;
+    if (!openGround(terrain[i] ?? 0)) return false;
+    let open = 0;
+    for (const [dx, dy] of ortho) {
+      const n = terrain[(y + dy) * gw + (x + dx)] ?? 0;
+      if (hostile(n)) return false;
+      if (openGround(n) || n === TILE_SHORE || n === TILE_HIGH || n === TILE_SCRUB || n === TILE_ROCK) open++;
+    }
+    return open >= 2;
+  };
+  const cliffFoot = (x: number, y: number) => {
+    for (const [dx, dy] of ortho) {
+      const n = terrain[(y + dy) * gw + (x + dx)] ?? 0;
+      if (n === TILE_CLIFF || n === TILE_HIGH) return true;
+    }
+    return false;
+  };
+  const place = (x: number, y: number) => {
+    if (!canRock(x, y)) return false;
+    terrain[y * gw + x] = TILE_ROCK;
+    return true;
+  };
+  const used: { x: number; y: number }[] = [];
+  const spaced = (x: number, y: number) => used.every((s) => (s.x - x) * (s.x - x) + (s.y - y) * (s.y - y) >= 36);
+  const mirror = (x: number, y: number) => {
     place(x, y);
     place(gw - 1 - x, gh - 1 - y);
+    used.push({ x, y }, { x: gw - 1 - x, y: gh - 1 - y });
+  };
+  for (let y = 3; y < gh - 3 && used.length < 16; y++) {
+    for (let x = 3; x < gw - 3 && used.length < 16; x++) {
+      if (!cliffFoot(x, y) || !canRock(x, y) || !spaced(x, y)) continue;
+      if (dressHash(x, y, salt) > 0.4) continue;
+      mirror(x, y);
+      for (const [dx, dy] of ortho) {
+        if (!cliffFoot(x + dx, y + dy)) continue;
+        if (dressHash(x + dx, y + dy, salt + 3) > 0.72) continue;
+        mirror(x + dx, y + dy);
+        if (cliffFoot(x + dx * 2, y + dy * 2) && dressHash(x + dx * 2, y, salt) < 0.55) mirror(x + dx * 2, y + dy * 2);
+        break;
+      }
+    }
+  }
+  for (let n = 0; n < 4; n++) {
+    const x = 7 + ((dressHash(n, 11, salt) * (gw * 0.26)) | 0);
+    const y = 7 + ((dressHash(13, n, salt) * (gh - 16)) | 0);
+    if (cliffFoot(x, y) || !spaced(x, y) || !canRock(x, y)) continue;
+    mirror(x, y);
+    const dx = dressHash(n, 2, salt) > 0.5 ? 1 : 0;
+    const dy = dx ? 0 : 1;
+    place(x + dx, y + dy);
+    place(gw - 1 - (x + dx), gh - 1 - (y + dy));
+    place(x - dy, y + dx);
+    place(gw - 1 - (x - dy), gh - 1 - (y + dx));
   }
 }
 
@@ -1481,7 +1534,7 @@ function clumpForests(
         const x = sx + dx;
         const y = sy + dy;
         if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) continue;
-        if (dressHash(x + salt, y, sx + sy) > 0.58) continue;
+        if (dressHash(x + salt, y, sx + sy) > 0.7) continue;
         const i = y * gw + x;
         if (nearPad(pads, x, y, 8) || (crystal[i] ?? 0) > 0) continue;
         const t = terrain[i] ?? 0;
