@@ -2217,36 +2217,83 @@ function bakeTerrainGl(
   gl.enableVertexAttribArray(pos);
   gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  // drawImage of this canvas leaves transparent holes on SwiftShader. Copy the
+  // framebuffer with readPixels into an opaque 2D sheet the match can sample.
+  const shot = copyGlField(gl, width, height);
   gl.deleteTexture(color);
   gl.deleteTexture(heightTex);
   gl.deleteTexture(ids);
   gl.deleteTexture(atlas);
-  return canvas;
+  return shot;
 }
 
-/** Copy the GL bake into a 2D sheet. A blank buffer falls through to the CPU field. */
-function snapshotTerrain(src: HTMLCanvasElement): HTMLCanvasElement | null {
-  const probe = document.createElement("canvas");
-  probe.width = 24;
-  probe.height = 24;
-  const px = probe.getContext("2d", { willReadFrequently: true });
-  if (!px) return null;
-  px.drawImage(src, 0, 0, 24, 24);
-  const data = px.getImageData(0, 0, 24, 24).data;
-  const rgb = new Uint8Array(24 * 24 * 3);
-  for (let i = 0; i < 24 * 24; i++) {
-    rgb[i * 3] = data[i * 4] ?? 0;
-    rgb[i * 3 + 1] = data[i * 4 + 1] ?? 0;
-    rgb[i * 3 + 2] = data[i * 4 + 2] ?? 0;
+/** Opaque 2D copy of the bake, or null when the buffer is a flat dark fill. */
+function copyGlField(gl: WebGLRenderingContext, width: number, height: number): HTMLCanvasElement | null {
+  const size = 16;
+  if (width < size || height < size) return null;
+  const spots: Array<[number, number]> = [
+    [0.22, 0.22],
+    [0.5, 0.5],
+    [0.78, 0.72],
+    [0.4, 0.8],
+  ];
+  const rgb = new Uint8Array(spots.length * size * size * 3);
+  const probe = new Uint8Array(size * size * 4);
+  let o = 0;
+  try {
+    for (let n = 0; n < 8 && gl.getError() !== gl.NO_ERROR; n++) {}
+    for (const [fx, fy] of spots) {
+      const x = Math.max(0, Math.min(width - size, Math.floor(width * fx)));
+      const y = Math.max(0, Math.min(height - size, Math.floor(height * fy)));
+      gl.readPixels(x, y, size, size, gl.RGBA, gl.UNSIGNED_BYTE, probe);
+      if (gl.getError() !== gl.NO_ERROR) return null;
+      for (let i = 0; i < size * size; i++) {
+        rgb[o++] = probe[i * 4] ?? 0;
+        rgb[o++] = probe[i * 4 + 1] ?? 0;
+        rgb[o++] = probe[i * 4 + 2] ?? 0;
+      }
+    }
+    if (!terrainFieldAlive(rgb)) return null;
+    const out = document.createElement("canvas");
+    out.width = width;
+    out.height = height;
+    const ctx = out.getContext("2d", { alpha: false });
+    if (!ctx) return null;
+    // Wide readPixels comes back black on SwiftShader. Small tiles do not.
+    const tile = 128;
+    const buf = new Uint8Array(tile * tile * 4);
+    for (let y = 0; y < height; y += tile) {
+      const rows = Math.min(tile, height - y);
+      for (let x = 0; x < width; x += tile) {
+        const cols = Math.min(tile, width - x);
+        const view = cols === tile && rows === tile ? buf : buf.subarray(0, cols * rows * 4);
+        gl.readPixels(x, y, cols, rows, gl.RGBA, gl.UNSIGNED_BYTE, view);
+        if (gl.getError() !== gl.NO_ERROR) return null;
+        const img = ctx.createImageData(cols, rows);
+        for (let row = 0; row < rows; row++) {
+          const src = (rows - 1 - row) * cols * 4;
+          img.data.set(view.subarray(src, src + cols * 4), row * cols * 4);
+        }
+        ctx.putImageData(img, x, height - y - rows);
+      }
+    }
+    const back = new Uint8Array(spots.length * size * size * 3);
+    let b = 0;
+    for (const [fx, fy] of spots) {
+      const sx = Math.max(0, Math.min(width - size, Math.floor(width * fx)));
+      const sy = Math.max(0, Math.min(height - size, Math.floor((1 - fy) * height)));
+      const check = ctx.getImageData(sx, sy, size, size).data;
+      for (let i = 0; i < size * size; i++) {
+        back[b++] = check[i * 4] ?? 0;
+        back[b++] = check[i * 4 + 1] ?? 0;
+        back[b++] = check[i * 4 + 2] ?? 0;
+      }
+    }
+    if (!terrainFieldAlive(back)) return null;
+    return out;
+  } catch {
+    return null;
   }
-  if (!terrainFieldAlive(rgb)) return null;
-  const out = document.createElement("canvas");
-  out.width = src.width;
-  out.height = src.height;
-  const ctx = out.getContext("2d", { alpha: false });
-  if (!ctx) return null;
-  ctx.drawImage(src, 0, 0);
-  return out;
 }
 
 /** Paint the field once. The match draws a slice of this, not every tile, every tick. */
@@ -2266,12 +2313,17 @@ export function bakeTerrain(
     if (matState !== "fail") return null;
   } else {
     const gpu = bakeTerrainGl(terrain, w, h, theater, width, height, mats);
-    const shot = gpu ? snapshotTerrain(gpu) : null;
-    if (shot) return shot;
+    if (gpu) return gpu;
   }
+  // A blank GPU buffer falls back here. Cap the long side so the CPU field
+  // returns on this frame instead of blocking on a 4K bake.
+  const cap = Math.min(longSide, 1280);
+  const cpuScale = cap / Math.max(w, h);
+  const cw = Math.max(1, Math.round(w * cpuScale));
+  const ch = Math.max(1, Math.round(h * cpuScale));
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = cw;
+  canvas.height = ch;
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) return null;
   const img = ctx.createImageData(canvas.width, canvas.height);
