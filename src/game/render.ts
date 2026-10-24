@@ -716,7 +716,7 @@ export function drawGame(
       ctx.lineTo(f.x2, f.y2);
       ctx.stroke();
       ctx.globalAlpha = 1;
-    } else if (f.kind === "boom" || f.kind === "debris") {
+    } else if (f.kind === "boom" || f.kind === "debris" || f.kind === "muzzle" || f.kind === "flash" || f.kind === "num") {
       // Drawn in screen space after the hall sprites and the fog veil.
     } else {
       ctx.globalAlpha = 1 - k;
@@ -3795,6 +3795,57 @@ function paintDeathFx(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view
       ctx.fillStyle = f.color;
       const w = Math.max(11, f.r * cam.zoom * 2.4);
       ctx.fillRect(-w, -w * 0.45, w * 2, w * 0.9);
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "muzzle") {
+      const from = worldToScreen(cam, f.x, f.y, view);
+      const to = worldToScreen(cam, f.x2, f.y2, view);
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len;
+      const uy = dy / len;
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.translate(from.x + ux * 10, from.y + uy * 6);
+      ctx.fillStyle = "#fff6d2";
+      ctx.beginPath();
+      ctx.arc(0, 0, 7 + (1 - life) * 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ffe08a";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(ux * 14, uy * 14);
+      ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "flash") {
+      const s = worldToScreen(cam, f.x, f.y, view);
+      ctx.save();
+      ctx.globalAlpha = life * 0.9;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, f.r * (0.7 + k * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "num") {
+      const s = worldToScreen(cam, f.x, f.y, view);
+      const rise = k * 22;
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#1a140e";
+      ctx.strokeText(String(f.n ?? ""), s.x, s.y - rise);
+      ctx.fillStyle = f.color;
+      ctx.fillText(String(f.n ?? ""), s.x, s.y - rise);
       ctx.restore();
       continue;
     }

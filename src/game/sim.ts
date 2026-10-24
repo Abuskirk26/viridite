@@ -276,7 +276,7 @@ export interface Shot {
 }
 
 export interface Fx {
-  kind: "boom" | "beam" | "debris";
+  kind: "boom" | "beam" | "debris" | "muzzle" | "flash" | "num";
   x: number;
   y: number;
   x2: number;
@@ -285,6 +285,8 @@ export interface Fx {
   max: number;
   color: string;
   r: number;
+  /** Rounded damage for a floating number. */
+  n?: number;
 }
 
 /** A move or attack the player just issued. Drawn, not simulated. */
@@ -2847,6 +2849,7 @@ export class Sim {
       b.cooldown = b.rof;
       this.applyDamage(foe, b.damage, b.vsInf, b.vsVeh, b.vsBld, aa ? b.vsAir : 0, "structure", b.team);
       const p = this.targetPoint(foe);
+      this.muzzle(cx, cy, p.x, p.y);
       this.beam(cx, cy, p.x, p.y, b.team);
       this.markPoint(b.team, cx, cy);
       this.blip("tower", 0.16);
@@ -2864,6 +2867,7 @@ export class Sim {
     u.cooldown = u.rof;
     if (u.stealth) u.reveal = 1.7;
     this.markFire(u);
+    this.muzzle(u.x, u.y, pos.x, pos.y);
     if (u.ammoMax > 0) {
       u.ammo -= 1;
       if (u.ammo <= 0) this.beginRearm(u);
@@ -2970,6 +2974,8 @@ export class Sim {
     if (u.hp <= 0 || dmg <= 0) return;
     u.hp -= dmg;
     u.hit = 0.28;
+    this.flashAt(u.x, u.y);
+    this.floatDmg(u.x, u.y - 0.15, dmg);
     if (attacker > 0 && from !== undefined && !this.allied(from, u.team)) {
       u.aggro = attacker;
       u.aggroUntil = this.time + 5;
@@ -3013,6 +3019,8 @@ export class Sim {
     if (from !== undefined) this.noteThreat(b.team, b.tx + b.w / 2, b.ty + b.h / 2, from);
     b.hit = 0.4;
     b.shown = this.time + 4;
+    this.flashAt(b.tx + b.w / 2, b.ty + b.h / 2);
+    this.floatDmg(b.tx + b.w / 2, b.ty - 0.2, dmg);
     spawnSparks(b.tx + b.w / 2, b.ty + b.h / 2, 5);
     if (b.rubble > 0) {
       b.hp = 1;
@@ -5068,8 +5076,61 @@ export class Sim {
     }
   }
 
+  private pushFx(f: Fx) {
+    this.fx.push(f);
+    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
+  }
+
+  private muzzle(x: number, y: number, x2: number, y2: number) {
+    this.pushFx({
+      kind: "muzzle",
+      x,
+      y,
+      x2,
+      y2,
+      ttl: 0.1,
+      max: 0.1,
+      color: "#fff6d2",
+      r: 12,
+    });
+  }
+
+  private flashAt(x: number, y: number) {
+    this.pushFx({
+      kind: "flash",
+      x,
+      y,
+      x2: x,
+      y2: y,
+      ttl: 0.14,
+      max: 0.14,
+      color: "#ffffff",
+      r: 18,
+    });
+  }
+
+  /** Small rising number. Skipped when it would crowd a phone, and still under the 80 effect cap. */
+  private floatDmg(x: number, y: number, dmg: number) {
+    if (dmg < 8) return;
+    let n = 0;
+    for (const f of this.fx) if (f.kind === "num") n++;
+    if (n >= 8) return;
+    this.pushFx({
+      kind: "num",
+      x,
+      y,
+      x2: 0,
+      y2: 0,
+      ttl: 0.7,
+      max: 0.7,
+      color: "#fff6e4",
+      r: 13,
+      n: Math.max(1, Math.round(dmg)),
+    });
+  }
+
   private beam(x: number, y: number, x2: number, y2: number, team: Team) {
-    this.fx.push({
+    this.pushFx({
       kind: "beam",
       x,
       y,
@@ -5080,11 +5141,10 @@ export class Sim {
       color: team === 0 ? "#f2e2b0" : "#ffb089",
       r: 1,
     });
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   private boom(x: number, y: number, r: number) {
-    this.fx.push({
+    this.pushFx({
       kind: "boom",
       x,
       y,
@@ -5095,7 +5155,6 @@ export class Sim {
       color: "#e7c27a",
       r,
     });
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   /** Fixed angles so debris does not touch the match seed. */
@@ -5103,7 +5162,7 @@ export class Sim {
     const count = Math.max(3, Math.min(7, n));
     for (let i = 0; i < count; i++) {
       const a = (i / count) * Math.PI * 2 + 0.4;
-      this.fx.push({
+      this.pushFx({
         kind: "debris",
         x,
         y,
@@ -5115,7 +5174,6 @@ export class Sim {
         r: 0.1,
       });
     }
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   private decayFx(dt: number) {
