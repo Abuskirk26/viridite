@@ -1672,7 +1672,34 @@ function paintFieldProps(
     paintShell(ctx, t, x, y, mark);
     return "shell";
   }
-  if (ore > 0 || t === TILE_SPENT) paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i));
+  if (ore > 0 || t === TILE_SPENT) {
+    let around = 0;
+    let edge = 0;
+    const side: [number, number, number][] = [
+      [0, -1, 1],
+      [1, 0, 2],
+      [0, 1, 4],
+      [-1, 0, 8],
+    ];
+    for (const [dx, dy, bit] of side) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const has = nx >= 0 && ny >= 0 && nx < sim.gw && ny < sim.gh && (sim.crystal[ny * sim.gw + nx] ?? 0) > 0;
+      if (has) around++;
+      else edge |= bit;
+    }
+    for (const [dx, dy] of [
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ] as const) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < sim.gw && ny < sim.gh && (sim.crystal[ny * sim.gw + nx] ?? 0) > 0) around++;
+    }
+    paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i), around, edge);
+  }
   return "";
 }
 

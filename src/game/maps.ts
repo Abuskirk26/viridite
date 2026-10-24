@@ -1369,8 +1369,38 @@ export function dressBattlefield(
   const cy = gh / 2;
   for (const p of pads) stampLane(terrain, crystal, gw, gh, p.x, p.y, cx, cy, 1);
   linkBridges(terrain, crystal, gw, gh, pads);
+  sealOreFields(terrain, crystal, gw, gh);
   const props = placeHamlets(terrain, crystal, gw, gh, pads, cx, cy, salt);
   return props;
+}
+
+/** Fill gaps inside a deposit so the ore reads as one patch, not loose tiles. */
+function sealOreFields(terrain: Uint8Array, crystal: Uint16Array, gw: number, gh: number) {
+  const nextT = new Uint8Array(terrain);
+  const nextC = new Uint16Array(crystal);
+  const open = (t: number) => t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH || t === TILE_SHORE || t === TILE_SCRUB;
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const i = y * gw + x;
+      if ((crystal[i] ?? 0) > 0 || !open(terrain[i] ?? 0)) continue;
+      let n = 0;
+      let sum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const amt = crystal[(y + dy) * gw + (x + dx)] ?? 0;
+          if (amt <= 0) continue;
+          n++;
+          sum += amt;
+        }
+      }
+      if (n < 5) continue;
+      nextT[i] = TILE_CRYSTAL;
+      nextC[i] = Math.max(400, Math.round(sum / n));
+    }
+  }
+  terrain.set(nextT);
+  crystal.set(nextC);
 }
 
 function raisePlateaus(
