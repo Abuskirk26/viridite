@@ -2249,6 +2249,13 @@ export function GameScreen() {
   );
 }
 
+function unmetNeed(sim: Sim, team: number, id: BuildingId): string | null {
+  const req = resolveBuilding(id, sim.factionOf(team as 0)).requires;
+  if (!req) return null;
+  const has = sim.buildings.some((b) => b.team === team && b.kind === req && b.complete && b.hp > 0 && b.rubble <= 0);
+  return has ? null : `Needs ${BUILDINGS[req].name}`;
+}
+
 function isTrainHall(kind: string | undefined): kind is TrainAt {
   return kind === "barracks" || kind === "factory" || kind === "dock" || kind === "helipad";
 }
@@ -2364,6 +2371,7 @@ function ProductionColumn({
               <div className="grid grid-cols-2 gap-0.5">
                 {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
                   const def = BUILDINGS[id];
+                  const need = unmetNeed(sim, team, id);
                   const broke = sim.credits[team] < def.cost;
                   const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
                   const Icon = BUILD_ICON[id];
@@ -2372,16 +2380,18 @@ function ProductionColumn({
                       key={id}
                       type="button"
                       data-testid={`build-${id}`}
-                      onClick={() => onPlace(id)}
-                      className={`bevel-btn flex h-10 flex-col items-center justify-center px-0.5 ${broke || low ? "text-muted" : "text-ink"}`}
+                      aria-disabled={need ? true : undefined}
+                      onClick={() => {
+                        if (!need) onPlace(id);
+                      }}
+                      className={`bevel-btn flex min-h-11 flex-col items-center justify-center px-0.5 ${need || broke || low ? "text-muted" : "text-ink"}`}
                     >
-                      <span className="flex items-center gap-1 font-display text-[10px] uppercase">
+                      <span className="flex items-center gap-1 font-display text-[11px] uppercase">
                         <Icon className="size-3.5" />
                         {def.short}
                       </span>
-                      <span className="text-[10px] text-gold tabular-nums">
-                        {def.cost}
-                        {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+                      <span className={`whitespace-normal text-center text-[11px] leading-tight ${need ? "normal-case text-muted" : "text-gold tabular-nums"}`}>
+                        {need ?? `${def.cost}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
                       </span>
                     </button>
                   );
@@ -3009,7 +3019,7 @@ function BuildColumn({
           const d = drag.current;
           d.active = false;
           d.swallow = true;
-          if (!d.moved && d.kind) onPlace(d.kind);
+          if (!d.moved && d.kind && !unmetNeed(sim, team, d.kind)) onPlace(d.kind);
         }}
         onPointerCancel={() => {
           drag.current.active = false;
@@ -3020,6 +3030,7 @@ function BuildColumn({
         )}
         {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
           const def = BUILDINGS[id];
+          const need = unmetNeed(sim, team, id);
           const broke = sim.credits[team] < def.cost;
           const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
           const Icon = BUILD_ICON[id];
@@ -3029,7 +3040,9 @@ function BuildColumn({
               type="button"
               data-testid={`build-${id}`}
               data-build={id}
+              aria-disabled={need ? true : undefined}
               onClick={() => {
+                if (need) return;
                 if (drag.current.swallow || drag.current.moved) {
                   drag.current.swallow = false;
                   drag.current.moved = false;
@@ -3037,10 +3050,13 @@ function BuildColumn({
                 }
                 onPlace(id);
               }}
-              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
+              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need || broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
             >
               <Icon className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 whitespace-normal text-left text-[11px] leading-tight">{def.short}</span>
+              <span className="min-w-0 flex-1 text-left">
+                <span className="block whitespace-normal text-[11px] leading-tight">{def.short}</span>
+                {need ? <span className="block whitespace-normal text-[11px] leading-tight normal-case">{need}</span> : null}
+              </span>
               <span className="shrink-0 text-[11px] tabular-nums text-gold">{def.cost}</span>
             </button>
           );
@@ -3388,6 +3404,7 @@ function CommandBar({
     <>
       {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
         const def = BUILDINGS[id];
+        const need = unmetNeed(sim, team, id);
         const broke = sim.credits[team] < def.cost;
         const low = sim.powerOf(team as 0).low && !isFence(id) && id !== "power" && id !== "advpower";
         const Icon = BUILD_ICON[id];
@@ -3396,17 +3413,22 @@ function CommandBar({
             key={id}
             type="button"
             data-testid={`build-${id}`}
-            onClick={() => onPlace(id)}
-            className={`bevel-btn flex h-16 w-16 shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${
-              broke || low ? "text-muted" : "text-ink"
+            aria-disabled={need ? true : undefined}
+            onClick={() => {
+              if (!need) onPlace(id);
+            }}
+            className={`bevel-btn flex min-h-11 w-16 shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${
+              need || broke || low ? "text-muted" : "text-ink"
             }`}
           >
             <Icon className="size-6" />
-            <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{def.short}</span>
-            <span className="text-xs text-gold tabular-nums">
-              {def.cost}
-              {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
-            </span>
+            <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{need ? need : def.short}</span>
+            {need ? null : (
+              <span className="text-[11px] text-gold tabular-nums">
+                {def.cost}
+                {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+              </span>
+            )}
           </button>
         );
       })}
