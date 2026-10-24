@@ -1740,12 +1740,6 @@ export function GameScreen() {
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
               <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
-              <p
-                data-testid="pace-label"
-                className={`pointer-events-none absolute left-1/2 z-10 -translate-x-1/2 font-display text-[10px] leading-none tracking-wide text-muted ${portrait || short ? "top-0.5" : "top-9"}`}
-              >
-                {climbLabel(sim)}
-              </p>
               <div
                 data-testid="alert-lane"
                 className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
@@ -1925,6 +1919,9 @@ export function GameScreen() {
               {paused && phase === "play" && !pauseSheet && (
                 <Overlay title="Paused">
                   <PauseSound />
+                  <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
+                    Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
+                  </p>
                   <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
                     {botBrief(sim)}
                   </p>
