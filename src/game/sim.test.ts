@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
 import { DEPLOY_SECS, NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
-import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, worldToScreen } from "./view.ts";
+import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, viewPitch, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
 import { pack } from "./custom.ts";

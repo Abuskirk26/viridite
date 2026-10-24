@@ -3754,10 +3754,10 @@ function drawBuilding(
       ctx.beginPath();
       ctx.rect(footX - wide / 2, footY - h * p, wide, h * p + 0.08);
       ctx.clip();
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, isoMask(plate));
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, plate ? isoMask(plate) : null);
       ctx.restore();
     } else {
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, isoMask(plate));
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, plate ? isoMask(plate) : null);
     }
     ctx.globalAlpha = 1;
     paintStructureHurt(ctx, b, footX, footY, wide, time);
