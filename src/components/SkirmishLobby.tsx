@@ -295,7 +295,7 @@ export function SkirmishLobby({
                   testId="map-fourisles"
                   active={setup.customId === "tpl:fourisles"}
                   label="Four Isles. Four islands, beaches, and viridite."
-                  onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", opponents: 3, teams: "ffa", ...withNewBotSkill(setup, 3), ...normalBotDefaults() })}
+                  onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", ...normalBotDefaults() })}
                 >
                   Isles
                 </Chip>
@@ -308,7 +308,7 @@ export function SkirmishLobby({
                     onClick={() =>
                       onChange(
                         m.id === "michigan"
-                          ? { mapId: m.id, customId: "", size: "continent", opponents: 3, teams: "ffa", ...withNewBotSkill(setup, 3), ...normalBotDefaults() }
+                          ? { mapId: m.id, customId: "", size: "continent", ...normalBotDefaults() }
                           : { mapId: m.id, customId: "", ...normalBotDefaults() },
                       )
                     }
@@ -712,8 +712,7 @@ function EconomyTable() {
   );
 }
 
-function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, setup: SkirmishSetup, row: MyMapRow) {
-  const next = (row.group === "featured" && row.starts >= 4 ? 3 : row.group === "featured" && row.starts < 4 ? 1 : setup.opponents) as 1 | 2 | 3;
+function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, _setup: SkirmishSetup, row: MyMapRow) {
   onChange({
     customId: row.id,
     mapId: row.deep ? "coast" : "dry",
@@ -721,9 +720,6 @@ function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, setup: Ski
     ...(row.credits != null ? { credits: row.credits } : {}),
     ...(row.fog != null ? { fog: row.fog } : {}),
     ...(row.walls != null ? { walls: row.walls } : {}),
-    ...(row.group === "featured" && row.starts >= 4 ? { opponents: 3 as const, teams: "ffa" as const, ...withNewBotSkill(setup, 3) } : {}),
-    ...(row.group === "featured" && row.starts < 4 ? { opponents: 1 as const, teams: "ffa" as const } : {}),
-    ...(row.group !== "featured" ? withNewBotSkill(setup, next) : {}),
     ...normalBotDefaults(),
   });
 }

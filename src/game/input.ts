@@ -257,7 +257,6 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     cur.y = p.y;
 
     if (mode === "pinch") {
-      if (touchPinch) return;
       const pair = pinchPair();
       if (!pair) return;
       const dist = Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) || 1;
@@ -460,6 +459,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   const onTouchStart = (e: TouchEvent) => {
     if (e.touches.length < 2) return;
     e.preventDefault();
+    if (pts.size >= 2) return;
     const a = touchPoint(e.touches[0]!);
     const b = touchPoint(e.touches[1]!);
     touchPinch = true;
@@ -468,6 +468,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   const onTouchMove = (e: TouchEvent) => {
     if (e.touches.length < 2) return;
     e.preventDefault();
+    if (pts.size >= 2) return;
     const a = touchPoint(e.touches[0]!);
     const b = touchPoint(e.touches[1]!);
     const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;

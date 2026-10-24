@@ -90,7 +90,7 @@ import { lobbySize, offersNavy } from "@/game/editor";
 import { NetPlay, parseRoomCode } from "@/game/netplay";
 import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
-import { clampCamera, minimapHit, openingZoom, screenToWorld, seekZoom, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
+import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 
 const SAVE_KEY = "viridite-last-match";
 
@@ -378,6 +378,7 @@ export function GameScreen() {
   const [portrait, setPortrait] = useState(false);
   const [phone, setPhone] = useState(false);
   const [short, setShort] = useState(false);
+  const [hostBar, setHostBar] = useState(0);
   const [trayUp, setTrayUp] = useState(false);
   const [hasSave, setHasSave] = useState(false);
   const [muted, setMutedUi] = useState(() => isMuted());
@@ -508,6 +509,18 @@ export function GameScreen() {
       setPortrait(h > w + 40);
       setPhone(Math.min(w, h) < 520 || w < 800);
       setShort(h < 500);
+      let bar = 0;
+      const root = document.querySelector("[data-testid='game-root']");
+      for (const el of Array.from(document.body.children)) {
+        if (!(el instanceof HTMLElement)) continue;
+        if (root && (el === root || el.contains(root))) continue;
+        const pos = getComputedStyle(el).position;
+        if (pos !== "fixed" && pos !== "sticky") continue;
+        const r = el.getBoundingClientRect();
+        if (r.top > 4 || r.height < 8 || r.height > 96 || r.width < w * 0.5) continue;
+        bar = Math.max(bar, Math.round(r.bottom));
+      }
+      setHostBar((prev) => (prev === bar ? prev : bar));
     };
     onResize();
     window.addEventListener("resize", onResize);
@@ -1535,16 +1548,6 @@ export function GameScreen() {
     setProdTab("build");
   };
 
-  const nudgeZoom = (factor: number) => {
-    const sim = simRef.current;
-    const view = viewRef.current;
-    if (!sim || view.w < 8 || view.h < 8) return;
-    const cam = camRef.current;
-    seekZoom(cam, view.w / 2, view.h / 2, view, factor, sim.gw, sim.gh, wideField(sim.mapSize));
-    cam.vx = 0;
-    cam.vy = 0;
-  };
-
   const land = short && !portrait;
   const trainHallOnly = (() => {
     if (!sim || placing || buildOpen || sel.length > 0 || selB == null) return false;
@@ -1555,9 +1558,10 @@ export function GameScreen() {
   return (
     <div
       className="fixed inset-x-0 z-0 flex flex-col bg-field text-ink"
+      data-testid="game-root"
       style={{
-        top: "var(--grok-banner-h, var(--app-top, 0px))",
-        height: "calc(var(--app-h, 100dvh) - var(--grok-banner-h, 0px))",
+        top: hostBar,
+        height: `calc(var(--app-h, 100dvh) - ${hostBar}px)`,
       }}
     >
       {soundGate && !muted && (
@@ -1691,7 +1695,6 @@ export function GameScreen() {
                 {climbLabel(sim)}
               </span>
               <div className="ml-auto flex shrink-0 items-center gap-1">
-                <ZoomControl compact onIn={() => nudgeZoom(1.25)} onOut={() => nudgeZoom(0.8)} />
                 {online ? null : <SpeedControl speed={speed} onChange={setSpeed} compact />}
                 <IconButton
                   label={muted ? "Unmute" : "Mute"}
@@ -3966,22 +3969,6 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
     </div>
   );
 }
-
-function ZoomControl({ onIn, onOut, compact = false }: { onIn: () => void; onOut: () => void; compact?: boolean }) {
-  const btn = `flex items-center justify-center font-display text-ink ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`;
-  return (
-    <div className="steel-inset flex shrink-0 items-center" data-testid="zoom-controls">
-      <button type="button" aria-label="Zoom out" data-testid="zoom-out" onClick={onOut} className={btn}>
-        −
-      </button>
-      <span className={`whitespace-nowrap text-center font-display text-brass ${compact ? "px-0.5 text-[11px]" : "px-1 text-xs"}`}>Zoom</span>
-      <button type="button" aria-label="Zoom in" data-testid="zoom-in" onClick={onIn} className={btn}>
-        +
-      </button>
-    </div>
-  );
-}
-
 
 declare global {
   interface Window {

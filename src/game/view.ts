@@ -56,7 +56,8 @@ export const ZOOM_MAX = 180;
 
 /**
  * Tile span of the battle camera, counted across the view width.
- * A 915-wide landscape phone shows 20 tiles at max zoom-out and 10 at max zoom-in.
+ * A 915-wide landscape phone shows 20 tiles at max zoom-out (the 20–22 tile band) and 10 at max zoom-in.
+ * That is never the whole map. The map editor keeps its own wider zoom.
  * A 412-wide portrait phone shows 14 and 10. Wider glass keeps the same pixels per
  * tile, so a soldier is the same size on a phone, a tablet, and a desktop — the
  * bigger screen simply shows more tiles. The whole map is the minimap's job.
