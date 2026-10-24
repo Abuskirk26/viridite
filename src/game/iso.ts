@@ -70,7 +70,7 @@ function load(name: string): Promise<HTMLImageElement | null> {
       else done();
     };
     img.onerror = () => resolve(null);
-    img.src = `/art/iso/${name}.png?v=4`;
+    img.src = `/art/iso/${name}.png?v=5`;
   });
 }
 
