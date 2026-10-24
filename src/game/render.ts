@@ -716,48 +716,8 @@ export function drawGame(
       ctx.lineTo(f.x2, f.y2);
       ctx.stroke();
       ctx.globalAlpha = 1;
-    } else if (f.kind === "boom") {
-      const life = 1 - k;
-      const rad = Math.max(0.7, f.r * (1.15 + k * 1.35));
-      ctx.globalAlpha = life * 0.9;
-      ctx.strokeStyle = "#fff6d0";
-      ctx.lineWidth = 0.07;
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, rad * (0.45 + k * 0.7), 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.fillStyle = k < 0.22 ? "#fff8e6" : k < 0.5 ? "#ffb03a" : "#e23b18";
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, rad * (k < 0.28 ? 0.48 : 0.32), 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#ffe7a8";
-      ctx.beginPath();
-      ctx.arc(f.x, f.y, rad * 0.16, 0, Math.PI * 2);
-      ctx.fill();
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2 + 0.35;
-        const d = rad * (0.28 + k * 0.85);
-        ctx.save();
-        ctx.translate(f.x + Math.cos(a) * d, f.y + Math.sin(a) * d * 0.62);
-        ctx.rotate(a + k * 3);
-        ctx.fillStyle = i % 2 ? "#2a2018" : "#e8c48a";
-        ctx.fillRect(-0.09, -0.045, 0.18, 0.09);
-        ctx.restore();
-      }
-      ctx.globalAlpha = life * 0.4;
-      ctx.fillStyle = "rgba(36, 32, 28, 0.9)";
-      ctx.beginPath();
-      ctx.arc(f.x + 0.05, f.y - rad * 0.22, rad * (0.28 + k * 0.35), 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-    } else if (f.kind === "debris") {
-      const travel = 1 - f.ttl / f.max;
-      ctx.save();
-      ctx.globalAlpha = 1 - travel;
-      ctx.translate(f.x + f.x2 * travel, f.y + f.y2 * travel);
-      ctx.rotate(travel * 4);
-      ctx.fillStyle = f.color;
-      ctx.fillRect(-0.1, -0.06, 0.2, 0.12);
-      ctx.restore();
+    } else if (f.kind === "boom" || f.kind === "debris") {
+      // Drawn in screen space after the hall sprites and the fog veil.
     } else {
       ctx.globalAlpha = 1 - k;
       ctx.fillStyle = k < 0.4 ? "#fff1c4" : "#e07a3a";
@@ -932,6 +892,7 @@ export function drawGame(
   ctx.restore();
 
   paintScreenFog(ctx, sim.fog[VIEWER], cam, view, GW, GH);
+  paintDeathFx(ctx, sim, cam, view);
 
   drawJobsScreen(ctx, sim, cam, view);
   drawPlaceLabel(ctx, sim, cam, view, ui);
@@ -3774,7 +3735,7 @@ function drawBuilding(
   paintStructureHurt(ctx, b, b.tx + b.w / 2, b.ty + b.h * 0.45, Math.max(b.w, b.h), time);
 }
 
-/** Damage stages. Procedural fire and smoke. No texture, no magenta. */
+/** Damage stages. Smoke and fire sit on the hall picture, not the pitched ground. */
 function paintStructureHurt(
   ctx: CanvasRenderingContext2D,
   b: Building,
@@ -3791,38 +3752,87 @@ function paintStructureHurt(
   if (b.rubble > 0 || b.hp <= 0) return;
   const frac = b.hp / b.maxHp;
   if (frac >= 0.6) return;
+  const burning = frac < 0.3;
   ctx.save();
-  if (frac < 0.6) {
-    ctx.globalAlpha = 0.22 + (0.6 - frac) * 0.45;
-    ctx.fillStyle = "rgba(40, 38, 36, 0.7)";
-    ctx.beginPath();
-    ctx.ellipse(x, y - wide * 0.35, wide * 0.28, wide * 0.16, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  const light = frac >= 0.3;
-  const points = light ? 3 : 5;
-  if (!light) {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(0.04 + 0.02 * Math.sin(time * 2 + b.id));
-    ctx.translate(-x, -y);
-  }
+  ctx.translate(x, y);
+  ctx.scale(1, 1 / viewPitch());
+  const roof = -wide * 0.92;
+  ctx.globalAlpha = 0.45 + (0.6 - frac) * 0.4;
+  ctx.fillStyle = "rgba(36, 32, 28, 0.85)";
+  ctx.beginPath();
+  ctx.ellipse(0, roof + wide * 0.08, wide * 0.46, wide * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const points = burning ? 5 : 3;
   for (let i = 0; i < points; i++) {
-    const ox = (i - (points - 1) / 2) * wide * 0.22;
-    const oy = -wide * (0.35 + (i % 2) * 0.12);
-    paintSmoke(ctx, x + ox, y + oy, wide * (light ? 0.14 : 0.22), time + i * 0.7, light);
-    if (!light) {
-      paintFlame(ctx, x + ox, y + oy + wide * 0.08, wide * 0.16, time + i);
-      if (Math.sin(time * 9 + i) > 0.6) {
-        ctx.fillStyle = "#fff6d0";
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(x + ox + 0.04, y + oy - 0.1, 0.04, 0.04);
-        ctx.globalAlpha = 1;
-      }
+    const ox = (i - (points - 1) / 2) * wide * 0.3;
+    const oy = roof - (i % 2) * wide * 0.16;
+    paintSmoke(ctx, ox, oy, wide * (burning ? 0.32 : 0.2), time + i * 0.7, !burning);
+    if (burning) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#ff7a1a";
+      ctx.beginPath();
+      ctx.ellipse(ox, oy + wide * 0.18, wide * 0.22, wide * 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      paintFlame(ctx, ox, oy + wide * 0.22, wide * 0.42, time + i);
     }
   }
-  if (!light) ctx.restore();
   ctx.restore();
+}
+
+/** Death bursts in screen pixels, on top of sprites and the fog veil. */
+function paintDeathFx(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view: View) {
+  for (const f of sim.fx) {
+    const k = 1 - f.ttl / Math.max(0.001, f.max);
+    const life = Math.max(0, 1 - k);
+    if (f.kind === "debris") {
+      const s = worldToScreen(cam, f.x + f.x2 * k, f.y + f.y2 * k, view);
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.translate(s.x, s.y);
+      ctx.rotate(k * 4);
+      ctx.fillStyle = f.color;
+      const w = Math.max(11, f.r * cam.zoom * 2.4);
+      ctx.fillRect(-w, -w * 0.45, w * 2, w * 0.9);
+      ctx.restore();
+      continue;
+    }
+    if (f.kind !== "boom") continue;
+    const s = worldToScreen(cam, f.x, f.y, view);
+    const lift = f.r > 0.7 ? cam.zoom * 0.55 : cam.zoom * 0.12;
+    const rad = Math.max(18, f.r * cam.zoom * (1.45 + k * 0.9));
+    const punch = k < 0.42 ? 1 : life;
+    ctx.save();
+    ctx.translate(s.x, s.y - lift);
+    ctx.globalAlpha = punch;
+    ctx.strokeStyle = "#fff6d0";
+    ctx.lineWidth = Math.max(2.5, rad * 0.07);
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * (0.62 + k * 0.55), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = k < 0.22 ? "#fff8e6" : k < 0.5 ? "#ff9a1f" : "#e23b18";
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * (k < 0.28 ? 0.7 : 0.48), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fffdf6";
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * 0.24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = punch * 0.95;
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2 + 0.35;
+      const d = rad * (0.4 + k * 0.85);
+      ctx.save();
+      ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
+      ctx.rotate(a + k * 2.4);
+      ctx.fillStyle = i % 2 ? "#241810" : "#f0c078";
+      const w = Math.max(6, rad * 0.16);
+      ctx.fillRect(-w * 0.5, -w * 0.22, w, w * 0.44);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
 }
 
 function paintSmoke(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, time: number, light: boolean) {
