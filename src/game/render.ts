@@ -1518,19 +1518,26 @@ function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "c
   ctx.fillText(mark, x, y - h * 0.45 + bob);
 }
 
-/** Health only. Teams never use these greens, yellows, or reds. */
+/** Health only. A ramp from green through gold to red. Teams never use these. */
 function hpInk(pct: number): string {
-  if (pct >= 0.6) return "#3dcc6e";
-  if (pct >= 0.3) return "#e6b325";
-  return "#e23b32";
+  const mix = (a: readonly number[], b: readonly number[], t: number) => {
+    const k = Math.max(0, Math.min(1, t));
+    const n = (i: number) => Math.round(a[i]! + (b[i]! - a[i]!) * k);
+    return `rgb(${n(0)}, ${n(1)}, ${n(2)})`;
+  };
+  const red = [226, 59, 50] as const;
+  const gold = [230, 179, 37] as const;
+  const green = [61, 204, 110] as const;
+  if (pct >= 0.6) return mix(gold, green, (pct - 0.6) / 0.4);
+  return mix(red, gold, pct / 0.6);
 }
 
 const UNIT_BADGE_PX = 14;
 const HALL_BADGE_PX = 21;
 
 function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, size: "troop" | "hall" = "troop", fill?: string, label?: string) {
-  const w = size === "hall" ? 44 : 28;
-  const h = size === "hall" ? 6 : 5;
+  const w = size === "hall" ? 48 : 34;
+  const h = size === "hall" ? 7 : 6;
   const p = Math.max(0, Math.min(1, pct));
   ctx.fillStyle = "rgba(8, 6, 4, 0.9)";
   ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
@@ -3017,10 +3024,15 @@ function paintBuilding(
 
 function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, _color = "#ffffff", _time = 0) {
   ctx.save();
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 0.05;
   ctx.beginPath();
-  ctx.ellipse(x, y + 0.02, r * 1.15, r * 0.46, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y + 0.02, r * 1.2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(16, 12, 8, 0.9)";
+  ctx.lineWidth = 0.1;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x, y + 0.02, r * 1.2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 0.06;
   ctx.stroke();
   ctx.restore();
 }
@@ -3628,11 +3640,17 @@ function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide
   ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
   ctx.stroke();
   if (selected) {
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = "rgba(16, 12, 8, 0.9)";
+    ctx.lineWidth = Math.max(0.09, wide * 0.09);
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.globalAlpha = 1;
     ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = Math.max(0.045, wide * 0.055);
+    ctx.lineWidth = Math.max(0.055, wide * 0.06);
     ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx + 0.08, ry + 0.04, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
     ctx.stroke();
   }
   ctx.restore();
