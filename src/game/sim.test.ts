@@ -1098,6 +1098,23 @@ test("supply centers drip credits and command points cap the army", () => {
   assert.ok(sim.worksCd[0]! > sim.worksLeft[0]!);
 });
 
+test("later supply centers pay less and credits are not capped", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, cpu: [false, false, false, false] });
+  const yard = deployPlayer(sim);
+  const plant = stubBuilding(sim, { kind: "power", team: 0, tx: yard.tx + 4, ty: yard.ty, complete: true });
+  plant.powerOut = 100;
+  const first = stubBuilding(sim, { kind: "supply", team: 0, tx: yard.tx, ty: yard.ty + 4, complete: true });
+  const one = sim.supplyPerSec(0);
+  assert.ok(Math.abs(one - (2 + 8)) < 0.05, `first supply ${one}`);
+  const second = stubBuilding(sim, { kind: "supply", team: 0, tx: yard.tx + 4, ty: yard.ty + 4, complete: true });
+  assert.ok(second.id > first.id);
+  const two = sim.supplyPerSec(0);
+  assert.ok(Math.abs(two - one - 8 * 0.7) < 0.05, `second supply added ${two - one}`);
+  sim.credits[0] = sim.storageOf(0) + 5000;
+  sim.tick(0.1);
+  assert.ok(sim.credits[0] > sim.storageOf(0), "no credit cap");
+});
+
 test("overdrawn power slows production and turret fire in proportion", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, cpu: [false, false, false, false] });
   const yard = deployPlayer(sim);

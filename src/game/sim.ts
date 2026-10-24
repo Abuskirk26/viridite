@@ -19,6 +19,7 @@ import {
   START_STORAGE,
   SUPPLY_DRIP,
   SILO_DRIP,
+  supplyShare,
   SURVIVE_SECONDS,
   TILE_FORD,
   TILE_HIGH,
@@ -1334,18 +1335,26 @@ export class Sim {
     return this.commandLoad(team, true);
   }
 
-  /** Credits per second from the yard and supply centers. Zero until a plant is up, and while power is low. */
+  /**
+   * Credits per second from the yard and supply centers. Zero until a plant is up.
+   * Each later supply center pays a smaller share. A short grid still pays, slower.
+   * There is no credit storage cap.
+   */
   supplyPerSec(team: Team): number {
-    const live = this.powerOf(team);
-    if (this.eliminated[team] || !this.gridOn[team] || live.low) return 0;
+    if (this.eliminated[team]) return 0;
+    const factor = this.powerFactor(team);
+    if (!this.gridOn[team] || factor <= 0) return 0;
     let n = 0;
+    const supplies: Building[] = [];
     for (const b of this.buildings) {
       if (b.team !== team || !b.complete || b.hp <= 0 || b.neutral) continue;
       if (b.kind === "yard") n += YARD_DRIP;
-      else if (b.kind === "supply") n += SUPPLY_DRIP;
+      else if (b.kind === "supply") supplies.push(b);
       else if (b.kind === "silo") n += SILO_DRIP;
     }
-    return n;
+    supplies.sort((a, b) => a.id - b.id);
+    for (let i = 0; i < supplies.length; i++) n += SUPPLY_DRIP * supplyShare(i);
+    return n * factor;
   }
 
   /** Spend credits at the yard to raise the command cap. Takes time. */

@@ -42,6 +42,7 @@ import {
   BUILDINGS,
   BUILD_ORDER,
   buildClock,
+  supplyShare,
   FACTION_NAME,
   SEAT_NAME,
   SURVIVE_SECONDS,
@@ -328,7 +329,7 @@ function hintFor(sim: Sim, team: Team = 0): string {
   const done = (k: BuildingId) => sim.buildings.some((b) => b.team === team && b.kind === k && b.complete && b.hp > 0);
   if (!yard && mcv) return "Deploy the MCV a few tiles toward the center. The yard is your headquarters.";
   if (!yard) return "Yard lost. Train an MCV at the War Factory, then deploy it.";
-  if (!has("power")) return "Power Plant first. Low power slows production and turret fire, and supply income stops.";
+  if (!has("power")) return "Power Plant first. Low power slows production, turret fire, and supply income.";
   if (!done("power")) return "Plant spinning up. Supply Centers wait on power.";
   if (!has("supply")) return "Build a Supply Center. It drips war material every second. Two of them win the opening.";
   if (!done("supply")) return "Supply Center rising. Hit Works to finish the opening faster.";
@@ -2262,6 +2263,11 @@ export function GameScreen() {
   );
 }
 
+function nextSupplyPct(sim: Sim, team: number): number {
+  const placed = sim.buildings.filter((b) => b.team === team && b.kind === "supply" && b.hp > 0 && b.rubble <= 0 && !b.neutral).length;
+  return Math.round(supplyShare(placed) * 100);
+}
+
 function unmetNeed(sim: Sim, team: number, id: BuildingId): string | null {
   const req = resolveBuilding(id, sim.factionOf(team as 0)).requires;
   if (!req) return null;
@@ -2404,7 +2410,8 @@ function ProductionColumn({
                         {def.short}
                       </span>
                       <span className={`whitespace-normal text-center text-[11px] leading-tight ${need ? "normal-case text-muted" : "text-gold tabular-nums"}`}>
-                        {need ?? `${def.cost} · ${buildClock(def.time)}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
+                        {need ??
+                          `${def.cost} · ${buildClock(def.time)}${id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
                       </span>
                     </button>
                   );
@@ -3104,7 +3111,10 @@ function BuildColumn({
               </span>
               <span className={`shrink-0 text-right text-[11px] leading-tight tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
                 {def.cost}
-                <span className="block text-brass">{buildClock(def.time)}</span>
+                <span className="block text-brass">
+                  {buildClock(def.time)}
+                  {id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}
+                </span>
               </span>
               {site ? (
                 <span className="pointer-events-none absolute right-1 bottom-1 left-1 h-1 bg-well">
@@ -3479,6 +3489,7 @@ function CommandBar({
             {need ? null : (
               <span className="text-center text-[11px] leading-tight text-gold tabular-nums">
                 {def.cost} · {buildClock(def.time)}
+                {id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}
               </span>
             )}
           </button>

@@ -219,8 +219,15 @@ export const MAP_MAX = 192;
 export const TICK = 0.1;
 export const START_CREDITS = 3500;
 export const START_STORAGE = 5000;
-/** Credits per second from a completed Supply Center while the base has power. */
+/** Credits per second from the first Supply Center while the base has power. */
 export const SUPPLY_DRIP = 8;
+/** 1st through 5th supply center, then the 5th rate again. Not a credit cap. */
+export const SUPPLY_STEPS = [1, 0.7, 0.49, 0.34, 0.23] as const;
+
+export function supplyShare(index: number): number {
+  const i = index < 0 ? 0 : index;
+  return SUPPLY_STEPS[Math.min(i, SUPPLY_STEPS.length - 1)] ?? 0.23;
+}
 /** Credits per second from a powered Construction Yard. */
 export const YARD_DRIP = 2;
 /** Credits per second from a completed Silo. A bonus only — never a storage cap. */
