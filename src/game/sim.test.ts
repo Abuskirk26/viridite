@@ -1508,6 +1508,41 @@ test("the bot keeps attacking after its construction yard falls", () => {
   assert.equal(pushed || sim.aiIntent[1] === "attack", true);
 });
 
+test("attack-move shoots a hall on the way and leaves a far soldier", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const tank = sim.spawnUnit(0, "tank", 10, 20);
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 14, ty: 19 });
+  occupy(sim, plant);
+  const far = sim.spawnUnit(1, "rifle", 28, 20);
+  assert.ok(tank && far);
+  sim.issueMove([tank.id], 30, 20, true);
+  const farHp = far.hp;
+  for (let i = 0; i < 40; i++) sim.tick(0.1);
+  assert.ok(plant.hp < plant.maxHp, "attack-move walked past the plant");
+  assert.equal(far.hp, farHp, "attack-move chased a soldier outside weapon range");
+  assert.ok(tank.x < 18, `tank left the plant at ${tank.x}`);
+});
+
+test("a damaged bot rifle mends at home", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, true, false, false] });
+  sim.time = 50;
+  for (const u of sim.units) u.hp = 0;
+  const home = sim.starts.slots[1] ?? sim.starts.enemy;
+  const near = sim.spawnUnit(1, "rifle", home.x, home.y);
+  const away = sim.spawnUnit(1, "rifle", home.x + 20, home.y);
+  assert.ok(near && away);
+  near.hp = near.maxHp * 0.4;
+  away.hp = away.maxHp * 0.4;
+  near.order = { t: "idle" };
+  away.order = { t: "idle" };
+  const nearBefore = near.hp;
+  const awayBefore = away.hp;
+  sim.tick(1);
+  assert.ok(near.hp > nearBefore + 1, `home rifle stayed at ${near.hp}`);
+  assert.ok(Math.abs(away.hp - awayBefore) < 0.2, `field rifle healed to ${away.hp}`);
+});
+
 test("armor multipliers: rifles are weak vs tanks, rockets punch tanks, cannons punch halls", () => {
   assert.equal(counterMul("rifle", "armored"), ARMOR_MULT.rifle.armored);
   assert.equal(counterMul("rocket", "armored"), ARMOR_MULT.rocket.armored);

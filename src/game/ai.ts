@@ -700,10 +700,10 @@ function retreating(u: Unit, home: { x: number; y: number }): boolean {
   return Math.hypot(u.order.x - home.x, u.order.y - home.y) < 7;
 }
 
-/** Damaged troops walk home. Hard only pulls the ones that are about to die. */
+/** Badly damaged troops walk home. A scratch is not enough to leave the fight. */
 function pullDamaged(sim: Sim, team: Team, army: Unit[]) {
   const ceil = sim.difficultyOf(team);
-  const line = ceil === "hard" ? 0.22 : 0.55;
+  const line = ceil === "hard" ? 0.25 : ceil === "easy" ? 0.45 : 0.38;
   const home = sim.starts.slots[team] ?? sim.starts.enemy;
   const hurt = army.filter((u) => {
     if (u.hp >= u.maxHp * line) return false;
@@ -966,20 +966,38 @@ function launch(
   // Personality can wait. It cannot attack before the difficulty mark.
   if (!defense && attackMove && sim.time < firstPushAt(diff)) return false;
   if (!defense && !attackMove && diff === "easy" && sim.time >= EASY_SCOUT_UNTIL) return false;
-  sim.aiGoal[team] = dest;
-  if (focus && (defense || sim.time >= firstPushAt(diff))) {
-    sim.issueAttack(
-      units.map((u) => u.id),
-      focus,
-    );
+  const armed = attackMove && (defense || sim.time >= firstPushAt(diff));
+  const roles = !defense && armed && (diff === "normal" || diff === "hard") ? baseRoles(sim, team) : [];
+  if (roles.length >= 2) {
+    sim.aiGoal[team] = roles[0]!;
+    const groups = splitGroups(units, roles.length);
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i]!;
+      if (!group.length) continue;
+      const step = hop(sim, group[0]!, roles[i]!);
+      sim.issueMove(
+        group.map((u) => u.id),
+        step.x,
+        step.y,
+        true,
+      );
+    }
   } else {
-    const step = hop(sim, units[0]!, dest);
-    sim.issueMove(
-      units.map((u) => u.id),
-      step.x,
-      step.y,
-      attackMove && (defense || sim.time >= firstPushAt(diff)),
-    );
+    sim.aiGoal[team] = dest;
+    if (focus && (defense || sim.time >= firstPushAt(diff))) {
+      sim.issueAttack(
+        units.map((u) => u.id),
+        focus,
+      );
+    } else {
+      const step = hop(sim, units[0]!, dest);
+      sim.issueMove(
+        units.map((u) => u.id),
+        step.x,
+        step.y,
+        armed,
+      );
+    }
   }
   if (waveClock) {
     const gap = pace.wave + sim.roll(pace.jitter + 1);
@@ -1083,6 +1101,34 @@ function hop(sim: Sim, u: Unit, dest: { x: number; y: number }): { x: number; y:
   }
   if (sim.reach(u, dest.x, dest.y)) return dest;
   return { x: clamp(u.x + ux * 6, 2, sim.gw - 2), y: clamp(u.y + uy * 6, 2, sim.gh - 2) };
+}
+
+const PROD_KINDS = new Set(["yard", "barracks", "factory", "refinery", "dock", "helipad", "stealth"]);
+const POWER_KINDS = new Set(["power", "advpower"]);
+const DEF_KINDS = new Set(["tower", "aa"]);
+
+/** Visible power, production, and defense nearest the enemy camp. One point per role. */
+function baseRoles(sim: Sim, team: Team): { x: number; y: number }[] {
+  const camp = enemyCamp(sim, team);
+  const best = new Map<string, { x: number; y: number; d: number }>();
+  for (const b of sim.buildings) {
+    if (b.hp <= 0 || b.neutral || sim.allied(team, b.team) || b.rubble > 0) continue;
+    if (!sim.buildingVisible(team, b)) continue;
+    const role = POWER_KINDS.has(b.kind) ? "power" : PROD_KINDS.has(b.kind) ? "prod" : DEF_KINDS.has(b.kind) ? "def" : "";
+    if (!role) continue;
+    const x = b.tx + b.w / 2;
+    const y = b.ty + b.h / 2;
+    const d = Math.hypot(x - camp.x, y - camp.y);
+    const prev = best.get(role);
+    if (!prev || d < prev.d) best.set(role, { x, y, d });
+  }
+  return [...best.values()].map(({ x, y }) => ({ x, y }));
+}
+
+function splitGroups(units: Unit[], n: number): Unit[][] {
+  const out = Array.from({ length: n }, () => [] as Unit[]);
+  units.forEach((u, i) => out[i % n]!.push(u));
+  return out;
 }
 
 function strikePoint(sim: Sim, team: Team): { x: number; y: number } {

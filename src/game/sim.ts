@@ -1857,6 +1857,7 @@ export class Sim {
     this.tickTowers(dt);
     this.tickCrates(dt);
     this.tickMend(dt);
+    this.tickBaseHeal(dt);
     this.tickIncome(dt);
     this.applyCloak();
     this.sweep();
@@ -2448,7 +2449,8 @@ export class Sim {
       if (shore) return shore;
     }
     if (u.order.t === "move" && u.order.attackMove) {
-      const foe = this.nearestFoe(u.team, u.x, u.y, u.sight * 0.92, u.hitsAir, false, false);
+      const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+      const foe = this.nearestOnPath(u.team, u.x, u.y, reach + 1.2, u.hitsAir);
       if (foe) return foe;
       return this.liveBreach(u);
     }
@@ -3606,6 +3608,23 @@ export class Sim {
     return 1;
   }
 
+  /** Bots mend at their own camp. Players still heal only from a field-repair crate. */
+  private tickBaseHeal(dt: number) {
+    for (let t = 1; t <= this.opponents; t++) {
+      const team = t as Team;
+      if (!this.cpu[team]) continue;
+      const home = this.starts.slots[team];
+      if (!home) continue;
+      for (const u of this.units) {
+        if (u.team !== team || u.hp <= 0 || u.hp >= u.maxHp || u.aboard) continue;
+        if (u.order.t === "attack") continue;
+        if (this.time < u.aggroUntil) continue;
+        if (Math.hypot(u.x - home.x, u.y - home.y) > 8) continue;
+        u.hp = Math.min(u.maxHp, u.hp + u.maxHp * 0.07 * dt);
+      }
+    }
+  }
+
   private tickMend(dt: number) {
     for (let t = 0; t < 4; t++) {
       if ((this.mendUntil[t] ?? 0) <= this.time) continue;
@@ -4616,6 +4635,33 @@ export class Sim {
           bestD = d;
           best = { x, y };
         }
+      }
+    }
+    return best;
+  }
+
+  /** Closest hostile unit or hall inside the leash. Fences and far targets do not pull an attack-move off its path. */
+  private nearestOnPath(team: Team, x: number, y: number, radius: number, hitsAir: boolean): Target | null {
+    let best: Target | null = null;
+    let bestD = radius;
+    for (const u of this.units) {
+      if (this.allied(u.team, team) || u.hp <= 0 || u.aboard) continue;
+      if (u.loco === "air" && !hitsAir) continue;
+      if (!this.visibleUnit(team, u)) continue;
+      const d = Math.hypot(u.x - x, u.y - y);
+      if (d < bestD) {
+        bestD = d;
+        best = { kind: "unit", u };
+      }
+    }
+    for (const b of this.buildings) {
+      if (this.allied(b.team, team) || b.neutral || b.hp <= 0 || b.rubble > 0) continue;
+      if (isFence(b.kind) || b.kind === "span") continue;
+      if (!this.buildingVisible(team, b)) continue;
+      const d = distPointToRect(x, y, b);
+      if (d < bestD) {
+        bestD = d;
+        best = { kind: "building", b };
       }
     }
     return best;
