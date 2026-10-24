@@ -796,7 +796,7 @@ export function paintWaterSheen(
   }
 }
 
-/** One tile of a deposit. `around` is how many of the eight neighbors still hold ore. `edge` marks open sides: N=1 E=2 S=4 W=8. */
+/** One tile of a deposit. `around` is how many of the eight neighbors still hold ore. Crystals are sparse so the field is a patch, not a grid. */
 export function paintOre(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -806,7 +806,7 @@ export function paintOre(
   time: number,
   spark = false,
   around = 4,
-  edge = 0,
+  _edge = 0,
 ) {
   if (spent || amount <= 0) {
     if (!spent) return;
@@ -816,70 +816,63 @@ export function paintOre(
     return;
   }
   const fill = Math.max(0.35, Math.min(1, amount / 1200));
-  const open = (bit: number) => (edge & bit) !== 0;
-  const left = open(8) ? 0.16 : -0.04;
-  const right = open(2) ? 0.84 : 1.04;
-  const top = open(1) ? 0.14 : -0.04;
-  const bottom = open(4) ? 0.86 : 1.04;
-  ctx.fillStyle = "rgba(62, 34, 14, 0.55)";
-  ctx.beginPath();
-  ctx.ellipse(x + (left + right) / 2, y + (top + bottom) / 2 + 0.04, Math.max(0.18, (right - left) * 0.48), Math.max(0.14, (bottom - top) * 0.42), 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = fill > 0.7 ? "#c47a28" : "#a85a22";
-  ctx.beginPath();
-  ctx.ellipse(
-    x + (left + right) / 2,
-    y + (top + bottom) / 2,
-    Math.max(0.14, (right - left) * 0.36),
-    Math.max(0.1, (bottom - top) * 0.3),
-    hash(x, y) * 0.4 - 0.2,
-    0,
-    Math.PI * 2,
-  );
-  ctx.fill();
-  if (edge) {
-    ctx.fillStyle = "rgba(28, 18, 10, 0.72)";
-    if (open(1)) ctx.fillRect(x + left, y + top - 0.02, Math.max(0.08, right - left), 0.07);
-    if (open(4)) ctx.fillRect(x + left, y + bottom - 0.05, Math.max(0.08, right - left), 0.07);
-    if (open(8)) ctx.fillRect(x + left - 0.02, y + top, 0.07, Math.max(0.08, bottom - top));
-    if (open(2)) ctx.fillRect(x + right - 0.05, y + top, 0.07, Math.max(0.08, bottom - top));
+  const jx = (hash(x * 3 + 1, y * 2) - 0.5) * 0.7;
+  const jy = (hash(x + 4, y * 5 + 2) - 0.5) * 0.55;
+  if (hash(x * 7, y + 3) > 0.12) {
+    ctx.fillStyle = `rgba(98, 52, 18, ${0.16 + fill * 0.14})`;
+    ctx.beginPath();
+    ctx.ellipse(x + 0.48 + jx, y + 0.56 + jy, 0.34 + hash(x + 2, y) * 0.42, 0.16 + hash(x, y + 6) * 0.26, (hash(x + 9, y + 1) - 0.5) * 1.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(186, 112, 42, ${0.1 + fill * 0.12})`;
+    ctx.beginPath();
+    ctx.ellipse(x + 0.4 - jx * 0.6, y + 0.48 + jy * 0.4, 0.18 + hash(x + 6, y + 8) * 0.22, 0.1 + hash(y, x) * 0.12, jx, 0, Math.PI * 2);
+    ctx.fill();
   }
-  const interior = around >= 5;
-  const n = interior ? 4 : 3;
-  const bob = Math.sin(time * 1.6 + x + y) * 0.01;
-  const body = fill > 0.65 ? "#e09a3c" : "#d08a3a";
+  const gate = around >= 6 ? 0.55 : around >= 4 ? 0.34 : 0.16;
+  if (hash(x * 11 + 2, y * 7 + 5) > gate) {
+    if (spark) {
+      const glint = (Math.sin(time * 9 + x * 2 + y) + 1) * 0.5;
+      ctx.fillStyle = `rgba(255, 236, 196, ${0.25 + glint * 0.35})`;
+      ctx.beginPath();
+      ctx.arc(x + 0.45 + jx * 0.3, y + 0.42, 0.04, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    return;
+  }
+  const n = around >= 6 && hash(x + 8, y + 3) > 0.6 ? 2 : 1;
+  const body = fill > 0.65 ? "#e0a04a" : "#c48432";
+  const deep = fill > 0.65 ? "#8a4e16" : "#6e3e12";
   for (let i = 0; i < n; i++) {
-    const hx = hash(x * 3 + i * 5, y + 4);
-    const hy = hash(x + i, y * 4 + 2);
-    const pull = interior ? 0.5 : 0.5 + (open(8) ? 0.12 : 0) - (open(2) ? 0.12 : 0);
-    const px = x + 0.22 + (hx * 0.28 + pull * 0.28);
-    const py = y + 0.22 + hy * 0.28 + (open(1) ? 0.12 : 0) + bob;
-    const s = (interior ? 0.16 : 0.12) + fill * 0.08;
+    const hx = hash(x * 5 + i * 13, y * 3 + 4);
+    const hy = hash(x + i * 9, y * 8 + 2);
+    const px = x - 0.05 + hx * 1.15;
+    const py = y - 0.02 + hy * 0.95 + Math.sin(time * 1.4 + x + y) * 0.008;
+    const s = (around >= 6 ? 0.2 : 0.14) + fill * 0.07 + hash(x + i, y + 11) * 0.06;
     ctx.save();
     ctx.translate(px, py);
-    ctx.rotate((hash(x + i * 2, y + 9) - 0.5) * 0.8);
+    ctx.rotate((hash(x + i * 4, y + 9) - 0.5) * 1.6);
     ctx.beginPath();
-    ctx.moveTo(0, -s * 1.35);
-    ctx.lineTo(s * 0.7, -s * 0.15);
-    ctx.lineTo(s * 0.35, s * 1.05);
-    ctx.lineTo(-s * 0.55, s * 0.55);
+    const lump = hash(x + i, y * 2) > 0.45;
+    if (lump) {
+      ctx.moveTo(-s * 0.2, -s * 0.9);
+      ctx.lineTo(s * 0.85, -s * 0.15);
+      ctx.lineTo(s * 0.35, s * 0.8);
+      ctx.lineTo(-s * 0.7, s * 0.45);
+      ctx.lineTo(-s * 0.85, -s * 0.2);
+    } else {
+      ctx.moveTo(0, -s * 1.15);
+      ctx.lineTo(s * 0.55, s * 0.15);
+      ctx.lineTo(s * 0.1, s * 0.95);
+      ctx.lineTo(-s * 0.62, s * 0.35);
+    }
     ctx.closePath();
-    ctx.fillStyle = body;
-    ctx.strokeStyle = "#1a1510";
-    ctx.lineWidth = 0.05;
-    ctx.lineJoin = "round";
+    ctx.fillStyle = i === 0 ? body : deep;
     ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#f3ddb0";
+    ctx.fillStyle = "rgba(255, 228, 176, 0.55)";
     ctx.beginPath();
-    ctx.ellipse(-s * 0.05, -s * 0.45, s * 0.16, s * 0.28, 0.4, 0, Math.PI * 2);
+    ctx.ellipse(-s * 0.08, -s * 0.35, s * 0.12, s * 0.2, 0.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-  }
-  if (spark) {
-    const glint = (Math.sin(time * 9 + x * 2 + y) + 1) * 0.5;
-    ctx.fillStyle = `rgba(255, 248, 230, ${0.4 + glint * 0.5})`;
-    ctx.fillRect(x + 0.4 + glint * 0.1, y + 0.36, 0.06, 0.06);
   }
 }
 
