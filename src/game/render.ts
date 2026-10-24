@@ -40,7 +40,7 @@ import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
-import { ensureIso, iso, isoMask, type IsoBank } from "./iso.ts";
+import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
 import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, writeTerrain } from "./tileset.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
@@ -1205,7 +1205,8 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
     if (b.hp <= 0 || b.rubble > 0 || !sim.buildingVisible(VIEWER, b)) continue;
     const mine = sim.allied(b.team, VIEWER);
     const low = sim.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
-    const rate = low ? 0.5 : 1;
+    const burned = b.complete && b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+    const rate = (low ? 0.5 : 1) * burned;
     let p = -1;
     let label = "";
     if (!b.complete) {
@@ -3721,7 +3722,9 @@ function drawBuilding(
     return;
   }
   const plate = hallPlate(b.kind);
-  const img = plate ? iso()?.[plate] : undefined;
+  const healthy = plate ? iso()?.[plate] : undefined;
+  const frac = b.maxHp > 0 ? b.hp / b.maxHp : 1;
+  const img = (plate && b.complete && frac < 0.5 ? isoDmg(plate) : null) ?? healthy;
   if (img) {
     const footX = b.tx + b.w / 2;
     const footY = b.ty + b.h - 0.02;
@@ -3776,17 +3779,17 @@ function paintStructureHurt(
   }
   if (b.rubble > 0 || b.hp <= 0) return;
   const frac = b.hp / b.maxHp;
-  if (frac >= 0.66) return;
+  if (frac >= 0.6) return;
   ctx.save();
-  if (frac < 0.66) {
-    ctx.globalAlpha = 0.18 + (0.66 - frac) * 0.4;
-    ctx.fillStyle = "rgba(20, 16, 12, 0.55)";
+  if (frac < 0.6) {
+    ctx.globalAlpha = 0.22 + (0.6 - frac) * 0.45;
+    ctx.fillStyle = "rgba(40, 38, 36, 0.7)";
     ctx.beginPath();
-    ctx.ellipse(x, y - wide * 0.15, wide * 0.42, wide * 0.18, 0, 0, Math.PI * 2);
+    ctx.ellipse(x, y - wide * 0.35, wide * 0.28, wide * 0.16, 0, 0, Math.PI * 2);
     ctx.fill();
   }
-  const light = frac >= 0.33;
-  const points = light ? 2 : 4;
+  const light = frac >= 0.3;
+  const points = light ? 3 : 5;
   if (!light) {
     ctx.save();
     ctx.translate(x, y);
@@ -3884,6 +3887,15 @@ function rubbleSeen(sim: Sim, b: Building): boolean {
 }
 
 function paintRubble(ctx: CanvasRenderingContext2D, b: Building) {
+  const plate = hallPlate(b.kind);
+  const ruin = plate ? isoRuin(plate) : null;
+  if (ruin) {
+    const footX = b.tx + b.w / 2;
+    const footY = b.ty + b.h - 0.02;
+    const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+    paintPlate(ctx, ruin, footX, footY, wide, false, true, "hall", "#8a8070", null);
+    return;
+  }
   const x0 = b.tx + 0.08;
   const y0 = b.ty + 0.12;
   ctx.save();

@@ -2899,7 +2899,8 @@ function QueueStrip({ sim, team }: { sim: Sim; team: number }) {
         const plant = b.kind === "power" || b.kind === "advpower";
         const brown = !low ? 1 : plant ? 0.8 : 0.5;
         const works = sim.worksLeft[team]! > 0 ? 1.65 : 1;
-        const rate = !b.complete ? brown * 1.25 * works : brown * works;
+        const burned = b.complete && b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+        const rate = !b.complete ? brown * 1.25 * works : brown * works * burned;
         let label = b.name;
         let p = 0;
         if (!b.complete) {

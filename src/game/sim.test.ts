@@ -58,6 +58,7 @@ function stubBuilding(sim: Sim, partial: Partial<Building> & Pick<Building, "kin
     vsAir: def.vsAir ?? 0,
     open: partial.open ?? partial.kind === "gate",
     rubble: partial.rubble ?? 0,
+    block: 0,
     hit: 0,
     collapse: partial.collapse ?? 0,
     shown: 0,
@@ -933,6 +934,39 @@ test("a destroyed hall leaves a rubble footprint", () => {
   assert.ok(still, "rubble footprint was deleted");
   assert.equal(still.hp, 0);
   assert.ok(still.rubble > 100);
+});
+
+test("a burning hall trains slower, and its rubble blocks then opens", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const hall = stubBuilding(sim, { kind: "barracks", team: 0, tx: 12, ty: 12 });
+  occupy(sim, hall);
+  hall.queue = ["rifle"];
+  hall.hp = hall.maxHp * 0.2;
+  sim.tick(0.4);
+  const burned = hall.prod;
+  hall.hp = hall.maxHp;
+  sim.tick(0.4);
+  const healthy = hall.prod - burned;
+  assert.ok(burned > 0 && healthy > burned * 1.4, `burned ${burned} healthy ${healthy}`);
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 24, ty: 16 });
+  occupy(sim, plant);
+  plant.hp = 8;
+  const rifle = sim.spawnUnit(0, "rifle", plant.tx - 1.4, plant.ty + 0.6);
+  assert.ok(rifle);
+  sim.issueAttack([rifle.id], plant.id);
+  for (let i = 0; i < 80 && plant.collapse <= 0; i++) sim.tick(0.1);
+  assert.ok(plant.collapse > 0);
+  for (let i = 0; i < 20; i++) sim.tick(0.1);
+  assert.equal(plant.hp, 0);
+  assert.ok(plant.block > 0);
+  const walker = sim.spawnUnit(0, "tank", 8.5, 8.5);
+  assert.ok(walker);
+  assert.equal(sim.passable(walker, plant.tx + 0.5, plant.ty + 0.5), false);
+  for (let i = 0; i < 70; i++) sim.tick(0.1);
+  assert.equal(plant.block, 0);
+  assert.equal(sim.passable(walker, plant.tx + 0.5, plant.ty + 0.5), true);
+  assert.ok(plant.rubble > 100);
 });
 
 test("an engineer walks in and captures a coast plant", () => {

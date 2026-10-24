@@ -61,10 +61,22 @@ const NAMES = [
 let bank: IsoBank | null = null;
 let started = false;
 const teamMasks = new Map<string, CanvasImageSource>();
+const dmgPlates = new Map<string, CanvasImageSource>();
+const ruinPlates = new Map<string, CanvasImageSource>();
 
 /** White mask for `<id>-team.png`, already keyed. Missing files stay absent. */
 export function isoMask(name: string): CanvasImageSource | null {
   return teamMasks.get(name) ?? null;
+}
+
+/** Damaged plate for `<id>-dmg.png`. Used under half health. */
+export function isoDmg(name: string): CanvasImageSource | null {
+  return dmgPlates.get(name) ?? null;
+}
+
+/** Ruin plate for `<id>-ruin.png`. Used when the building is gone. */
+export function isoRuin(name: string): CanvasImageSource | null {
+  return ruinPlates.get(name) ?? null;
 }
 
 function load(name: string): Promise<HTMLImageElement | null> {
@@ -100,8 +112,10 @@ export function ensureIso(): void {
     bank = next;
     await Promise.all(
       NAMES.map(async (name) => {
-        const img = await load(`${name}-team`);
-        if (img) teamMasks.set(name, keySprite(img, `iso/${name}-team`));
+        const [team, dmg, ruin] = await Promise.all([load(`${name}-team`), load(`${name}-dmg`), load(`${name}-ruin`)]);
+        if (team) teamMasks.set(name, keySprite(team, `iso/${name}-team`));
+        if (dmg) dmgPlates.set(name, keySprite(dmg, `iso/${name}-dmg`));
+        if (ruin) ruinPlates.set(name, keySprite(ruin, `iso/${name}-ruin`));
       }),
     );
   })();

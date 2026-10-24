@@ -234,8 +234,10 @@ export interface Building {
   vsAir: number;
   /** Friendly gate passage. Enemies never use it. Locked gates stop your own troops too. */
   open: boolean;
-  /** Rubble still blocks until this counts down to 0. */
+  /** Rubble still blocks until this counts down to 0. Walls use a short count. A fallen hall keeps a high value so the pile stays. */
   rubble: number;
+  /** Seconds a fallen hall's footprint still blocks movement. */
+  block: number;
   /** Seconds left on the red damage flash. */
   hit: number;
   /** Sim time until the attack bar hides. Visual only. */
@@ -2182,7 +2184,8 @@ export class Sim {
       if (!b.queue.length) continue;
       const low = this.powerOf(b.team).low;
       const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
-      b.prod += dt * (low ? 0.5 : 1) * rush;
+      const burned = b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+      b.prod += dt * (low ? 0.5 : 1) * rush * burned;
       const spec = resolveUnit(b.queue[0], this.factionOf(b.team));
       if (b.prod >= spec.time) {
         const kind = b.queue[0];
@@ -3317,12 +3320,19 @@ export class Sim {
       b.collapse = 0;
       b.hp = 0;
       b.rubble = 9999;
-      this.clearOcc(b);
+      b.block = 6;
     }
   }
 
   private tickRubble(dt: number) {
     for (const b of this.buildings) {
+      if (b.block > 0) {
+        b.block -= dt;
+        if (b.block <= 0) {
+          b.block = 0;
+          if (b.hp <= 0) this.clearOcc(b);
+        }
+      }
       if (b.rubble <= 0 || b.rubble > 100 || b.hp <= 0 || b.kind === "span") continue;
       b.rubble -= dt;
       if (b.rubble <= 0) {
@@ -3496,6 +3506,9 @@ export class Sim {
     if (u.capture < 3) return;
     b.team = u.team;
     b.neutral = false;
+    b.hp = b.maxHp;
+    b.mending = false;
+    b.block = 0;
     this.say(u.team === 0 ? "Building captured" : `Lost ${b.name}`, "cap", 0.4);
     u.hp = 0;
     this.statLost[u.team] = (this.statLost[u.team] ?? 0) + 1;
@@ -4165,6 +4178,7 @@ export class Sim {
       vsAir: def.vsAir ?? 0,
       open: kind === "gate",
       rubble: 0,
+      block: 0,
       hit: 0,
       shown: 0,
       mending: false,
