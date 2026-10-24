@@ -88,7 +88,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, openBuildPads, paveMichigan, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -254,6 +254,12 @@ export interface Building {
   mending: boolean;
   /** Seconds left on the collapse. 0 means not collapsing. */
   collapse: number;
+  /** Neutral objective infantry take by standing beside it. */
+  prize: boolean;
+  /** Seconds a side has held the prize. Not saved. */
+  cap: number;
+  /** Team filling the capture bar. -1 is contested, -2 is empty. */
+  capTeam: number;
 }
 
 export interface Shot {
@@ -422,6 +428,7 @@ export interface SimSave {
     rubble?: number;
     neutral?: boolean;
     mending?: boolean;
+    prize?: boolean;
   }[];
 }
 
@@ -808,7 +815,10 @@ export class Sim {
         evenMichiganFields(this.terrain, this.crystal, gw, gh, slots);
       }
       openBuildPads(this.terrain, this.crystal, gw, gh, slots);
-      if (!custom && this.mapId === "michigan") paveMichigan(this.terrain, this.crystal, gw, gh, slots);
+      if (!custom && this.mapId === "michigan") {
+        paveMichigan(this.terrain, this.crystal, gw, gh, slots);
+        plantMichiganHeart(this.terrain, this.crystal, gw, gh, slots);
+      }
       this.clearStartClutter(slots);
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
@@ -1509,6 +1519,15 @@ export class Sim {
         continue;
       }
       if (!this.groundOrder(u)) continue;
+      if (target.kind === "building" && target.b.prize && u.armor === "infantry") {
+        const tile = this.approachTile(target.b, u, 1.65);
+        const p = tile ? { x: tile.x + 0.5, y: tile.y + 0.5 } : this.targetPoint(target);
+        u.order = { t: "move", x: p.x, y: p.y, attackMove: false };
+        u.path = [];
+        u.capture = 0;
+        any = true;
+        continue;
+      }
       if (u.damage <= 0) {
         const wreck = target.kind === "building" && target.b.kind === "span" && target.b.rubble > 0;
         const capture =
@@ -1916,6 +1935,7 @@ export class Sim {
     this.tickCollapse(dt);
     this.tickRubble(dt);
     this.separate();
+    this.tickPrizes(dt);
     this.tickShots(dt);
     this.tickTowers(dt);
     this.tickCrates(dt);
@@ -2034,6 +2054,7 @@ export class Sim {
           rubble: b.rubble,
           neutral: b.neutral,
           mending: b.mending,
+          prize: b.prize || undefined,
         })),
     };
   }
@@ -2145,6 +2166,7 @@ export class Sim {
       built.rubble = b.rubble ?? 0;
       built.neutral = b.kind === "span" || !!b.neutral;
       built.mending = !!b.mending;
+      built.prize = !!b.prize;
       if (b.id >= sim.nextId) sim.nextId = b.id + 1;
     }
     for (const b of sim.buildings) {
@@ -2685,7 +2707,7 @@ export class Sim {
     else if (under === TILE_SHALLOW && u.armor === "infantry") speed *= 0.5;
     else if (under === TILE_RAMP) speed *= vehicle ? 0.58 : 0.75;
     else if (under === TILE_VALLEY || (vehicle && under === TILE_ROUGH)) speed *= 0.72;
-    else if (under === TILE_ROAD && vehicle) speed *= 1.2;
+    else if (under === TILE_ROAD) speed *= 1.2;
     else if (under === TILE_SCRUB && u.armor === "infantry") speed *= 0.82;
     if (u.armor === "infantry" && this.marchLeft[u.team]! > 0) speed *= 1.4;
     if (u.kind === "tank" || u.kind === "medium") {
@@ -2901,7 +2923,7 @@ export class Sim {
     if (this.deploying()) return;
     for (const b of this.buildings) {
       const aa = b.special === "aa";
-      if ((b.kind !== "tower" && !aa) || !b.complete || b.hp <= 0) continue;
+      if ((b.kind !== "tower" && !aa) || !b.complete || b.hp <= 0 || b.prize || b.damage <= 0) continue;
       const pace = this.powerFactor(b.team);
       if (b.cooldown > 0) b.cooldown -= dt * pace;
       if (pace <= 0) continue;
@@ -3754,8 +3776,106 @@ export class Sim {
     return false;
   }
 
+  /** Oil derrick and watchtower. Infantry take them by standing beside them. */
+  private plantMichiganPrizes() {
+    const heart = this.prizeAnchor();
+    const derrickWant = heart ? { x: heart.x + 2.4, y: heart.y + 0.2 } : { x: this.gw / 2, y: this.gh / 2 };
+    const siloDef = resolveBuilding("silo", this.factionOf(0));
+    const siloPad = this.findPad(Math.round(derrickWant.x), Math.round(derrickWant.y), siloDef.w, siloDef.h);
+    if (siloPad) {
+      const b = this.addBuilding(0, "silo", siloPad.x, siloPad.y, true, true);
+      b.prize = true;
+      b.name = "Oil Derrick";
+      b.powerUse = 0;
+      this.fillOcc(b);
+    }
+    const span = this.buildings.find((b) => b.kind === "span" && b.hp > 0);
+    const towerWant = span
+      ? { x: span.tx + span.w + 2, y: span.ty + (span.h / 2) | 0 }
+      : { x: this.gw / 2 + 6, y: this.gh / 2 - 4 };
+    const towerDef = resolveBuilding("tower", this.factionOf(0));
+    const towerPad = this.findPad(Math.round(towerWant.x), Math.round(towerWant.y), towerDef.w, towerDef.h);
+    if (towerPad) {
+      const b = this.addBuilding(0, "tower", towerPad.x, towerPad.y, true, true);
+      b.prize = true;
+      b.name = "Watchtower";
+      b.damage = 0;
+      b.range = 0;
+      b.sight = 9;
+      b.powerUse = 0;
+      this.fillOcc(b);
+    }
+  }
+
+  /** The rich middle field, or the map center when that field did not land. */
+  private prizeAnchor(): { x: number; y: number } | null {
+    let best = 0;
+    let bx = -1;
+    let by = -1;
+    const cx = this.gw / 2;
+    const cy = this.gh / 2;
+    for (let y = 2; y < this.gh - 2; y++) {
+      for (let x = 2; x < this.gw - 2; x++) {
+        const n = this.crystal[y * this.gw + x] ?? 0;
+        if (n < 2000) continue;
+        const score = n - Math.hypot(x + 0.5 - cx, y + 0.5 - cy) * 30;
+        if (score > best) {
+          best = score;
+          bx = x;
+          by = y;
+        }
+      }
+    }
+    if (bx < 0) return null;
+    return { x: bx + 0.5, y: by + 0.5 };
+  }
+
+  /** Infantry beside a prize fill a bar. One side holding it takes the structure. */
+  private tickPrizes(dt: number) {
+    for (const b of this.buildings) {
+      if (!b.prize || b.hp <= 0 || b.rubble > 0 || b.collapse > 0) continue;
+      const teams: Team[] = [];
+      for (const u of this.units) {
+        if (u.hp <= 0 || u.armor !== "infantry" || u.aboard || this.eliminated[u.team]) continue;
+        if (distPointToRect(u.x, u.y, b) > 1.65) continue;
+        if (!teams.includes(u.team)) teams.push(u.team);
+      }
+      if (teams.length === 1 && teams[0] === b.team && !b.neutral) {
+        b.cap = Math.max(0, b.cap - dt);
+        b.capTeam = b.team;
+        continue;
+      }
+      if (teams.length === 0) {
+        b.cap = Math.max(0, b.cap - dt * 0.85);
+        if (b.cap <= 0) b.capTeam = -2;
+        continue;
+      }
+      if (teams.length > 1) {
+        b.capTeam = -1;
+        continue;
+      }
+      const team = teams[0]!;
+      if (b.capTeam !== team) {
+        b.capTeam = team;
+        b.cap = 0;
+      }
+      b.cap += dt;
+      if (b.cap < 3) continue;
+      b.team = team;
+      b.neutral = false;
+      b.hp = b.maxHp;
+      b.cap = 0;
+      b.capTeam = team;
+      this.say(team === this.ear ? `${b.name} captured` : `Lost ${b.name}`, "cap", 0.6);
+    }
+  }
+
   /** Neutral plants an engineer can take. They do not shoot and do not pay out until captured. */
   private plantOutposts() {
+    if (this.mapId === "michigan") {
+      this.plantMichiganPrizes();
+      return;
+    }
     const kinds: BuildingId[] = ["supply", "silo", "supply"];
     const slots = this.starts.slots;
     const cx = this.gw / 2;
@@ -4340,6 +4460,9 @@ export class Sim {
       shown: 0,
       mending: false,
       collapse: 0,
+      prize: false,
+      cap: 0,
+      capTeam: -2,
     };
     const door = this.doorOf(b);
     b.rallyX = door.x;
@@ -4791,7 +4914,7 @@ export class Sim {
       }
     }
     for (const b of this.buildings) {
-      if (this.allied(b.team, team) || b.neutral || b.hp <= 0 || b.rubble > 0) continue;
+      if (this.allied(b.team, team) || b.neutral || b.prize || b.hp <= 0 || b.rubble > 0) continue;
       if (isFence(b.kind) || b.kind === "span") continue;
       if (!this.buildingVisible(team, b)) continue;
       const d = distPointToRect(x, y, b);
@@ -4840,7 +4963,7 @@ export class Sim {
       }
     }
     for (const b of this.buildings) {
-      if (this.allied(b.team, team) || b.neutral || b.hp <= 0) continue;
+      if (this.allied(b.team, team) || b.neutral || b.prize || b.hp <= 0) continue;
       if (!this.buildingVisible(team, b)) continue;
       const d = distPointToRect(x, y, b);
       if (isFence(b.kind)) {

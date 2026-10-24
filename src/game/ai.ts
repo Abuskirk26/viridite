@@ -619,7 +619,7 @@ function nearbyThreat(sim: Sim, team: Team): { x: number; y: number } | null {
   const home = sim.starts.slots[team];
   if (home) camps.push(home);
   for (const b of sim.buildings) {
-    if (b.team !== team || b.hp <= 0 || b.neutral) continue;
+    if (b.team !== team || b.hp <= 0 || b.neutral || b.prize) continue;
     if (b.kind === "sandbag" || b.kind === "wall" || b.kind === "gate" || b.kind === "span") continue;
     camps.push({ x: b.tx + b.w / 2, y: b.ty + b.h / 2 });
   }
@@ -742,6 +742,10 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
     sim.aiIntent[team] = "expand";
     return;
   }
+  if (sim.mapId === "michigan" && stance !== "passive") {
+    workExpansion(sim, team);
+    contestMiddle(sim, team);
+  }
   flank(sim, team, stance);
   const army = combatUnits(sim, team);
   pullDamaged(sim, team, army);
@@ -857,11 +861,16 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
     const follow = diff === "normal" && sim.aiPushed[team] && sim.time >= (sim.aiAt[team] || 0);
     const opening = !sim.aiPushed[team] && sim.time >= pace.push;
     if (opening || follow) {
-      const idleN = army.filter((u) => idleish(u) && !retreating(u, home) && u.hp >= u.maxHp * 0.55).length;
+      // An attack-move into scrub or water never arrives, and that squad must still be free to push.
+      const stalled = (u: Unit) =>
+        u.order.t === "move" &&
+        u.order.attackMove &&
+        u.path.length === 0 &&
+        Math.hypot(u.x - u.order.x, u.y - u.order.y) > 4;
+      const free = (u: Unit) => (idleish(u) || stalled(u)) && !retreating(u, home) && u.hp >= u.maxHp * 0.55;
+      const idleN = army.filter(free).length;
       const openEnough = idleN >= Math.max(3, Math.min(4, liveGroup(sim, team, pace)));
-      let ready = army.filter(
-        (u) => (idleish(u) || (u.order.t === "move" && !u.order.attackMove)) && !retreating(u, home) && u.hp >= u.maxHp * 0.55,
-      );
+      let ready = army.filter(free);
       if (follow) {
         const out = army.filter(
           (u) =>
@@ -1004,9 +1013,15 @@ function recallBroken(sim: Sim, team: Team, army: Unit[], home: { x: number; y: 
 
 /** Keep a marching group from parking in the fog when a hop ends. Fresh troops wait for the next wave. */
 function nudge(sim: Sim, team: Team, army: Unit[]) {
-  const goal = sim.aiGoal[team];
+  let goal = sim.aiGoal[team];
   if (!goal) return;
+  const camp = enemyCamp(sim, team);
   const home = sim.starts.slots[team] ?? sim.starts.enemy;
+  const lead = army.find((u) => Math.hypot(u.x - home.x, u.y - home.y) > 8);
+  if (lead && Math.hypot(goal.x - camp.x, goal.y - camp.y) > 8 && Math.hypot(lead.x - goal.x, lead.y - goal.y) < 5) {
+    sim.aiGoal[team] = camp;
+    goal = camp;
+  }
   const stuck = army.filter((u) => needsHop(u, home));
   if (!stuck.length) return;
   const step = hop(sim, stuck[0]!, goal);
@@ -1054,6 +1069,12 @@ function launch(
   const armed = attackMove && (defense || sim.time >= firstPushAt(diff) || (diff === "normal" && sim.time >= NORMAL_HARASS_AT));
   const roles = !defense && !siege && armed && (diff === "normal" || diff === "hard") ? baseRoles(sim, team) : [];
   if (siege) {
+    const via = sim.mapId === "michigan" && units[0] ? laneWaypoint(sim, team, units[0]) : null;
+    if (via) {
+      sim.aiGoal[team] = via;
+      const step = hop(sim, units[0]!, via);
+      sendParty(sim, units, step, true);
+    } else {
     const ids = siegeIds(sim, team, Math.min(3, units.length));
     sim.aiGoal[team] = dest;
     if (ids.length) {
@@ -1070,6 +1091,7 @@ function launch(
     } else {
       const step = hop(sim, units[0]!, enemyCamp(sim, team));
       sendParty(sim, units, step, true);
+    }
     }
   } else if (roles.length >= 2) {
     sim.aiGoal[team] = roles[0]!;
@@ -1121,8 +1143,8 @@ function siegeIds(sim: Sim, team: Team, n: number): number[] {
   const camp = enemyCamp(sim, team);
   const hits: { id: number; rank: number; d: number }[] = [];
   const seen = new Set<number>();
-  const consider = (b: { id: number; kind: string; tx: number; ty: number; w: number; h: number; hp: number; neutral?: boolean; rubble?: number; team: number }, known: boolean) => {
-    if (b.hp <= 0 || b.neutral || (b.rubble ?? 0) > 0 || sim.allied(team, b.team as Team)) return;
+  const consider = (b: { id: number; kind: string; tx: number; ty: number; w: number; h: number; hp: number; neutral?: boolean; rubble?: number; prize?: boolean; team: number }, known: boolean) => {
+    if (b.hp <= 0 || b.neutral || b.prize || (b.rubble ?? 0) > 0 || sim.allied(team, b.team as Team)) return;
     if (b.kind === "sandbag" || b.kind === "wall" || b.kind === "gate" || b.kind === "span") return;
     if (!known && !sim.buildingVisible(team, b as Building)) return;
     const rank = SIEGE_ORDER.indexOf(b.kind);
@@ -1189,6 +1211,127 @@ function pressField(sim: Sim, team: Team, army: Unit[], home: { x: number; y: nu
       id,
     );
   }
+}
+
+/** Second truck walks to this seat's expansion. The first truck stays on the home field. */
+function workExpansion(sim: Sim, team: Team) {
+  if (sim.time < 50) return;
+  const home = sim.starts.slots[team];
+  if (!home) return;
+  const trucks = sim.units.filter((u) => u.team === team && u.kind === "harvester" && u.hp > 0);
+  if (trucks.length < 2) return;
+  let best: { x: number; y: number } | null = null;
+  let bestD = 1e9;
+  const seen = new Uint8Array(sim.gw * sim.gh);
+  for (let y = 1; y < sim.gh - 1; y++) {
+    for (let x = 1; x < sim.gw - 1; x++) {
+      const start = y * sim.gw + x;
+      if (seen[start] || (sim.crystal[start] ?? 0) <= 0) continue;
+      const stack = [start];
+      seen[start] = 1;
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      let cell = start;
+      while (stack.length) {
+        const i = stack.pop() as number;
+        n++;
+        sx += i % sim.gw;
+        sy += (i / sim.gw) | 0;
+        if ((sim.crystal[i] ?? 0) > (sim.crystal[cell] ?? 0)) cell = i;
+        const bx = i % sim.gw;
+        const by = (i / sim.gw) | 0;
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = bx + dx;
+          const ny = by + dy;
+          if (nx < 1 || ny < 1 || nx >= sim.gw - 1 || ny >= sim.gh - 1) continue;
+          const ni = ny * sim.gw + nx;
+          if (seen[ni] || (sim.crystal[ni] ?? 0) <= 0) continue;
+          seen[ni] = 1;
+          stack.push(ni);
+        }
+      }
+      if (n < 4) continue;
+      const cx = sx / n + 0.5;
+      const cy = sy / n + 0.5;
+      const ds = Math.hypot(cx - home.x, cy - home.y);
+      if (ds < 14 || ds > 28 || ds >= bestD) continue;
+      let closer = true;
+      for (const other of sim.starts.slots) {
+        if (other === home) continue;
+        if (Math.hypot(cx - other.x, cy - other.y) <= ds) closer = false;
+      }
+      if (!closer) continue;
+      bestD = ds;
+      best = { x: (cell % sim.gw) + 0.5, y: ((cell / sim.gw) | 0) + 0.5 };
+    }
+  }
+  if (!best) return;
+  const onIt = trucks.some(
+    (u) => Math.hypot(u.x - best!.x, u.y - best!.y) < 5 || (u.harvestTx >= 0 && Math.hypot(u.harvestTx + 0.5 - best!.x, u.harvestTy + 0.5 - best!.y) < 3),
+  );
+  if (onIt) return;
+  const spare = trucks.find((u) => u.order.t !== "return" && u.cargo < u.cargoMax * 0.8);
+  if (!spare) return;
+  spare.order = { t: "harvest" };
+  spare.harvestTx = best.x | 0;
+  spare.harvestTy = best.y | 0;
+  spare.path = [];
+}
+
+/** After the 6:30 push, two spare rifles walk to the derrick and hold it. */
+function contestMiddle(sim: Sim, team: Team) {
+  if (!sim.aiPushed[team] || sim.time < NORMAL_PUSH_AT + 30) return;
+  const prize = sim.buildings.find((b) => b.prize && b.kind === "silo" && b.hp > 0);
+  const home = sim.starts.slots[team] ?? sim.starts.enemy;
+  const dest = prize
+    ? { x: prize.tx + prize.w / 2, y: prize.ty + prize.h + 0.8 }
+    : { x: sim.gw / 2, y: sim.gh / 2 };
+  const held = sim.units.some(
+    (u) =>
+      u.team === team &&
+      u.hp > 0 &&
+      u.armor === "infantry" &&
+      (Math.hypot(u.x - dest.x, u.y - dest.y) < 7 ||
+        (u.order.t === "move" && Math.hypot(u.order.x - dest.x, u.order.y - dest.y) < 3)),
+  );
+  if (held) return;
+  const idle = sim.units.filter(
+    (u) =>
+      u.team === team &&
+      u.hp > 0 &&
+      u.armor === "infantry" &&
+      u.damage > 0 &&
+      idleish(u) &&
+      !retreating(u, home) &&
+      Math.hypot(u.x - home.x, u.y - home.y) < 16,
+  );
+  if (idle.length < 2) return;
+  sim.issueMove(
+    idle.slice(0, 2).map((u) => u.id),
+    dest.x,
+    dest.y,
+    true,
+  );
+}
+
+/** Follow-up waves roll a road, a bridge, or a forest step so the match is not one lane. */
+function laneWaypoint(sim: Sim, team: Team, unit: Unit): { x: number; y: number } | null {
+  const lane = sim.roll(3);
+  const camp = enemyCamp(sim, team);
+  if (lane === 0) return null;
+  if (lane === 1) {
+    const spans = sim.buildings.filter((b) => b.kind === "span" && b.hp > 0);
+    if (!spans.length) return null;
+    const span = spans[sim.roll(spans.length)]!;
+    return { x: span.tx + span.w / 2, y: span.ty + span.h / 2 };
+  }
+  return ambushTile(sim, unit, { x: (unit.x + camp.x) / 2, y: (unit.y + camp.y) / 2 });
 }
 
 /** Tanks keep the open step. On Michigan, infantry peel off into a clump beside that step. */

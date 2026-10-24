@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
+import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_FORD, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
 import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import { DEPLOY_SECS, NORMAL_HARASS_AT, NORMAL_PUSH_AT, Sim, footprintOrigin, shortPlaceReason, type Building } from "./sim.ts";
 import { findPath } from "./path.ts";
@@ -65,6 +65,9 @@ function stubBuilding(sim: Sim, partial: Partial<Building> & Pick<Building, "kin
     collapse: partial.collapse ?? 0,
     shown: 0,
     mending: partial.mending ?? false,
+    prize: partial.prize ?? false,
+    cap: partial.cap ?? 0,
+    capTeam: partial.capTeam ?? -2,
   };
   sim.buildings.push(b);
   return b;
@@ -2443,6 +2446,192 @@ test("a passive normal opener loses before thirteen minutes and an active one ca
   assert.equal(active.sim.outcome, "win", `active still ${active.sim.outcome} at ${active.sim.time.toFixed(1)}`);
   assert.equal(active.sim.reason, "Enemy forces destroyed");
   assert.ok(active.sim.time < 240, `active ended at ${active.sim.time.toFixed(1)}`);
+});
+
+test("a road is quicker for infantry and for tanks", () => {
+  const travel = (kind: "rifle" | "tank", road: boolean) => {
+    const sim = new Sim({
+      mapId: "basin",
+      faction: "concord",
+      mode: "destroy",
+      fog: false,
+      crates: false,
+      cpu: [false, false, false, false],
+    });
+    sim.time = 80;
+    const u = sim.spawnUnit(0, kind, 30.2, 30.2);
+    assert.ok(u);
+    for (let y = 28; y <= 32; y++) {
+      for (let x = 28; x <= 48; x++) sim.terrain[y * sim.gw + x] = road ? TILE_ROAD : TILE_SAND;
+    }
+    sim.issueMove([u.id], 42.2, 30.2, false);
+    for (let i = 0; i < 25; i++) sim.tick(0.1);
+    return u.x - 30.2;
+  };
+  const footRoad = travel("rifle", true);
+  const footSand = travel("rifle", false);
+  const tankRoad = travel("tank", true);
+  const tankSand = travel("tank", false);
+  assert.ok(footRoad > footSand * 1.12 && footRoad < footSand * 1.3, `rifle road ${footRoad.toFixed(2)} sand ${footSand.toFixed(2)}`);
+  assert.ok(tankRoad > tankSand * 1.12 && tankRoad < tankSand * 1.3, `tank road ${tankRoad.toFixed(2)} sand ${tankSand.toFixed(2)}`);
+});
+
+test("infantry capture a neutral prize by standing beside it", () => {
+  const sim = new Sim({
+    mapId: "michigan",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+    opponents: 1,
+  });
+  sim.time = 80;
+  const prize = sim.buildings.find((b) => b.prize && b.neutral && b.hp > 0);
+  assert.ok(prize, "michigan prize");
+  let sx = -1;
+  let sy = -1;
+  for (let r = 1; r <= 4 && sx < 0; r++) {
+    for (let y = prize.ty - r; y <= prize.ty + prize.h + r - 1 && sx < 0; y++) {
+      for (let x = prize.tx - r; x <= prize.tx + prize.w + r - 1; x++) {
+        if (x >= prize.tx && x < prize.tx + prize.w && y >= prize.ty && y < prize.ty + prize.h) continue;
+        const t = sim.terrain[y * sim.gw + x] ?? 0;
+        if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_ROCK || t === TILE_CLIFF || t === TILE_BRIDGE) continue;
+        sx = x;
+        sy = y;
+        break;
+      }
+    }
+  }
+  assert.ok(sx >= 0, "no ground beside the prize");
+  const rifle = sim.spawnUnit(0, "rifle", sx + 0.5, sy + 0.5);
+  assert.ok(rifle);
+  rifle.order = { t: "idle" };
+  let saw = false;
+  for (let i = 0; i < 40; i++) {
+    sim.tick(0.1);
+    if (prize.cap > 0.4 && prize.capTeam === 0) saw = true;
+  }
+  assert.equal(saw, true, "capture bar never moved");
+  assert.equal(prize.neutral, false);
+  assert.equal(prize.team, 0);
+  assert.ok(rifle.hp > 0, "the rifle was spent like an engineer");
+});
+
+test("each michigan seat pair has a road, a forest, and a crossing", () => {
+  const wet = (t: number) =>
+    t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_ROCK || t === TILE_CLIFF || t === TILE_WRECK;
+  const raster = (path: { x: number; y: number }[]) => {
+    const cells: [number, number][] = [];
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1]!;
+      const b = path[i]!;
+      let x = a.x;
+      let y = a.y;
+      const dx = Math.abs(b.x - a.x);
+      const sx = a.x < b.x ? 1 : -1;
+      const dy = -Math.abs(b.y - a.y);
+      const sy = a.y < b.y ? 1 : -1;
+      let err = dx + dy;
+      for (let guard = 0; guard < 400; guard++) {
+        cells.push([x, y]);
+        if (x === b.x && y === b.y) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y += sy;
+        }
+      }
+    }
+    return cells;
+  };
+  for (const opponents of [1, 3] as const) {
+    const sim = new Sim({
+      mapId: "michigan",
+      faction: "concord",
+      mode: "destroy",
+      fog: false,
+      crates: false,
+      cpu: [false, false, false, false],
+      seed: 1,
+      opponents,
+      start: "sw",
+    });
+    const prizes = sim.buildings.filter((b) => b.prize && b.neutral);
+    assert.ok(prizes.length >= 1 && prizes.length <= 2, `prizes ${prizes.length}`);
+    let heart = 0;
+    for (let i = 0; i < sim.crystal.length; i++) if ((sim.crystal[i] ?? 0) >= 2400) heart++;
+    assert.ok(heart >= 4, `middle ore tiles ${heart}`);
+    const seats = sim.starts.slots;
+    let crossings = 0;
+    for (let i = 0; i < seats.length; i++) {
+      for (let j = i + 1; j < seats.length; j++) {
+        const a = seats[i]!;
+        const b = seats[j]!;
+        const label = `${opponents}p ${i}-${j}`;
+        const vehicle = findPath(
+          (x, y) => {
+            if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+            const t = sim.terrain[y * sim.gw + x] ?? 0;
+            return wet(t) || t === TILE_SCRUB;
+          },
+          a.x | 0,
+          a.y | 0,
+          b.x | 0,
+          b.y | 0,
+          sim.gw,
+          sim.gh,
+        );
+        assert.ok(vehicle && vehicle.length >= 2, `${label} no vehicle path`);
+        const gw = sim.gw;
+        const best = new Int16Array(gw * sim.gh);
+        best.fill(-1);
+        const queue: [number, number, number][] = [[a.x | 0, a.y | 0, 0]];
+        best[(a.y | 0) * gw + (a.x | 0)] = 0;
+        let qi = 0;
+        while (qi < queue.length) {
+          const [x, y, s] = queue[qi++]!;
+          for (const [dx, dy] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+            [1, 1],
+            [1, -1],
+            [-1, 1],
+            [-1, -1],
+          ] as const) {
+            const nx = x + dx;
+            const ny = y + dy;
+            if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= sim.gh - 1) continue;
+            const t = sim.terrain[ny * gw + nx] ?? 0;
+            if (wet(t)) continue;
+            const ns = Math.min(8, s + (t === TILE_SCRUB ? 1 : 0));
+            const ni = ny * gw + nx;
+            if (best[ni]! >= ns) continue;
+            best[ni] = ns;
+            queue.push([nx, ny, ns]);
+          }
+        }
+        const woods = best[(b.y | 0) * gw + (b.x | 0)] ?? -1;
+        assert.ok(woods >= 6, `${label} forest steps ${woods}`);
+        if (
+          raster(vehicle).some(([x, y]) => {
+            const t = sim.terrain[y * sim.gw + x];
+            return t === TILE_BRIDGE || t === TILE_FORD;
+          })
+        ) {
+          crossings++;
+        }
+      }
+    }
+    assert.ok(crossings >= 1, `${opponents}p crossings ${crossings}`);
+  }
 });
 
 

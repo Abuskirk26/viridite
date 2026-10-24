@@ -844,26 +844,26 @@ export function paintOre(
     return;
   }
   const fill = Math.max(0.55, Math.min(1, amount / 1200));
-  const gx = x + 0.42 + (hash(x * 3, y + 2) - 0.5) * 0.55;
-  const gy = y + 0.48 + (hash(x + 5, y * 2) - 0.5) * 0.4;
-  const reach = 0.72 + (around >= 4 ? 0.28 : 0);
-  const glow = ctx.createRadialGradient(gx, gy, 0.04, gx, gy, reach);
-  glow.addColorStop(0, `rgba(255, 214, 140, ${0.42 + fill * 0.28})`);
-  glow.addColorStop(0.42, `rgba(232, 122, 36, ${0.22 + fill * 0.16})`);
+  const gx = x + 0.5;
+  const gy = y + 0.58;
+  const reach = 0.42 + (around >= 4 ? 0.08 : 0);
+  const glow = ctx.createRadialGradient(gx, gy, 0.02, gx, gy, reach);
+  glow.addColorStop(0, `rgba(255, 214, 140, ${0.5 + fill * 0.2})`);
+  glow.addColorStop(0.55, `rgba(232, 122, 36, ${0.16 + fill * 0.1})`);
   glow.addColorStop(1, "rgba(232, 122, 36, 0)");
   ctx.fillStyle = glow;
   ctx.beginPath();
   ctx.arc(gx, gy, reach, 0, Math.PI * 2);
   ctx.fill();
-  const n = around >= 6 ? 6 : around >= 3 ? 5 : 3;
+  const n = around >= 4 ? 4 : 3;
   const bright = ["#ffe2a4", "#ffb03a", "#f08428", "#ffd27a"];
   const deep = ["#c45e16", "#a84812", "#e07020", "#d47828"];
   for (let i = 0; i < n; i++) {
     const hx = hash(x * 5 + i * 13, y * 3 + 4);
     const hy = hash(x + i * 9, y * 8 + 2);
-    const px = x - 0.22 + hx * 1.4;
-    const py = y - 0.16 + hy * 1.15 + Math.sin(time * 1.6 + x + y + i) * 0.01;
-    const s = (around >= 4 ? 0.2 : 0.16) + fill * 0.08 + hash(x + i, y + 11) * 0.06;
+    const px = gx + (hx - 0.5) * 0.36;
+    const py = gy + (hy - 0.5) * 0.22 + Math.sin(time * 1.6 + x + y + i) * 0.008;
+    const s = 0.2 + fill * 0.08 + hash(x + i, y + 11) * 0.04;
     const rot = (hash(x + i * 4, y + 9) - 0.5) * 2.2;
     ctx.save();
     ctx.translate(px, py);

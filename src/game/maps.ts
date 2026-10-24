@@ -146,7 +146,7 @@ export const MAP_LIST: { id: MapId; name: string; blurb: string; earth?: EarthSi
   {
     id: "michigan",
     name: "Michigan",
-    blurb: "Great Lakes. Two straits bridges, forest clumps with open gaps, dunes on the shore, and ore worth a fight.",
+    blurb: "Great Lakes. A paved road, a forest cut, and a narrow straits bridge. Crystal, an oil derrick, and a watchtower sit between the camps.",
     player: { x: 32.5, y: 50.5 },
     enemy: { x: 16.5, y: 17.5 },
     earth: {
@@ -583,13 +583,10 @@ function layMichigan(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
       if (wet) terrain[idx(x, y)] = TILE_SHORE;
     }
   }
-  // Straits deck runs north-south, shore to shore. Not a ribbon laid in the lake.
-  for (let y = 23; y <= 26; y++) {
-    for (let x = 43; x <= 44; x++) terrain[idx(x, y)] = TILE_BRIDGE;
-  }
-  spans.push({ tx: 43, ty: 23, w: 2, h: 4 });
-  // West straits deck. Two crossings, so the peninsula is not a single bridge fight.
-  spanBridge(terrain, spans, 39, 22, 3, 9);
+  // One-tile decks. Water stays on either side so the crossing reads as a bridge.
+  spanBridge(terrain, spans, 43, 23, 1, 4);
+  // Second deck, west of the first, so the straits are not a single bridge fight.
+  spanBridge(terrain, spans, 40, 22, 1, 9);
   // Satellite shore fringe the state mask still called land. Troops were walking the lake.
   for (const [x, y] of MICHIGAN_FRINGE) {
     if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) continue;
@@ -1504,10 +1501,10 @@ function dressGreatLakes(
   for (let y = 3; y < gh - 3; y++) {
     for (let x = 3; x < gw - 3; x++) {
       if (!openForWoods(x, y)) continue;
-      if (dressHash(x, y, salt) > 0.78) continue;
+      if (dressHash(x, y, salt) > 0.58) continue;
       let crowded = false;
       for (const [sx, sy] of seeds) {
-        if ((sx - x) * (sx - x) + (sy - y) * (sy - y) < 26) {
+        if ((sx - x) * (sx - x) + (sy - y) * (sy - y) < 22) {
           crowded = true;
           break;
         }
@@ -1517,17 +1514,21 @@ function dressGreatLakes(
     }
   }
   for (const [x, y] of seeds) {
-    const r = 2.35 + (dressHash(x, y, salt + 3) > 0.55 ? 0.4 : 0);
+    const roll = dressHash(x, y, salt + 3);
+    const r = roll > 0.72 ? 3.35 : roll > 0.38 ? 2.15 : 1.35;
     const r2 = r * r;
-    for (let dy = -3; dy <= 3; dy++) {
-      for (let dx = -3; dx <= 3; dx++) {
+    const reach = Math.ceil(r);
+    for (let dy = -reach; dy <= reach; dy++) {
+      for (let dx = -reach; dx <= reach; dx++) {
         const d2 = dx * dx + dy * dy;
         if (d2 > r2) continue;
         const nx = x + dx;
         const ny = y + dy;
         if (nx < 2 || ny < 2 || nx >= gw - 2 || ny >= gh - 2) continue;
         if (!openForWoods(nx, ny)) continue;
-        if (d2 > (r - 0.7) * (r - 0.7) && dressHash(nx + salt, ny, x + y) > 0.7) continue;
+        // Ragged edge, and a hole near the middle so a clump is not a disk.
+        if (d2 > (r - 0.85) * (r - 0.85) && dressHash(nx + salt, ny, x + y) > 0.42) continue;
+        if (d2 < 1.1 && dressHash(nx, ny, salt + 11) > 0.74) continue;
         terrain[ny * gw + nx] = TILE_SCRUB;
       }
     }
@@ -2597,11 +2598,12 @@ export function paveMichigan(
   gh: number,
   seats: { x: number; y: number }[],
 ) {
-  const blocked = (x: number, y: number, throughWoods: boolean) => {
+  const blocked = (x: number, y: number, throughWoods: boolean, throughBridge = true) => {
     if (x < 0 || y < 0 || x >= gw || y >= gh) return true;
     const t = terrain[y * gw + x] ?? 0;
     if (t === TILE_ROCK || t === TILE_CLIFF || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK) return true;
     if (!throughWoods && t === TILE_SCRUB) return true;
+    if (!throughBridge && t === TILE_BRIDGE) return true;
     return false;
   };
   const plantShoulder = (step: { x: number; y: number }, prev: { x: number; y: number }) => {
@@ -2633,40 +2635,123 @@ export function paveMichigan(
       }
     }
   };
-  const paint = (path: { x: number; y: number }[] | null) => {
+  const paint = (path: { x: number; y: number }[] | null, radius: number) => {
     if (!path) return;
     for (let i = 0; i < path.length; i++) {
       const step = path[i]!;
-      if (i > 0 && i % 5 === 0) plantShoulder(step, path[i - 1]!);
+      if (radius > 0 && i > 0 && i % 5 === 0) plantShoulder(step, path[i - 1]!);
       let skip = false;
       for (const s of seats) {
         if (Math.hypot(step.x + 0.5 - s.x, step.y + 0.5 - s.y) < 6) skip = true;
       }
       if (skip) continue;
-        for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
           const reach = Math.max(Math.abs(dx), Math.abs(dy));
-          if (reach > 2) continue;
+          if (reach > radius) continue;
           const x = step.x + dx;
           const y = step.y + dy;
           if (x < 1 || y < 1 || x >= gw - 1 || y >= gh - 1) continue;
-          const i = y * gw + x;
-          const t = terrain[i] ?? 0;
-          if (t === TILE_BRIDGE || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK) continue;
-          if ((crystal[i] ?? 0) > 0) continue;
-          // The outer shoulder stays trees so infantry still have an ambush line.
-          if (t === TILE_SCRUB && reach > 1) continue;
+          const ti = y * gw + x;
+          const t = terrain[ti] ?? 0;
+          if (t === TILE_BRIDGE || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK || t === TILE_FORD) continue;
+          if ((crystal[ti] ?? 0) > 0) continue;
+          // Trees stay trees. The road is the open ground beside them.
+          if (t === TILE_SCRUB) continue;
           if (!roadOk(t, 0)) continue;
-          terrain[i] = TILE_ROAD;
+          terrain[ti] = TILE_ROAD;
         }
       }
+    }
+  };
+  const stampWood = (x: number, y: number) => {
+    const tx = Math.round(x);
+    const ty = Math.round(y);
+    if (tx < 2 || ty < 2 || tx >= gw - 2 || ty >= gh - 2) return;
+    for (const s of seats) {
+      if (Math.hypot(tx + 0.5 - s.x, ty + 0.5 - s.y) < 11) return;
+    }
+    for (let oy = -2; oy <= 2; oy++) {
+      for (let ox = -2; ox <= 2; ox++) {
+        if (Math.max(Math.abs(ox), Math.abs(oy)) > 2) continue;
+        if ((terrain[(ty + oy) * gw + (tx + ox)] ?? 0) === TILE_BRIDGE) return;
+      }
+    }
+    const i = ty * gw + tx;
+    const t = terrain[i] ?? 0;
+    if ((crystal[i] ?? 0) > 0) return;
+    if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH && t !== TILE_SCRUB) return;
+    terrain[i] = TILE_SCRUB;
+  };
+  const lineWood = (x0: number, y0: number, x1: number, y1: number) => {
+    let x = Math.round(x0);
+    let y = Math.round(y0);
+    const gx = Math.round(x1);
+    const gy = Math.round(y1);
+    const dx = Math.abs(gx - x);
+    const sx = x < gx ? 1 : -1;
+    const dy = -Math.abs(gy - y);
+    const sy = y < gy ? 1 : -1;
+    let err = dx + dy;
+    for (let guard = 0; guard < gw + gh; guard++) {
+      stampWood(x, y);
+      if (x === gx && y === gy) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) {
+        err += dy;
+        x += sx;
+      }
+      if (e2 <= dx) {
+        err += dx;
+        y += sy;
+      }
+    }
+  };
+  // A connected tree line beside the open road. Infantry can walk it. Tanks cannot.
+  const weave = (path: { x: number; y: number }[] | null) => {
+    if (!path || path.length < 8) return;
+    let last: { x: number; y: number } | null = null;
+    for (let i = 3; i < path.length - 3; i += 2) {
+      const step = path[i]!;
+      const prev = path[i - 1]!;
+      const dx = step.x - prev.x;
+      const dy = step.y - prev.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const px = -dy / len;
+      const py = dx / len;
+      const score = (side: number) => {
+        let n = 0;
+        for (let k = 3; k <= 6; k++) {
+          const x = Math.round(step.x + 0.5 + px * side * k);
+          const y = Math.round(step.y + 0.5 + py * side * k);
+          if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) continue;
+          const t = terrain[y * gw + x] ?? 0;
+          if (t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH || t === TILE_SCRUB) n++;
+          if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_BRIDGE || t === TILE_ROCK) n -= 3;
+        }
+        return n;
+      };
+      const side = score(1) >= score(-1) ? 1 : -1;
+      const spot = { x: step.x + 0.5 + px * side * 5, y: step.y + 0.5 + py * side * 5 };
+      if (last) lineWood(last.x, last.y, spot.x, spot.y);
+      else stampWood(spot.x, spot.y);
+      last = spot;
     }
   };
   for (let i = 0; i < seats.length; i++) {
     for (let j = i + 1; j < seats.length; j++) {
       const a = seats[i]!;
       const b = seats[j]!;
-      paint(findPath((x, y) => blocked(x, y, false), a.x | 0, a.y | 0, b.x | 0, b.y | 0, gw, gh));
+      const ax = a.x | 0;
+      const ay = a.y | 0;
+      const bx = b.x | 0;
+      const by = b.y | 0;
+      const around = findPath((x, y) => blocked(x, y, false, false), ax, ay, bx, by, gw, gh);
+      const direct = findPath((x, y) => blocked(x, y, false, true), ax, ay, bx, by, gw, gh);
+      const open = around ?? direct;
+      paint(open, 1);
+      weave(open);
+      if (direct && around) paint(direct, 0);
     }
     const home = seats[i]!;
     let best: { x: number; y: number } | null = null;
@@ -2684,7 +2769,53 @@ export function paveMichigan(
       bestD = ds;
       best = blob;
     }
-    if (best) paint(findPath((x, y) => blocked(x, y, true), home.x | 0, home.y | 0, best.x | 0, best.y | 0, gw, gh));
+    if (best) paint(findPath((x, y) => blocked(x, y, true, true), home.x | 0, home.y | 0, best.x | 0, best.y | 0, gw, gh), 1);
+  }
+  // A one-tile spur so each straits deck is a route even when the open road goes around.
+  const roads: [number, number][] = [];
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      if ((terrain[y * gw + x] ?? 0) === TILE_ROAD) roads.push([x, y]);
+    }
+  }
+  const mouths: [number, number][] = [];
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      if ((terrain[y * gw + x] ?? 0) !== TILE_BRIDGE) continue;
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        const t = terrain[ny * gw + nx] ?? 0;
+        if (t === TILE_BRIDGE || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_ROCK || t === TILE_CLIFF) continue;
+        mouths.push([nx, ny]);
+      }
+    }
+  }
+  for (const [mx, my] of mouths) {
+    let near = false;
+    for (const [rx, ry] of roads) {
+      if (Math.max(Math.abs(rx - mx), Math.abs(ry - my)) <= 2) {
+        near = true;
+        break;
+      }
+    }
+    if (near || !roads.length) continue;
+    let bestR: [number, number] = roads[0]!;
+    let bestD = 1e9;
+    for (const [rx, ry] of roads) {
+      const d = (rx - mx) * (rx - mx) + (ry - my) * (ry - my);
+      if (d < bestD) {
+        bestD = d;
+        bestR = [rx, ry];
+      }
+    }
+    paint(findPath((x, y) => blocked(x, y, true, true), bestR[0], bestR[1], mx, my, gw, gh), 0);
+    roads.push([mx, my]);
   }
   const grow: number[] = [];
   for (let y = 2; y < gh - 2; y++) {
@@ -2707,11 +2838,69 @@ export function paveMichigan(
           if (Math.hypot(nx + 0.5 - s.x, ny + 0.5 - s.y) < 11) camp = true;
         }
         if (camp) continue;
+        if (dressHash(nx, ny, 9) > 0.42) continue;
         grow.push(i);
       }
     }
   }
   for (const i of grow) terrain[i] = TILE_SCRUB;
+}
+
+/**
+ * Rich ore as close to every seat as the lake allows, and not inside anyone's
+ * expansion band. On Michigan the straight bisector is open water.
+ */
+export function plantMichiganHeart(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  if (seats.length < 2) return;
+  const cx = seats.reduce((s, p) => s + p.x, 0) / seats.length;
+  const cy = seats.reduce((s, p) => s + p.y, 0) / seats.length;
+  let bestX = -1;
+  let bestY = -1;
+  let best = 1e9;
+  for (let y = 3; y < gh - 3; y++) {
+    for (let x = 3; x < gw - 3; x++) {
+      const t = terrain[y * gw + x] ?? 0;
+      if (!oreHost(t) || (crystal[y * gw + x] ?? 0) > 0) continue;
+      if (t === TILE_ROAD || t === TILE_BRIDGE || t === TILE_FORD) continue;
+      const ds = seats.map((s) => Math.hypot(x + 0.5 - s.x, y + 0.5 - s.y));
+      const near = Math.min(...ds);
+      const far = Math.max(...ds);
+      if (near < (seats.length === 2 ? 16 : 12)) continue;
+      if (seats.length === 2) {
+        let expansion = false;
+        for (let i = 0; i < seats.length; i++) {
+          const d = ds[i]!;
+          if (d < 14 || d > 28) continue;
+          if (ds.every((other, j) => j === i || d < other)) expansion = true;
+        }
+        if (expansion) continue;
+      }
+      let hosts = 0;
+      for (let oy = -2; oy <= 2; oy++) {
+        for (let ox = -2; ox <= 2; ox++) {
+          if (ox * ox + oy * oy > 3.2) continue;
+          const i = (y + oy) * gw + (x + ox);
+          const h = terrain[i] ?? 0;
+          if ((crystal[i] ?? 0) > 0 || !oreHost(h) || h === TILE_ROAD) continue;
+          hosts++;
+        }
+      }
+      if (hosts < 4) continue;
+      const score = far - near + Math.hypot(x + 0.5 - cx, y + 0.5 - cy) * 0.35;
+      if (score < best) {
+        best = score;
+        bestX = x + 0.5;
+        bestY = y + 0.5;
+      }
+    }
+  }
+  if (bestX >= 0) paintOreDisk(terrain, crystal, gw, gh, bestX, bestY, 2.05, 2600);
 }
 
 function nearCrystal(crystal: Uint16Array, gw: number, gh: number, x: number, y: number, rad: number): boolean {
