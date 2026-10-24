@@ -1745,14 +1745,57 @@ export function GameScreen() {
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
               <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
+              <div
+                data-testid="alert-lane"
+                className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
+              >
+              {sim.alarm[viewer] && sim.time < sim.alarm[viewer]!.until && phase === "play" && (
+                <button
+                  type="button"
+                  data-testid="base-alarm"
+                  className="pulse pointer-events-auto flex h-11 items-center steel px-3 font-display text-xs uppercase tracking-wide text-danger"
+                  onClick={() => {
+                    const at = sim.alarm[viewer];
+                    if (!at) return;
+                    camRef.current.x = at.x;
+                    camRef.current.y = at.y;
+                    camRef.current.vx = 0;
+                    camRef.current.vy = 0;
+                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
+                    setFrame((n) => n + 1);
+                  }}
+                >
+                  Our base is under attack
+                </button>
+              )}
               {sim.powerOf(viewer as 0).low && (
                 <div
                   data-testid="low-power"
-                  className="pulse pointer-events-none absolute top-1 left-1 z-20 flex h-11 max-w-[58%] items-center bg-danger px-2 font-display text-xs uppercase tracking-wide text-ink"
+                  className="pulse flex h-11 items-center bg-danger px-2 font-display text-xs uppercase tracking-wide text-ink"
                 >
                   Low power — supply stopped
                 </div>
               )}
+              {phase === "play" && sim.time < DEPLOY_SECS && (
+                <p
+                  data-testid="deploy-countdown"
+                  className="border border-brass-dim bg-field/92 px-3 py-1 font-display text-sm tracking-wide text-gold"
+                >
+                  Deployment {clock(DEPLOY_SECS - sim.time)} — hold fire
+                </p>
+              )}
+              {setup.showAi && viewer === 0 && phase === "play" && sim && (
+                <p
+                  data-testid="ai-intent"
+                  className="steel-inset px-2 py-1 font-display text-xs uppercase tracking-wide text-gold"
+                >
+                  {Array.from({ length: sim.opponents }, (_, i) => i + 1)
+                    .filter((t) => sim.cpu[t])
+                    .map((t) => `${SEAT_NAME[t] ?? "AI"} ${sim.aiIntent[t] ?? "idle"}`)
+                    .join(" · ") || "AI idle"}
+                </p>
+              )}
+              </div>
               {land && buildOpen && phase === "play" && (
                 <BuildColumn
                   sim={sim}
@@ -1808,46 +1851,6 @@ export function GameScreen() {
                     setSelecting(next);
                   }}
                 />
-              )}
-              {phase === "play" && sim.time < DEPLOY_SECS && (
-                <p
-                  data-testid="deploy-countdown"
-                  className={`pointer-events-none absolute left-2 z-20 border border-brass-dim bg-field/92 px-3 py-1 font-display text-sm tracking-wide text-gold ${land ? "top-1 max-w-[58%]" : "top-2"}`}
-                >
-                  Deployment {clock(DEPLOY_SECS - sim.time)} — hold fire
-                </p>
-              )}
-              {sim.alarm[viewer] && sim.time < sim.alarm[viewer]!.until && phase === "play" && (
-                <button
-                  type="button"
-                  data-testid="base-alarm"
-                  className={`pulse absolute left-2 z-20 flex h-11 max-w-[58%] items-center steel px-3 font-display text-xs uppercase tracking-wide text-danger ${
-                    land ? (sim.time < DEPLOY_SECS || sim.powerOf(viewer as 0).low ? "top-12" : "top-1") : "top-2"
-                  }`}
-                  onClick={() => {
-                    const at = sim.alarm[viewer];
-                    if (!at) return;
-                    camRef.current.x = at.x;
-                    camRef.current.y = at.y;
-                    camRef.current.vx = 0;
-                    camRef.current.vy = 0;
-                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
-                    setFrame((n) => n + 1);
-                  }}
-                >
-                  Our base is under attack
-                </button>
-              )}
-              {setup.showAi && viewer === 0 && phase === "play" && sim && (
-                <p
-                  data-testid="ai-intent"
-                  className="pointer-events-none absolute top-2 left-2 z-10 steel-inset px-2 py-1 font-display text-xs uppercase tracking-wide text-gold"
-                >
-                  {Array.from({ length: sim.opponents }, (_, i) => i + 1)
-                    .filter((t) => sim.cpu[t])
-                    .map((t) => `${SEAT_NAME[t] ?? "AI"} ${sim.aiIntent[t] ?? "idle"}`)
-                    .join(" · ") || "AI idle"}
-                </p>
               )}
               {stall && phase === "play" && (
                 <p className="pointer-events-none absolute top-2 right-2 steel-inset px-2 py-1 text-xs text-gold" data-testid="net-stall">
