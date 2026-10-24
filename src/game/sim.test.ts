@@ -1387,6 +1387,41 @@ test("ramps are the only way up, and high ground sees over cliffs and hits harde
   assert.ok(highHit > flatHit, `high ${highHit} vs flat ${flatHit}`);
 });
 
+test("cloaked infantry stay hidden until a scout or a powered radar", () => {
+  const sim = new Sim({
+    mapId: "basin",
+    faction: "concord",
+    mode: "destroy",
+    fog: true,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+  });
+  sim.time = 50;
+  sim.fog[0]!.fill(2);
+  stubBuilding(sim, { kind: "stealth", team: 1, tx: 30, ty: 30 });
+  const ghost = sim.spawnUnit(1, "rifle", 32.2, 31.5);
+  assert.ok(ghost);
+  sim.tick(0.1);
+  assert.equal(ghost.stealth, true);
+  sim.fog[0]!.fill(2);
+  const tank = sim.spawnUnit(0, "tank", 33.2, 31.5);
+  assert.ok(tank);
+  assert.equal(sim.visibleUnit(0, ghost), false, "tank spotted the cloak");
+  const scout = sim.spawnUnit(0, "scout", 32.2, 36.5);
+  assert.ok(scout);
+  assert.equal(sim.visibleUnit(0, ghost), true, "scout missed the cloak");
+  scout.x = 8;
+  scout.y = 8;
+  assert.equal(sim.visibleUnit(0, ghost), false, "cloak stayed broken");
+  const radar = stubBuilding(sim, { kind: "radar", team: 0, tx: 30, ty: 34 });
+  assert.equal(sim.visibleUnit(0, ghost), true, "radar missed the cloak");
+  const plant = stubBuilding(sim, { kind: "power", team: 0, tx: 20, ty: 20 });
+  plant.powerOut = 0;
+  sim.powerOf(0);
+  assert.equal(sim.visibleUnit(0, ghost), false, "unpowered radar still spotted");
+});
+
 test("friendly infantry spread instead of stacking into one blob", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
   sim.time = 50;

@@ -256,6 +256,10 @@ export const HIGH_RANGE = 1.12;
 export const HIGH_SIGHT = 1.6;
 /** Damage multiplier when the shooter stands above the target. */
 export const HIGH_AIM = 1.1;
+/** A powered Radar Mast spots cloaked infantry inside this range. */
+export const DETECT_RADAR = 8;
+/** A Scout Buggy spots cloaked infantry inside this range. */
+export const DETECT_SCOUT = 6.5;
 
 export const SEAT_NAME = ["You", "North", "East", "South"] as const;
 

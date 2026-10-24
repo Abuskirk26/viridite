@@ -3241,6 +3241,14 @@ function paintUnitSprite(
     ctx.strokeRect(-0.45, -0.45, 0.9, 0.9);
     ctx.setLineDash([]);
     ctx.restore();
+  } else if (u.stealth && u.team !== VIEWER) {
+    const pulse = 0.28 + 0.22 * Math.sin(time * 5);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.strokeStyle = `rgba(214,196,150,${pulse.toFixed(3)})`;
+    ctx.lineWidth = 0.045;
+    ctx.strokeRect(-0.48, -0.48, 0.96, 0.96);
+    ctx.restore();
   }
 
   const infantry = u.kind === "rifle" || u.kind === "rocket" || u.kind === "engineer" || u.kind === "vanguard";

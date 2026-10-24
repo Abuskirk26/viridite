@@ -16,6 +16,8 @@ import {
   HIGH_AIM,
   HIGH_RANGE,
   HIGH_SIGHT,
+  DETECT_RADAR,
+  DETECT_SCOUT,
   airTier,
   HAUL_AT,
   MAP_SIZE,
@@ -4812,16 +4814,18 @@ export class Sim {
     return best;
   }
 
+  /** Cloak breaks near a powered Radar Mast or a Scout Buggy. Woods use coverBroken instead. */
   private detected(viewer: Team, unit: Unit): boolean {
     if (!unit.stealth || unit.reveal > 0) return true;
-    for (const o of this.units) {
-      if (!this.allied(o.team, viewer) || o.hp <= 0) continue;
-      if (Math.hypot(o.x - unit.x, o.y - unit.y) <= 2.75) return true;
+    if (!this.powerOf(viewer).low) {
+      for (const b of this.buildings) {
+        if (b.team !== viewer || b.special !== "radar" || !b.complete || b.hp <= 0) continue;
+        if (distPointToRect(unit.x, unit.y, b) <= DETECT_RADAR) return true;
+      }
     }
-    for (const b of this.buildings) {
-      if (!this.allied(b.team, viewer) || b.hp <= 0 || !b.complete) continue;
-      const sense = b.kind === "tower" ? Math.max(2.8, b.range * 0.65) : 2.5;
-      if (distPointToRect(unit.x, unit.y, b) <= sense) return true;
+    for (const o of this.units) {
+      if (!this.allied(o.team, viewer) || o.hp <= 0 || o.kind !== "scout") continue;
+      if (Math.hypot(o.x - unit.x, o.y - unit.y) <= DETECT_SCOUT) return true;
     }
     return false;
   }
