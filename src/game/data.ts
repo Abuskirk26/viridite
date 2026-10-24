@@ -987,6 +987,32 @@ export const UNITS: Record<UnitId, UnitDef> = {
   },
 };
 
+/**
+ * One table for skirmish build cost and time. A Normal match should still
+ * be fighting by the bot's push and be over in about 8–12 minutes.
+ * Walls stay short so a drag-line does not stall the battle.
+ */
+export const BUILD_ECONOMY: Record<BuildingId, { cost: number; time: number }> = {
+  yard: { cost: 0, time: 2 },
+  power: { cost: 300, time: 10 },
+  refinery: { cost: 1600, time: 22 },
+  barracks: { cost: 400, time: 12 },
+  factory: { cost: 1200, time: 24 },
+  tower: { cost: 500, time: 12 },
+  silo: { cost: 150, time: 8 },
+  supply: { cost: 400, time: 12 },
+  dock: { cost: 1100, time: 22 },
+  helipad: { cost: 900, time: 18 },
+  aa: { cost: 600, time: 12 },
+  radar: { cost: 800, time: 16 },
+  wall: { cost: 100, time: 0.4 },
+  sandbag: { cost: 25, time: 0.4 },
+  gate: { cost: 75, time: 0.4 },
+  advpower: { cost: 900, time: 18 },
+  stealth: { cost: 1000, time: 18 },
+  span: { cost: 0, time: 0 },
+};
+
 export const BUILDINGS: Record<BuildingId, BuildingDef> = {
   yard: {
     id: "yard",
@@ -1382,6 +1408,16 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     trains: null,
   },
 };
+
+for (const id of Object.keys(BUILD_ECONOMY) as BuildingId[]) {
+  const row = BUILD_ECONOMY[id];
+  BUILDINGS[id].cost = row.cost;
+  BUILDINGS[id].time = row.time;
+}
+
+export function buildClock(seconds: number): string {
+  return `${Number.isInteger(seconds) ? seconds : seconds}s`;
+}
 
 export const BUILD_ORDER: BuildingId[] = [
   "power",

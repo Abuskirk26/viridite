@@ -41,6 +41,7 @@ import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, un
 import {
   BUILDINGS,
   BUILD_ORDER,
+  buildClock,
   FACTION_NAME,
   SEAT_NAME,
   SURVIVE_SECONDS,
@@ -2403,7 +2404,7 @@ function ProductionColumn({
                         {def.short}
                       </span>
                       <span className={`whitespace-normal text-center text-[11px] leading-tight ${need ? "normal-case text-muted" : "text-gold tabular-nums"}`}>
-                        {need ?? `${def.cost}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
+                        {need ?? `${def.cost} · ${buildClock(def.time)}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
                       </span>
                     </button>
                   );
@@ -3096,7 +3097,10 @@ function BuildColumn({
                 {need ? <span className="block whitespace-normal text-[11px] leading-tight normal-case">{need}</span> : null}
                 {low ? <span className="block text-[11px] leading-tight text-brass normal-case">Low power</span> : null}
               </span>
-              <span className={`shrink-0 text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>{def.cost}</span>
+              <span className={`shrink-0 text-right text-[11px] leading-tight tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
+                {def.cost}
+                <span className="block text-brass">{buildClock(def.time)}</span>
+              </span>
               {site ? (
                 <span className="pointer-events-none absolute right-1 bottom-1 left-1 h-1 bg-well">
                   <span className="block h-full bg-crystal" style={{ width: `${Math.max(4, Math.floor(prog * 100))}%` }} />
@@ -3468,9 +3472,8 @@ function CommandBar({
             <Icon className="size-6" />
             <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{need ? need : def.short}</span>
             {need ? null : (
-              <span className="text-[11px] text-gold tabular-nums">
-                {def.cost}
-                {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+              <span className="text-center text-[11px] leading-tight text-gold tabular-nums">
+                {def.cost} · {buildClock(def.time)}
               </span>
             )}
           </button>
