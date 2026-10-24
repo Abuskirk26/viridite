@@ -3123,8 +3123,7 @@ function paintBridges(
 
 function roadTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): boolean {
   if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
-  const t = terrain[y * gw + x] ?? 0;
-  return t === TILE_ROAD || t === TILE_BRIDGE;
+  return (terrain[y * gw + x] ?? 0) === TILE_ROAD;
 }
 
 /** Dirt bed, dark edges, wheel ruts, and a dashed center line. */
@@ -3153,9 +3152,17 @@ function paintRoadNet(
       for (const [dx, dy] of links) {
         const nx = x + dx;
         const ny = y + dy;
-        if (!roadTile(terrain, gw, gh, nx, ny)) continue;
+        const diagonal = dx !== 0 && dy !== 0;
+        // A filled blob's diagonal is the X across a junction. A real bend has an open corner.
+        if (diagonal && roadTile(terrain, gw, gh, x + dx, y) && roadTile(terrain, gw, gh, x, y + dy)) continue;
+        if (roadTile(terrain, gw, gh, nx, ny)) {
+          if (show && !show(nx, ny)) continue;
+          segs.push([x + 0.5, y + 0.5, nx + 0.5, ny + 0.5]);
+          continue;
+        }
+        if (diagonal || !bridgeTile(terrain, gw, gh, nx, ny)) continue;
         if (show && !show(nx, ny)) continue;
-        segs.push([x + 0.5, y + 0.5, nx + 0.5, ny + 0.5]);
+        segs.push([x + 0.5, y + 0.5, x + 0.5 + dx * 0.5, y + 0.5 + dy * 0.5]);
       }
     }
   }

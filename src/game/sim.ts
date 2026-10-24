@@ -88,7 +88,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, matchNorthwestOre, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, shelveNorthwest, snapLand, stampCamp, waterKind, widenNorthwest, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -816,8 +816,11 @@ export class Sim {
       }
       openBuildPads(this.terrain, this.crystal, gw, gh, slots);
       if (!custom && this.mapId === "michigan") {
+        widenNorthwest(this.terrain, this.crystal, gw, gh, slots);
         paveMichigan(this.terrain, this.crystal, gw, gh, slots);
         plantMichiganHeart(this.terrain, this.crystal, gw, gh, slots);
+        matchNorthwestOre(this.terrain, this.crystal, gw, gh, slots);
+        shelveNorthwest(this.terrain, this.crystal, gw, gh, slots);
       }
       this.clearStartClutter(slots);
       for (let t = 0; t <= this.opponents; t++) {

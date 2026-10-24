@@ -2634,6 +2634,180 @@ test("each michigan seat pair has a road, a forest, and a crossing", () => {
   }
 });
 
+test("michigan bridges are short decks with water on both sides", () => {
+  const sim = new Sim({
+    mapId: "michigan",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+    opponents: 1,
+    start: "sw",
+  });
+  const spans = sim.buildings.filter((b) => b.kind === "span" && b.hp > 0);
+  assert.ok(spans.length >= 2, `spans ${spans.length}`);
+  const gw = sim.gw;
+  const wet = (x: number, y: number) => {
+    const t = sim.terrain[y * gw + x] ?? 0;
+    return t === TILE_DEEP || t === TILE_SHALLOW;
+  };
+  const land = (x: number, y: number) => {
+    const t = sim.terrain[y * gw + x] ?? 0;
+    return t === TILE_SAND || t === TILE_SHORE || t === TILE_ROAD || t === TILE_CLEAR || t === TILE_ROCK || t === TILE_SCRUB;
+  };
+  const seen = new Uint8Array(gw * sim.gh);
+  const decks: { x: number; y: number }[][] = [];
+  for (let y = 1; y < sim.gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const start = y * gw + x;
+      if (seen[start] || sim.terrain[start] !== TILE_BRIDGE) continue;
+      const stack = [[x, y]];
+      seen[start] = 1;
+      const cells: { x: number; y: number }[] = [];
+      while (stack.length) {
+        const [cx, cy] = stack.pop()!;
+        cells.push({ x: cx, y: cy });
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = cx + dx;
+          const ny = cy + dy;
+          const ni = ny * gw + nx;
+          if (seen[ni] || sim.terrain[ni] !== TILE_BRIDGE) continue;
+          seen[ni] = 1;
+          stack.push([nx, ny]);
+        }
+      }
+      decks.push(cells);
+    }
+  }
+  assert.ok(decks.length >= 2, `decks ${decks.length}`);
+  for (const cells of decks) {
+    assert.ok(cells.length >= 2 && cells.length <= 3, `deck length ${cells.length}`);
+    let vertical = 0;
+    let horizontal = 0;
+    for (const c of cells) {
+      const n = sim.terrain[(c.y - 1) * gw + c.x] === TILE_BRIDGE;
+      const s = sim.terrain[(c.y + 1) * gw + c.x] === TILE_BRIDGE;
+      const e = sim.terrain[c.y * gw + c.x + 1] === TILE_BRIDGE;
+      const w = sim.terrain[c.y * gw + c.x - 1] === TILE_BRIDGE;
+      assert.equal((n || s) && (e || w), false, `junction at ${c.x},${c.y}`);
+      if (n || s) vertical++;
+      if (e || w) horizontal++;
+      const alongY = (n || s) && !(e || w);
+      const a = alongY ? [c.x - 1, c.y] : [c.x, c.y - 1];
+      const b = alongY ? [c.x + 1, c.y] : [c.x, c.y + 1];
+      assert.equal(wet(a[0]!, a[1]!), true, `side water ${c.x},${c.y}`);
+      assert.equal(wet(b[0]!, b[1]!), true, `side water ${c.x},${c.y}`);
+    }
+    assert.ok(vertical === 0 || horizontal === 0, "deck bends");
+    const ends = cells.filter((c) => {
+      const n = sim.terrain[(c.y - 1) * gw + c.x] === TILE_BRIDGE;
+      const s = sim.terrain[(c.y + 1) * gw + c.x] === TILE_BRIDGE;
+      const e = sim.terrain[c.y * gw + c.x + 1] === TILE_BRIDGE;
+      const w = sim.terrain[c.y * gw + c.x - 1] === TILE_BRIDGE;
+      const neighbors = Number(n) + Number(s) + Number(e) + Number(w);
+      return neighbors <= 1;
+    });
+    assert.ok(ends.length >= 2, "deck has two ends");
+    for (const end of ends) {
+      const banks = [
+        [end.x, end.y - 1],
+        [end.x, end.y + 1],
+        [end.x - 1, end.y],
+        [end.x + 1, end.y],
+      ];
+      assert.ok(
+        banks.some(([x, y]) => land(x!, y!)),
+        `abutment ${end.x},${end.y}`,
+      );
+    }
+  }
+  for (let i = 0; i < decks.length; i++) {
+    for (let j = i + 1; j < decks.length; j++) {
+      let near = 99;
+      for (const a of decks[i]!) {
+        for (const b of decks[j]!) near = Math.min(near, Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y)));
+      }
+      assert.ok(near >= 4, `decks meet at ${near}`);
+    }
+  }
+  let mouthRoad = 0;
+  for (const cells of decks) {
+    for (const c of cells) {
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ] as const) {
+        const t = sim.terrain[(c.y + dy) * gw + (c.x + dx)] ?? 0;
+        if (t === TILE_ROAD) mouthRoad++;
+      }
+    }
+  }
+  assert.ok(mouthRoad >= 2, `road never meets a bridge (${mouthRoad})`);
+});
+
+test("the northwest michigan pad fits a full base beside its ore", () => {
+  const sim = new Sim({
+    mapId: "michigan",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+    start: "nw",
+    opponents: 1,
+    credits: 50000,
+  });
+  const yard = bootSeat(sim, 0);
+  sim.credits[0] = 50000;
+  const placed = [];
+  for (const kind of ["power", "power", "refinery", "barracks", "factory", "tower", "tower", "tower"] as const) {
+    const hall = dropHall(sim, 0, kind, yard);
+    assert.ok(hall, `northwest ${kind}`);
+    placed.push(hall);
+  }
+  for (const hall of placed) {
+    for (let y = hall.ty; y < hall.ty + hall.h; y++) {
+      for (let x = hall.tx; x < hall.tx + hall.w; x++) {
+        assert.equal(sim.crystal[y * sim.gw + x] ?? 0, 0, `${hall.kind} sits on ore`);
+      }
+    }
+  }
+  const sumNear = (sx: number, sy: number) => {
+    let n = 0;
+    for (let y = 0; y < sim.gh; y++) {
+      for (let x = 0; x < sim.gw; x++) {
+        if (Math.hypot(x + 0.5 - sx, y + 0.5 - sy) > 14) continue;
+        n += sim.crystal[y * sim.gw + x] ?? 0;
+      }
+    }
+    return n;
+  };
+  const nw = sumNear(sim.starts.player.x, sim.starts.player.y);
+  const se = sumNear(sim.starts.enemy.x, sim.starts.enemy.y);
+  assert.ok(nw > 0 && se > 0, `ore ${nw} ${se}`);
+  const ratio = Math.max(nw, se) / Math.min(nw, se);
+  assert.ok(ratio <= 1.08, `home ore ${nw} vs ${se}`);
+  let oreClose = false;
+  for (let i = 0; i < sim.crystal.length; i++) {
+    if ((sim.crystal[i] ?? 0) <= 0) continue;
+    const ox = i % sim.gw;
+    const oy = (i / sim.gw) | 0;
+    const d = Math.hypot(ox + 0.5 - (yard.tx + 1.5), oy + 0.5 - (yard.ty + 1.5));
+    if (d <= 15) oreClose = true;
+  }
+  assert.equal(oreClose, true, "ore left the camp");
+});
+
 
 
 
