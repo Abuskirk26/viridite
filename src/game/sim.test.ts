@@ -1345,6 +1345,50 @@ test("skirmish credits keep rising past storage, with no vault message", () => {
   assert.ok(sim.credits[0] >= 20000);
 });
 
+test("losing the yard does not end the match while buildings or units remain", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  for (const u of sim.units) if (u.team === 0 && u.kind === "mcv") u.hp = 0;
+  const yard = stubBuilding(sim, { kind: "yard", team: 0, tx: 8, ty: 8 });
+  const power = stubBuilding(sim, { kind: "power", team: 0, tx: 14, ty: 8 });
+  const barracks = stubBuilding(sim, { kind: "barracks", team: 0, tx: 14, ty: 12 });
+  const rifle = sim.spawnUnit(0, "rifle", 10.5, 16.5);
+  assert.ok(rifle);
+  yard.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "playing");
+  assert.equal(sim.queueUnit(barracks.id, "rifle").ok, true);
+  assert.equal(sim.tryPlace(0, "factory", 18, 8).reason, "Needs a yard");
+  barracks.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "playing");
+  assert.equal(sim.logs.some((line) => line.includes("Last building")), true);
+  power.hp = 0;
+  rifle.hp = 0;
+  const wall = stubBuilding(sim, { kind: "wall", team: 0, tx: 6, ty: 6, hp: 1 });
+  wall.rubble = 5;
+  const span = stubBuilding(sim, { kind: "span", team: 0, tx: 4, ty: 4, hp: 1 });
+  span.rubble = 1;
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "lose");
+  assert.equal(sim.reason.includes("Construction Yard"), false);
+  assert.equal(sim.reason, "No buildings or units remain");
+});
+
+test("wiping the bot's buildings and units is a win", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  stubBuilding(sim, { kind: "yard", team: 0, tx: 8, ty: 8 });
+  for (const u of sim.units) if (u.team !== 0) u.hp = 0;
+  for (const b of sim.buildings) {
+    if (b.team === 0 || b.neutral || b.kind === "span") continue;
+    b.hp = 0;
+  }
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "win");
+  assert.equal(sim.reason, "Enemy forces destroyed");
+});
+
 
 
 

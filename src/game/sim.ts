@@ -618,6 +618,8 @@ export class Sim {
   outcome: "playing" | "win" | "lose" = "playing";
   reason = "";
   hadYard: boolean[] = [false, false, false, false];
+  /** True after "Last building!" so a rebuild can warn again. */
+  private lastOne = [false, false, false, false];
   eliminated: boolean[] = [false, false, false, false];
   /** Units this seat destroyed. */
   statKills: number[] = [0, 0, 0, 0];
@@ -1146,6 +1148,7 @@ export class Sim {
   }
 
   canPlace(team: Team, kind: BuildingId, tx: number, ty: number): PlaceResult {
+    if (!this.hasYard(team)) return { ok: false, reason: "Needs a yard" };
     if (isFence(kind)) {
       const step = this.previewFence(team, kind, [{ tx, ty }])[0];
       if (!step || !step.ok) return { ok: false, reason: step?.reason || "Blocked" };
@@ -3076,6 +3079,10 @@ export class Sim {
   ): { steps: { tx: number; ty: number; ok: boolean; reason: string }[]; placed: number } {
     const def = BUILDINGS[kind];
     const steps: { tx: number; ty: number; ok: boolean; reason: string }[] = [];
+    if (!this.hasYard(team)) {
+      for (const t of tiles) steps.push({ tx: t.tx, ty: t.ty, ok: false, reason: "Needs a yard" });
+      return { steps, placed: 0 };
+    }
     const virtual = new Set<number>();
     let credits = this.credits[team];
     let placed = 0;
@@ -3811,6 +3818,7 @@ export class Sim {
 
   private checkEnd() {
     if (this.outcome !== "playing") return;
+    this.noteLastBuilding();
     for (let t = 0; t <= this.opponents; t++) {
       const team = t as Team;
       if (!this.eliminated[team] && this.campDown(team)) this.eliminate(team);
@@ -3825,14 +3833,14 @@ export class Sim {
       const won = side === mine && sides.size === 1;
       this.finish(
         won ? "win" : "lose",
-        won ? "Enemy Construction Yard destroyed" : "Construction Yard lost and no MCV remains",
+        won ? "Enemy forces destroyed" : "No buildings or units remain",
       );
       return;
     }
     if (this.mode === "survive" && this.time >= this.surviveFor) {
       const mine = this.alliance[0] ?? 0;
       const up = [...sides].some((side) => side === mine);
-      this.finish(up ? "win" : "lose", up ? "Held the field" : "Construction Yard lost and no MCV remains");
+      this.finish(up ? "win" : "lose", up ? "Held the field" : "No buildings or units remain");
       return;
     }
     if (this.mode === "destroy" && this.difficulty === "hard" && this.time >= HARD_CAP_SECS) {
@@ -3862,14 +3870,47 @@ export class Sim {
     }
   }
 
-  /** No yard and no MCV. Seat 0 falls at once so a 1v1 loss still lands on the next tick. */
+  /** A completed Construction Yard. Without one, that side cannot place buildings. */
+  private hasYard(team: Team): boolean {
+    return this.buildings.some(
+      (b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0 && b.rubble <= 0 && b.collapse <= 0,
+    );
+  }
+
+  /** Walls, bridges, and rubble do not keep a side alive. */
+  private realBuildings(team: Team): number {
+    let n = 0;
+    for (const b of this.buildings) {
+      if (b.team !== team || b.neutral) continue;
+      if (b.hp <= 0 || b.rubble > 0 || b.collapse > 0) continue;
+      if (isFence(b.kind) || b.kind === "span") continue;
+      n++;
+    }
+    return n;
+  }
+
+  private noteLastBuilding() {
+    for (let t = 0; t <= this.opponents; t++) {
+      const team = t as Team;
+      if (this.eliminated[team]) continue;
+      const n = this.realBuildings(team);
+      if (n === 1) {
+        if (!this.lastOne[team]) {
+          this.lastOne[team] = true;
+          if (team === this.ear) this.say("Last building!", "lastb", 6);
+        }
+      } else if (n > 1) {
+        this.lastOne[team] = false;
+      }
+    }
+  }
+
+  /** Eliminated only when nothing real is left: no buildings and no live units. */
   private campDown(team: Team): boolean {
     if (this.eliminated[team]) return true;
-    const yard = this.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0);
-    const mcv = this.units.some((u) => u.team === team && u.kind === "mcv" && u.hp > 0);
-    if (yard || mcv) return false;
-    if (team === 0 || this.hadYard[team]) return true;
-    return this.time > 0.4;
+    if (this.realBuildings(team) > 0) return false;
+    if (this.units.some((u) => u.team === team && u.hp > 0)) return false;
+    return true;
   }
 
   private finish(outcome: "win" | "lose", reason: string) {
