@@ -1961,12 +1961,244 @@ function columnShare(terrain: Uint8Array, gw: number, x: number, tile: number): 
 
 /** Four camps. River and island starts each grow a dock-sized shore. */
 export function plantCorners(terrain: Uint8Array, crystal: Uint16Array, gw: number, kind: WaterKind): Camp[] {
-  if (kind === "channel") return plantChannel(terrain, crystal, gw);
-  if (kind === "isles") return plantIsles(terrain, crystal, gw);
-  if (kind === "coast") return plantCoast(terrain, gw);
-  if (kind === "michigan") return plantMichigan(terrain, gw);
-  if (kind === "palm") return plantPalm(terrain, gw);
-  return plantLand(terrain, gw);
+  const planted =
+    kind === "channel"
+      ? plantChannel(terrain, crystal, gw)
+      : kind === "isles"
+        ? plantIsles(terrain, crystal, gw)
+        : kind === "coast"
+          ? plantCoast(terrain, gw)
+          : kind === "michigan"
+            ? plantMichigan(terrain, gw)
+            : kind === "palm"
+              ? plantPalm(terrain, gw)
+              : plantLand(terrain, gw);
+  return fairCamps(terrain, gw, planted);
+}
+
+/** Every corner sits on the same radius, so a 1v1 pair travels the same distance to the center. */
+function fairCamps(terrain: Uint8Array, gw: number, camps: Camp[]): Camp[] {
+  const cx = gw / 2;
+  const cy = gw / 2;
+  const next = camps.map((c) => ({ ...c }));
+  const rays = next.map((c) => {
+    const ax = c.x - cx;
+    const ay = c.y - cy;
+    const len = Math.hypot(ax, ay) || 1;
+    return { c, ax: ax / len, ay: ay / len, len };
+  });
+  const startR = Math.max(...rays.map((r) => r.len));
+  for (let shrink = 0; shrink <= 20; shrink += 0.5) {
+    const r = startR - shrink;
+    if (r < 9) break;
+    const spots = rays.map((ray) => seatOnRay(terrain, gw, cx, cy, ray.ax, ray.ay, r));
+    if (spots.some((s) => !s)) continue;
+    rays.forEach((ray, i) => {
+      const spot = spots[i]!;
+      ray.c.x = spot.x;
+      ray.c.y = spot.y;
+    });
+    return next;
+  }
+  return next;
+}
+
+function seatOnRay(
+  terrain: Uint8Array,
+  gw: number,
+  cx: number,
+  cy: number,
+  ax: number,
+  ay: number,
+  radius: number,
+): { x: number; y: number } | null {
+  for (let turn = 0; turn <= 10; turn++) {
+    const turns = turn === 0 ? [0] : [turn * 0.07, -turn * 0.07];
+    for (const t of turns) {
+      const cos = Math.cos(t);
+      const sin = Math.sin(t);
+      const x = cx + (ax * cos - ay * sin) * radius;
+      const y = cy + (ax * sin + ay * cos) * radius;
+      if (!landCenter(terrain, gw, x, y)) continue;
+      const tile = terrain[(Math.floor(y) * gw + Math.floor(x)) | 0] ?? 0;
+      if (!landTile(tile)) continue;
+      return { x, y };
+    }
+  }
+  return null;
+}
+
+/** The two seats in a match get the same ore inside a 12-tile walk of home. */
+export function fairNearbyOre(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  if (seats.length < 2) return;
+  const pairs: [number, number][] = [];
+  if (seats.length === 2) pairs.push([0, 1]);
+  else {
+    for (let i = 0; i < seats.length; i++) {
+      let far = -1;
+      let best = -1;
+      for (let j = 0; j < seats.length; j++) {
+        if (j === i) continue;
+        const d = (seats[i]!.x - seats[j]!.x) ** 2 + (seats[i]!.y - seats[j]!.y) ** 2;
+        if (d > best) {
+          best = d;
+          far = j;
+        }
+      }
+      if (far > i) pairs.push([i, far]);
+    }
+  }
+  const cx = gw / 2;
+  const cy = gh / 2;
+  for (const [i, j] of pairs) balanceOrePair(terrain, crystal, gw, gh, seats[i]!, seats[j]!, cx, cy);
+}
+
+function oreNearSum(crystal: Uint16Array, gw: number, gh: number, x: number, y: number, radius: number): number {
+  let sum = 0;
+  const r2 = radius * radius;
+  for (let ty = 1; ty < gh - 1; ty++) {
+    for (let tx = 1; tx < gw - 1; tx++) {
+      const dx = tx + 0.5 - x;
+      const dy = ty + 0.5 - y;
+      if (dx * dx + dy * dy > r2) continue;
+      sum += crystal[ty * gw + tx] ?? 0;
+    }
+  }
+  return sum;
+}
+
+function oreHost(t: number): boolean {
+  return t === TILE_SAND || t === TILE_SCRUB || t === TILE_SHORE || t === TILE_CLEAR || t === TILE_ROUGH;
+}
+
+function paintOreDisk(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  cx: number,
+  cy: number,
+  r: number,
+  amount: number,
+) {
+  const r2 = r * r;
+  for (let y = Math.max(1, Math.floor(cy - r)); y <= Math.min(gh - 2, Math.ceil(cy + r)); y++) {
+    for (let x = Math.max(1, Math.floor(cx - r)); x <= Math.min(gw - 2, Math.ceil(cx + r)); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      if (dx * dx + dy * dy > r2) continue;
+      const i = y * gw + x;
+      if (!oreHost(terrain[i] ?? 0)) continue;
+      terrain[i] = TILE_CRYSTAL;
+      crystal[i] = amount;
+    }
+  }
+}
+
+function oreSpot(
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  seat: { x: number; y: number },
+  other: { x: number; y: number },
+  cx: number,
+  cy: number,
+): { x: number; y: number } | null {
+  const ang = Math.atan2(cy - seat.y, cx - seat.x);
+  let best: { x: number; y: number } | null = null;
+  let bestN = 3;
+  for (let dist = 4; dist <= 10; dist++) {
+    for (let turn = -3; turn <= 3; turn++) {
+      const a = ang + turn * 0.32;
+      const x = seat.x + Math.cos(a) * dist;
+      const y = seat.y + Math.sin(a) * dist;
+      if (Math.hypot(x - other.x, y - other.y) < 16) continue;
+      if (Math.hypot(x - seat.x, y - seat.y) < 4.5) continue;
+      let n = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (dx * dx + dy * dy > 5) continue;
+          const tx = Math.round(x + dx);
+          const ty = Math.round(y + dy);
+          if (tx < 2 || ty < 2 || tx >= gw - 2 || ty >= gh - 2) continue;
+          if (oreHost(terrain[ty * gw + tx] ?? 0)) n++;
+        }
+      }
+      if (n > bestN) {
+        bestN = n;
+        best = { x, y };
+      }
+    }
+  }
+  return best;
+}
+
+function balanceOrePair(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  cx: number,
+  cy: number,
+) {
+  for (let guard = 0; guard < 8; guard++) {
+    const sa = oreNearSum(crystal, gw, gh, a.x, a.y, 12);
+    const sb = oreNearSum(crystal, gw, gh, b.x, b.y, 12);
+    const goal = Math.max(sa, sb, 6400);
+    if (sa >= goal * 0.95 && sb >= goal * 0.95) return;
+    const poor = sa <= sb ? a : b;
+    const rich = poor === a ? b : a;
+    const spot = oreSpot(terrain, gw, gh, poor, rich, cx, cy);
+    if (!spot) {
+      trimOre(terrain, crystal, gw, gh, rich, poor);
+      return;
+    }
+    paintOreDisk(terrain, crystal, gw, gh, spot.x, spot.y, 2.35, 800);
+  }
+  const sa = oreNearSum(crystal, gw, gh, a.x, a.y, 12);
+  const sb = oreNearSum(crystal, gw, gh, b.x, b.y, 12);
+  if (sa > sb * 1.04) trimOre(terrain, crystal, gw, gh, a, b);
+  else if (sb > sa * 1.04) trimOre(terrain, crystal, gw, gh, b, a);
+}
+
+/** Shave ore that only the richer seat can reach, until the two sums match. */
+function trimOre(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  rich: { x: number; y: number },
+  poor: { x: number; y: number },
+) {
+  const tiles: { i: number; dr: number }[] = [];
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const i = y * gw + x;
+      if ((crystal[i] ?? 0) <= 0) continue;
+      const px = x + 0.5;
+      const py = y + 0.5;
+      const dr = Math.hypot(px - rich.x, py - rich.y);
+      const dp = Math.hypot(px - poor.x, py - poor.y);
+      if (dr > 12 || dr < 3.5 || dp <= dr) continue;
+      tiles.push({ i, dr });
+    }
+  }
+  tiles.sort((a, b) => b.dr - a.dr);
+  for (const tile of tiles) {
+    const sa = oreNearSum(crystal, gw, gh, rich.x, rich.y, 12);
+    const sb = oreNearSum(crystal, gw, gh, poor.x, poor.y, 12);
+    if (sa <= sb * 1.05) return;
+    crystal[tile.i] = 0;
+    if ((terrain[tile.i] ?? 0) === TILE_CRYSTAL) terrain[tile.i] = TILE_SAND;
+  }
 }
 
 function plantPalm(terrain: Uint8Array, gw: number): Camp[] {
