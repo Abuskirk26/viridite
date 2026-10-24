@@ -221,8 +221,8 @@ const INFANTRY_KINDS = new Set(["rifle", "rocket", "marksman", "wader", "vanguar
 export function unitWorldSpan(kind: string): number {
   if (INFANTRY_KINDS.has(kind)) return 0.4;
   if (kind === "scout" || kind === "razor" || kind === "apc") return 0.8;
-  if (kind === "artillery" || kind === "medium" || kind === "scatter" || kind === "frigate" || kind === "missile") return 1.4;
-  if (kind === "chinook" || kind === "attackheli" || kind === "bomber" || kind === "heli") return 1.2;
+  if (kind === "artillery" || kind === "medium" || kind === "scatter" || kind === "frigate" || kind === "missile") return 1.2;
+  if (kind === "chinook" || kind === "attackheli" || kind === "bomber" || kind === "heli") return 1.15;
   if (kind === "tank" || kind === "harvester" || kind === "mcv") return 1.1;
   return 1;
 }
@@ -232,12 +232,13 @@ export function unitWorldSpan(kind: string): number {
  * portrait cannot grow taller than a tank. Buildings stay on their footprint.
  */
 export function unitPictureBox(kind: string): { w: number; h: number } {
-  if (INFANTRY_KINDS.has(kind)) return { w: 0.42, h: 0.56 };
-  if (kind === "scout" || kind === "razor" || kind === "apc") return { w: 1.12, h: 0.88 };
-  if (kind === "artillery" || kind === "medium" || kind === "scatter" || kind === "frigate" || kind === "missile") return { w: 1.85, h: 1.35 };
-  if (kind === "chinook" || kind === "attackheli" || kind === "bomber" || kind === "heli") return { w: 1.45, h: 1.1 };
-  if (kind === "tank" || kind === "harvester" || kind === "mcv") return { w: 1.55, h: 1.12 };
-  return { w: 1.2, h: 0.92 };
+  // AoW3 at the default phone zoom: infantry ~0.4 tile, tanks 1.0–1.2, halls stay 2–3.
+  if (INFANTRY_KINDS.has(kind)) return { w: 0.28, h: 0.4 };
+  if (kind === "scout" || kind === "razor" || kind === "apc") return { w: 0.95, h: 0.72 };
+  if (kind === "artillery" || kind === "medium" || kind === "scatter" || kind === "frigate" || kind === "missile") return { w: 1.2, h: 0.95 };
+  if (kind === "chinook" || kind === "attackheli" || kind === "bomber" || kind === "heli") return { w: 1.15, h: 0.9 };
+  if (kind === "tank" || kind === "harvester" || kind === "mcv") return { w: 1.15, h: 0.85 };
+  return { w: 1, h: 0.75 };
 }
 
 /** Width of the drawn sprite. Height is this times the picture's aspect. */
@@ -294,10 +295,10 @@ export function hallScale(_zoom: number): number {
   return 1;
 }
 
-/** Tap radius in world tiles. Infantry stay a 44px target on a phone. */
+/** Tap radius in world tiles. Every class stays a 44px target after the sprites shrink. */
 export function unitPickRadius(kind: string, zoom: number): number {
   const px = Math.max(8, zoom);
-  const minPx = INFANTRY_KINDS.has(kind) ? 44 : 32;
+  const minPx = 44;
   return Math.max(unitWorldSpan(kind) * 0.45, minPx / px / 2);
 }
 

@@ -3635,7 +3635,7 @@ function paintPlate(
 
 /** Base ring under a troop, tinted 35% with the seat color. Selection is a white ring. */
 function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
-  const rx = Math.max(0.34, wide * 0.72);
+  const rx = Math.max(0.16, wide * 0.72);
   const ry = Math.max(0.1, rx * 0.38);
   ctx.save();
   ctx.strokeStyle = color;

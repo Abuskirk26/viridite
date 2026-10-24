@@ -89,8 +89,8 @@ test("one scale table: infantry smaller than tanks, tanks smaller than halls, sa
   assert.equal(unitWorldSpan("rifle"), 0.4);
   assert.equal(unitWorldSpan("scout"), 0.8);
   assert.equal(unitWorldSpan("tank"), 1.1);
-  assert.equal(unitWorldSpan("artillery"), 1.4);
-  assert.equal(unitWorldSpan("attackheli"), 1.2);
+  assert.equal(unitWorldSpan("artillery"), 1.2);
+  assert.equal(unitWorldSpan("attackheli"), 1.15);
   const barracks = 2 * hallDrawMul("barracks");
   assert.ok(unitWorldSpan("rifle") < unitWorldSpan("tank"));
   assert.ok(unitWorldSpan("tank") < barracks);
@@ -101,10 +101,16 @@ test("one scale table: infantry smaller than tanks, tanks smaller than halls, sa
   assert.ok(unitWorldSpan("tank") * z < barracks * z);
   const home = tacticalHome(phone);
   assert.ok(unitPickRadius("rifle", home) * home * 2 >= 44 - 0.01);
+  assert.ok(unitPickRadius("tank", home) * home * 2 >= 44 - 0.01);
+  assert.ok(unitPickRadius("artillery", home) * home * 2 >= 44 - 0.01);
   const rifleH = unitPictureWidth("rifle", 963 / 431) * (963 / 431);
   const tankW = unitPictureWidth("tank", 655 / 952);
   const tankH = tankW * (655 / 952);
+  const artW = unitPictureWidth("artillery", 971 / 1279);
   const barracksW = 2 * hallDrawMul("barracks");
+  assert.ok(Math.abs(rifleH - 0.4) < 0.02, `rifle height ${rifleH}`);
+  assert.ok(tankW >= 1 && tankW <= 1.2, `tank width ${tankW}`);
+  assert.ok(artW >= 1 && artW <= 1.2, `artillery width ${artW}`);
   assert.ok(rifleH < tankH, "a soldier is shorter than a tank");
   assert.ok(tankW > unitPictureWidth("rifle", 963 / 431) * 3, "a tank is much wider than a soldier");
   assert.ok(tankW < barracksW, "a tank is narrower than a barracks");
