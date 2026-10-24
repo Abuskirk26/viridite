@@ -3878,7 +3878,7 @@ function IconButton({
       aria-label={label}
       data-testid={testId}
       onClick={onClick}
-      className={`bevel-btn flex items-center justify-center ${compact ? "size-8" : "size-11"}`}
+      className={`bevel-btn hud-hit flex items-center justify-center ${compact ? "size-11 -my-1.5" : "size-11"}`}
     >
       {children}
     </button>
@@ -3980,7 +3980,7 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
         data-testid="speed-down"
         disabled={i <= 0}
         onClick={() => onChange(SPEED_STEPS[Math.max(0, i - 1)])}
-        className={`flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`}
+        className={`hud-hit flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-11 w-11 -my-1.5 text-base" : "h-11 w-11 text-xl"}`}
       >
         −
       </button>
@@ -3993,7 +3993,7 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
         data-testid="speed-up"
         disabled={i >= SPEED_STEPS.length - 1}
         onClick={() => onChange(SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, i + 1)])}
-        className={`flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`}
+        className={`hud-hit flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-11 w-11 -my-1.5 text-base" : "h-11 w-11 text-xl"}`}
       >
         +
       </button>
