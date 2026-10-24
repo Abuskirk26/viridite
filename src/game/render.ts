@@ -2515,8 +2515,8 @@ function volumeQuad(
 }
 
 function rockTone(n: number, snow: boolean): string {
-  if (snow) return n > 0.72 ? "#8ea0ac" : n > 0.4 ? "#667684" : "#3e4c58";
-  return n > 0.74 ? "#8d7c68" : n > 0.42 ? "#6b5c4c" : "#3c342c";
+  if (snow) return n > 0.72 ? "#d7e4ec" : n > 0.4 ? "#8ea6b6" : "#516676";
+  return n > 0.72 ? "#d2bba0" : n > 0.4 ? "#9a7d64" : "#5a483c";
 }
 
 /** Jagged rock columns. The crest and the foot overlap the ground so the edge is not a box. */
@@ -2549,6 +2549,18 @@ function paintRockFace(
       const ax0 = x0 + span * u0 + jag(1);
       const ax1 = x0 + span * u1 + jag(2);
       volumeQuad(ctx, ax0, y1 + bot0, ax1, y1 + bot1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
+      volumeQuad(
+        ctx,
+        ax0 + shear * 0.72,
+        y1 - rise * 0.15,
+        ax0 + (ax1 - ax0) * 0.45 + shear * 0.72,
+        y1 - rise * 0.15,
+        ax0 + (ax1 - ax0) * 0.45 + shear * 0.92,
+        y1 - rise * 0.72,
+        ax0 + shear * 0.92,
+        y1 - rise * 0.72,
+        n > 0.5 ? "rgba(232, 214, 188, 0.28)" : "rgba(20, 14, 10, 0.28)",
+      );
       if (n > 0.48) {
         const band = 0.28 + hash(seed + i, 31) * 0.4;
         volumeQuad(
@@ -2673,14 +2685,16 @@ function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: numb
     return tileElev(sim.terrain[ny * sim.gw + nx] ?? 0);
   };
   const snow = THEATER === "snow";
+  // Pitch squashes world Y. Grow the face so a drop still reads as rock at the phone zoom.
+  const face = 1 / Math.max(0.62, viewPitch());
   const south = h - at(x, y + 1);
   if (south >= 0.2) {
-    const rise = south * SOLID_LIFT;
+    const rise = south * SOLID_LIFT * face;
     if (rise >= 0.2) paintRockFace(ctx, x, y, x + 1, y + 1, rise, south * SOLID_SHEAR, true, snow, x * 17 + y);
   }
   const east = h - at(x + 1, y);
   if (east >= 0.28) {
-    const rise = east * SOLID_LIFT;
+    const rise = east * SOLID_LIFT * face;
     if (rise >= 0.24) paintRockFace(ctx, x, y, x + 1, y + 1, rise, east * SOLID_SHEAR * 0.85, false, snow, x * 13 + y * 3);
   }
 }
