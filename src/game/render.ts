@@ -510,12 +510,18 @@ export function drawGame(
       const leaf =
         u.armor === "infantry" &&
         u.team === VIEWER &&
+        u.reveal <= 0 &&
         tx >= 0 &&
         ty >= 0 &&
         tx < GW &&
         ty < GH &&
         sim.terrain[ty * GW + tx] === TILE_SCRUB;
+      if (leaf) {
+        ctx.save();
+        ctx.globalAlpha *= 0.58;
+      }
       drawUnit(ctx, u, px, py, seatPaint(sim, u.team), ui.selected.includes(u.id), sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
+      if (leaf) ctx.restore();
       if (u.hit > 0) {
         ctx.save();
         ctx.globalAlpha = Math.min(0.7, u.hit * 2.2);
@@ -1682,7 +1688,8 @@ function paintFieldProps(
     // The grove sprite is the expensive one; past the budget a flat canopy still marks the block.
     ctx.save();
     ctx.translate((hash(x + 2, y) - 0.5) * 0.22, (hash(x, y + 5) - 0.5) * 0.1);
-    if (!(treeBudget && paintGrove(ctx, x, y, t === TILE_STUMP))) paintTree(ctx, x, y, t === TILE_STUMP);
+    if (sim.mapId === "michigan") paintLakesTree(ctx, sim, x, y, t === TILE_STUMP);
+    else if (!(treeBudget && paintGrove(ctx, x, y, t === TILE_STUMP))) paintTree(ctx, x, y, t === TILE_STUMP);
     ctx.restore();
     if (raised) paintVolume(ctx, sim, x, y);
     return "tree";
@@ -2144,6 +2151,7 @@ function uploadTex(gl: WebGLRenderingContext, data: Uint8Array, w: number, h: nu
 }
 
 let gpuCanvas: HTMLCanvasElement | null = null;
+let gpuDead = false;
 let matImg: HTMLImageElement | null = null;
 let matState: "idle" | "loading" | "ready" | "fail" = "idle";
 
@@ -2210,12 +2218,27 @@ function bakeTerrainGl(
   height: number,
   mats: HTMLImageElement,
 ): HTMLCanvasElement | null {
+  if (gpuDead) return null;
   if (!gpuCanvas) gpuCanvas = document.createElement("canvas");
   const canvas = gpuCanvas;
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   const gl = canvas.getContext("webgl", { antialias: false, preserveDrawingBuffer: true, alpha: false });
-  if (!gl) return null;
+  if (!gl || gl.isContextLost()) {
+    gpuDead = true;
+    return null;
+  }
+  if (!canvas.dataset.glLoss) {
+    canvas.dataset.glLoss = "1";
+    canvas.addEventListener("webglcontextlost", (ev) => {
+      ev.preventDefault();
+      gpuDead = true;
+    });
+    canvas.addEventListener("webglcontextrestored", () => {
+      gpuDead = false;
+      terrainProg = null;
+    });
+  }
   const linked = terrainProgram(gl);
   if (!linked) return null;
   const pack = packTerrain(terrain, w, h, theater);
@@ -2368,6 +2391,33 @@ export function bakeTerrain(
   writeTerrain(img.data, canvas.width, canvas.height, terrain, w, h, theater);
   ctx.putImageData(img, 0, 0);
   return canvas;
+}
+
+/** True when a baked sheet still has grass, sand, or water. A blank fill fails. */
+export function sheetFieldAlive(canvas: HTMLCanvasElement): boolean {
+  if (canvas.width < 16 || canvas.height < 16) return false;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false;
+  const spots: Array<[number, number]> = [
+    [0.22, 0.22],
+    [0.5, 0.5],
+    [0.78, 0.72],
+    [0.4, 0.8],
+  ];
+  const size = 16;
+  const rgb = new Uint8Array(spots.length * size * size * 3);
+  let o = 0;
+  for (const [fx, fy] of spots) {
+    const x = Math.max(0, Math.min(canvas.width - size, Math.floor(canvas.width * fx)));
+    const y = Math.max(0, Math.min(canvas.height - size, Math.floor(canvas.height * fy)));
+    const d = ctx.getImageData(x, y, size, size).data;
+    for (let i = 0; i < size * size; i++) {
+      rgb[o++] = d[i * 4] ?? 0;
+      rgb[o++] = d[i * 4 + 1] ?? 0;
+      rgb[o++] = d[i * 4 + 2] ?? 0;
+    }
+  }
+  return terrainFieldAlive(rgb);
 }
 
 function gradeTile(ctx: CanvasRenderingContext2D, x: number, y: number, t: number) {
@@ -3197,6 +3247,14 @@ function paintUnitSprite(
     ctx.setLineDash([0.08, 0.06]);
     ctx.strokeRect(-0.45, -0.45, 0.9, 0.9);
     ctx.setLineDash([]);
+    ctx.restore();
+  } else if (u.stealth && u.team !== VIEWER) {
+    const pulse = 0.28 + 0.22 * Math.sin(time * 5);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.strokeStyle = `rgba(214,196,150,${pulse.toFixed(3)})`;
+    ctx.lineWidth = 0.045;
+    ctx.strokeRect(-0.48, -0.48, 0.96, 0.96);
     ctx.restore();
   }
 
@@ -4211,7 +4269,61 @@ function drawUnit(
     return;
   }
   paintSolidUnit(ctx, u, x, y, color, selected, time, aim, moving, THEATER === "snow", VIEWER);
+  if (leaf) paintLeaf(ctx, x, y);
   if (selected) paintUnitMark(ctx, x, y + 0.04, wide, color, true);
+}
+
+/** Birch on the ragged edge, pine in the middle. Michigan only. */
+function paintLakesTree(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number, stump: boolean) {
+  if (stump) {
+    paintTree(ctx, x, y, true);
+    return;
+  }
+  let n = 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) continue;
+      if ((sim.terrain[ny * sim.gw + nx] ?? 0) === TILE_SCRUB) n++;
+    }
+  }
+  const h = hash(x, y);
+  const birch = n < 5 ? h > 0.46 : h > 0.84;
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.55, y + 0.8, 0.2, 0.07, 0, 0, Math.PI * 2);
+  ctx.fill();
+  if (birch) {
+    ctx.fillStyle = "#f4f1ea";
+    ctx.fillRect(x + 0.46, y + 0.52, 0.08, 0.26);
+    ctx.fillStyle = h > 0.7 ? "#d7e38a" : "#b7d46a";
+    ctx.beginPath();
+    ctx.arc(x + 0.4, y + 0.4, 0.18, 0, Math.PI * 2);
+    ctx.arc(x + 0.58, y + 0.36, 0.16, 0, Math.PI * 2);
+    ctx.arc(x + 0.48, y + 0.26, 0.13, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#f7f4ee";
+    ctx.fillRect(x + 0.44, y + 0.5, 0.12, 0.04);
+    return;
+  }
+  ctx.fillStyle = "#4a3424";
+  ctx.fillRect(x + 0.47, y + 0.58, 0.07, 0.22);
+  ctx.fillStyle = h > 0.55 ? "#1c4630" : "#143628";
+  ctx.beginPath();
+  ctx.moveTo(x + 0.5, y + 0.08 + h * 0.06);
+  ctx.lineTo(x + 0.86, y + 0.62);
+  ctx.lineTo(x + 0.14, y + 0.62);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#2f6a40";
+  ctx.beginPath();
+  ctx.moveTo(x + 0.5, y + 0.16);
+  ctx.lineTo(x + 0.72, y + 0.42);
+  ctx.lineTo(x + 0.28, y + 0.42);
+  ctx.closePath();
+  ctx.fill();
 }
 
 function paintLeaf(ctx: CanvasRenderingContext2D, x: number, y: number) {

@@ -13,6 +13,11 @@ import {
   HQ_COST,
   HQ_CP,
   HQ_TIME,
+  HIGH_AIM,
+  HIGH_RANGE,
+  HIGH_SIGHT,
+  DETECT_RADAR,
+  DETECT_SCOUT,
   airTier,
   HAUL_AT,
   MAP_SIZE,
@@ -83,7 +88,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -776,8 +781,16 @@ export class Sim {
     this.fog = [0, 1, 2, 3].map(() => new Uint8Array(gw * gh));
     if (!opts.empty) {
       for (const s of slots) stampCamp(this.terrain, this.crystal, s.x, s.y, gw, gh);
-      if (!custom) fairNearbyOre(this.terrain, this.crystal, gw, gh, slots);
+      if (!custom) {
+        fairNearbyOre(this.terrain, this.crystal, gw, gh, slots);
+        fairExpansionOre(this.terrain, this.crystal, gw, gh, slots);
+      }
       this.seedPods();
+      if (!custom && this.mapId === "michigan") {
+        evenMichiganFields(this.terrain, this.crystal, gw, gh, slots);
+        fairExpansionOre(this.terrain, this.crystal, gw, gh, slots);
+        evenMichiganFields(this.terrain, this.crystal, gw, gh, slots);
+      }
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
         this.spawnUnit(t as Team, "mcv", at.x, at.y);
@@ -1065,7 +1078,7 @@ export class Sim {
     if (this.allied(u.team, viewer)) return true;
     // Aircraft stay invisible until they enter current vision. Radar is minimap-only.
     if (!this.tileVisible(viewer, u.x | 0, u.y | 0)) return false;
-    if (this.inCover(u) && !this.coverBroken(viewer, u)) return false;
+    if (this.inCover(u) && u.reveal <= 0 && !this.coverBroken(viewer, u) && !this.sensorNear(viewer, u)) return false;
     if (u.stealth && u.reveal <= 0 && !this.detected(viewer, u)) return false;
     return true;
   }
@@ -2654,6 +2667,7 @@ export class Sim {
     else if (under === TILE_RAMP) speed *= vehicle ? 0.58 : 0.75;
     else if (under === TILE_VALLEY || (vehicle && under === TILE_ROUGH)) speed *= 0.72;
     else if (under === TILE_ROAD && vehicle) speed *= 1.2;
+    else if (under === TILE_SCRUB && u.armor === "infantry") speed *= 0.82;
     if (u.armor === "infantry" && this.marchLeft[u.team]! > 0) speed *= 1.4;
     if (u.kind === "tank" || u.kind === "medium") {
       const bag = this.buildingAtPoint(u.x, u.y);
@@ -2662,17 +2676,17 @@ export class Sim {
     const step = Math.min(speed * dt, dist);
     const nx = u.x + dx * step;
     const ny = u.y + dy * step;
-    if (this.passable(u, nx, ny)) {
+    if (this.passable(u, nx, ny) && this.gradeStep(u, nx, ny)) {
       u.x = nx;
       u.y = ny;
       u.facing = Math.atan2(dy, dx);
       u.stuck = 0;
       this.crushTree(u);
-    } else if (this.passable(u, nx, u.y)) {
+    } else if (this.passable(u, nx, u.y) && this.gradeStep(u, nx, u.y)) {
       u.x = nx;
       u.facing = Math.atan2(0, dx);
       u.stuck += dt;
-    } else if (this.passable(u, u.x, ny)) {
+    } else if (this.passable(u, u.x, ny) && this.gradeStep(u, u.x, ny)) {
       u.y = ny;
       u.facing = Math.atan2(dy, 0);
       u.stuck += dt;
@@ -2858,7 +2872,8 @@ export class Sim {
         const d = Math.hypot(o.x - p.x, o.y - p.y);
         if (d >= s.splash) continue;
         const splash = s.dmg * 0.4 * (1 - d / s.splash);
-        this.hurtUnit(o, o.loco === "air" ? splash * s.vsAir : splash, s.team, s.owner);
+        const woods = o.armor === "infantry" && this.inCover(o) ? 0.75 : 1;
+        this.hurtUnit(o, (o.loco === "air" ? splash * s.vsAir : splash) * woods, s.team, s.owner);
       }
     }
   }
@@ -2898,14 +2913,16 @@ export class Sim {
     const gap = target.kind === "building" ? distPointToRect(u.x, u.y, target.b) : Math.hypot(pos.x - u.x, pos.y - u.y);
     if (u.minRange > 0 && gap < u.minRange) return;
     u.cooldown = u.rof;
-    if (u.stealth) u.reveal = 1.7;
+    if (this.inCover(u)) u.reveal = 2;
+    else if (u.stealth) u.reveal = 1.7;
     this.markFire(u);
     this.muzzle(u.x, u.y, pos.x, pos.y);
     if (u.ammoMax > 0) {
       u.ammo -= 1;
       if (u.ammo <= 0) this.beginRearm(u);
     }
-    const mul = this.navalMul(u, target);
+    const aim = this.highAim(u, pos.x, pos.y);
+    const mul = this.navalMul(u, target) * aim;
     if (u.shot === "hit") {
       const before = target.kind === "unit" ? target.u.hp : 0;
       this.applyDamage(target, u.damage * mul, u.vsInf, u.vsVeh, u.vsBld, u.vsAir, u.shot, u.team, u.kind, u.id);
@@ -2971,7 +2988,8 @@ export class Sim {
         return;
       }
       const plate = plateOf(target.u.kind, target.u.armor);
-      const mul = (target.u.armor === "infantry" ? vsInf : vsVeh) * counterMul(weapon, plate);
+      let mul = (target.u.armor === "infantry" ? vsInf : vsVeh) * counterMul(weapon, plate);
+      if (target.u.armor === "infantry" && this.inCover(target.u) && (shot === "shell" || shot === "rocket")) mul *= 0.75;
       this.hurtUnit(target.u, base * mul, from, attacker);
     } else {
       let dmg = base * vsBld;
@@ -3625,7 +3643,35 @@ export class Sim {
     const tx = x | 0;
     const ty = y | 0;
     if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return range;
-    return this.terrain[ty * this.gw + tx] === TILE_HIGH ? range * 1.12 : range;
+    return this.terrain[ty * this.gw + tx] === TILE_HIGH ? range * HIGH_RANGE : range;
+  }
+
+  /** 0 low ground, 1 ramp, 2 mesa. Cliffs are walls, not a step. */
+  private elevOf(x: number, y: number): number {
+    const tx = x | 0;
+    const ty = y | 0;
+    if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return 0;
+    const t = this.terrain[ty * this.gw + tx] ?? 0;
+    if (t === TILE_HIGH) return 2;
+    if (t === TILE_RAMP) return 1;
+    return 0;
+  }
+
+  /** Land units change grade by at most one. A ramp is the only way onto a mesa. */
+  private gradeStep(u: Unit, x: number, y: number): boolean {
+    if (u.loco === "air" || u.loco === "sea") return true;
+    return Math.abs(this.elevOf(u.x, u.y) - this.elevOf(x, y)) <= 1;
+  }
+
+  private gradeOk(u: Unit, x0: number, y0: number, x1: number, y1: number): boolean {
+    if (u.loco === "air" || u.loco === "sea") return true;
+    return Math.abs(this.elevOf(x0, y0) - this.elevOf(x1, y1)) <= 1;
+  }
+
+  /** Downhill shots hit a little harder. Aircraft and boats are not on the slope. */
+  private highAim(u: Unit, x: number, y: number): number {
+    if (u.loco === "air" || u.loco === "sea") return 1;
+    return this.elevOf(u.x, u.y) > this.elevOf(x, y) ? HIGH_AIM : 1;
   }
 
   /** Roads and bridges are the fast line. Ramps and fords are the slow cut. */
@@ -3859,7 +3905,7 @@ export class Sim {
     }
   }
 
-  /** Infantry in woods stay hidden until a ground unit walks up beside them. Air does not spot them. */
+  /** Infantry in woods stay hidden until a shot, a detector, or a ground unit beside them. Air does not spot them. */
   private inCover(u: Unit): boolean {
     if (u.armor !== "infantry" || u.loco === "air" || u.loco === "sea") return false;
     const tx = u.x | 0;
@@ -4066,7 +4112,8 @@ export class Sim {
     for (const u of this.units) {
       if (u.hp > 0 && !this.eliminated[u.team]) {
         const bonus = u.armor === "infantry" && this.marchLeft[u.team]! > 0 ? 2.2 : 0;
-        this.reveal(u.team, u.x, u.y, u.sight + bonus);
+        const high = u.loco !== "air" && u.loco !== "sea" && this.elevOf(u.x, u.y) >= 2 ? HIGH_SIGHT : 0;
+        this.reveal(u.team, u.x, u.y, u.sight + bonus + high);
       }
     }
     for (const b of this.buildings) {
@@ -4105,7 +4152,7 @@ export class Sim {
       const y = Math.floor(y0 + (y1 - y0) * t);
       if (x === Math.floor(x1) && y === Math.floor(y1)) continue;
       if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) return false;
-      if (blocksSight(this.terrain[y * this.gw + x] ?? 0)) return false;
+      if (blocksSight(this.terrain[y * this.gw + x] ?? 0) && this.elevOf(x0, y0) < 2) return false;
     }
     return true;
   }
@@ -4176,7 +4223,7 @@ export class Sim {
     if (this.pinned(u)) return;
     const nx = u.x + dx;
     const ny = u.y + dy;
-    if (this.passable(u, nx, ny)) {
+    if (this.passable(u, nx, ny) && this.gradeStep(u, nx, ny)) {
       u.x = nx;
       u.y = ny;
     }
@@ -4544,7 +4591,10 @@ export class Sim {
       if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD) return true;
       return t === TILE_SHORE && u.kind === "transport";
     }
-    if (u.loco === "land" || u.loco === "amphib") return t !== TILE_DEEP && t !== TILE_SHALLOW;
+    if (u.loco === "land" || u.loco === "amphib") {
+      if (t === TILE_SCRUB && u.armor !== "infantry") return false;
+      return t !== TILE_DEEP && t !== TILE_SHALLOW;
+    }
     return true;
   }
 
@@ -4559,6 +4609,8 @@ export class Sim {
       y | 0,
       this.gw,
       this.gh,
+      undefined,
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     if (!path || path.length < 2) return null;
     let best: Building | null = null;
@@ -4607,6 +4659,7 @@ export class Sim {
       this.gw,
       this.gh,
       (tx, ty) => this.stepCost(tx, ty),
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     u.repath = 0.4 + (u.id % 5) * 0.07;
     if (!path) {
@@ -4773,18 +4826,25 @@ export class Sim {
     return best;
   }
 
-  private detected(viewer: Team, unit: Unit): boolean {
-    if (!unit.stealth || unit.reveal > 0) return true;
-    for (const o of this.units) {
-      if (!this.allied(o.team, viewer) || o.hp <= 0) continue;
-      if (Math.hypot(o.x - unit.x, o.y - unit.y) <= 2.75) return true;
+  /** Powered Radar Mast or Scout Buggy. Woods and cloaks share this check. */
+  private sensorNear(viewer: Team, unit: Unit): boolean {
+    if (!this.powerOf(viewer).low) {
+      for (const b of this.buildings) {
+        if (b.team !== viewer || b.special !== "radar" || !b.complete || b.hp <= 0) continue;
+        if (distPointToRect(unit.x, unit.y, b) <= DETECT_RADAR) return true;
+      }
     }
-    for (const b of this.buildings) {
-      if (!this.allied(b.team, viewer) || b.hp <= 0 || !b.complete) continue;
-      const sense = b.kind === "tower" ? Math.max(2.8, b.range * 0.65) : 2.5;
-      if (distPointToRect(unit.x, unit.y, b) <= sense) return true;
+    for (const o of this.units) {
+      if (!this.allied(o.team, viewer) || o.hp <= 0 || o.kind !== "scout") continue;
+      if (Math.hypot(o.x - unit.x, o.y - unit.y) <= DETECT_SCOUT) return true;
     }
     return false;
+  }
+
+  /** Cloak breaks near a powered Radar Mast or a Scout Buggy. A shot breaks it too. */
+  private detected(viewer: Team, unit: Unit): boolean {
+    if (!unit.stealth || unit.reveal > 0) return true;
+    return this.sensorNear(viewer, unit);
   }
 
   private nearestRefinery(team: Team): Building | null {
@@ -5036,6 +5096,8 @@ export class Sim {
       y | 0,
       this.gw,
       this.gh,
+      undefined,
+      (x0, y0, x1, y1) => this.gradeOk(u, x0, y0, x1, y1),
     );
     return path !== null;
   }

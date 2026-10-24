@@ -90,6 +90,8 @@ const DIRS = [
 
 export type BlockedFn = (x: number, y: number) => boolean;
 export type CostFn = (x: number, y: number) => number;
+/** False when a step climbs or drops more than one grade. Ramps are the middle grade. */
+export type StepFn = (x0: number, y0: number, x1: number, y1: number) => boolean;
 
 function inb(x: number, y: number, gw: number, gh: number): boolean {
   return x >= 0 && y >= 0 && x < gw && y < gh;
@@ -117,7 +119,7 @@ export function nearestOpen(
   return null;
 }
 
-function los(x0: number, y0: number, x1: number, y1: number, blocked: BlockedFn): boolean {
+function los(x0: number, y0: number, x1: number, y1: number, blocked: BlockedFn, step?: StepFn): boolean {
   let x = x0;
   let y = y0;
   const dx = Math.abs(x1 - x0);
@@ -129,6 +131,8 @@ function los(x0: number, y0: number, x1: number, y1: number, blocked: BlockedFn)
     if ((x !== x0 || y !== y0) && (x !== x1 || y !== y1) && blocked(x, y)) return false;
     if (x === x1 && y === y1) return true;
     const e2 = 2 * err;
+    const px = x;
+    const py = y;
     if (e2 >= dy) {
       err += dy;
       x += sx;
@@ -137,16 +141,17 @@ function los(x0: number, y0: number, x1: number, y1: number, blocked: BlockedFn)
       err += dx;
       y += sy;
     }
+    if (step && (x !== px || y !== py) && !step(px, py, x, y)) return false;
   }
   return false;
 }
 
-function smooth(path: { x: number; y: number }[], blocked: BlockedFn): { x: number; y: number }[] {
+function smooth(path: { x: number; y: number }[], blocked: BlockedFn, step?: StepFn): { x: number; y: number }[] {
   if (path.length <= 2) return path;
   const out: { x: number; y: number }[] = [path[0]];
   let anchor = 0;
   for (let i = 2; i < path.length; i++) {
-    if (!los(path[anchor].x, path[anchor].y, path[i].x, path[i].y, blocked)) {
+    if (!los(path[anchor].x, path[anchor].y, path[i].x, path[i].y, blocked, step)) {
       out.push(path[i - 1]);
       anchor = i - 1;
     }
@@ -164,6 +169,7 @@ export function findPath(
   gw = MAP_W,
   gh = MAP_H,
   cost?: CostFn,
+  step?: StepFn,
 ): { x: number; y: number }[] | null {
   sx = Math.max(0, Math.min(gw - 1, sx | 0));
   sy = Math.max(0, Math.min(gh - 1, sy | 0));
@@ -214,6 +220,7 @@ export function findPath(
       const nx = cx + dir[0];
       const ny = cy + dir[1];
       if (!inb(nx, ny, gw, gh) || blocked(nx, ny)) continue;
+      if (step && !step(cx, cy, nx, ny)) continue;
       if (dir[0] !== 0 && dir[1] !== 0) {
         if (blocked(cx + dir[0], cy) || blocked(cx, cy + dir[1])) continue;
       }
@@ -239,5 +246,5 @@ export function findPath(
     cur = prev;
   }
   path.reverse();
-  return smooth(path, blocked);
+  return smooth(path, blocked, step);
 }

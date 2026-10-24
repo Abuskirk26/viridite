@@ -64,7 +64,9 @@ export function allows(
 ): boolean {
   if (who === "air") return true;
   if (tile === TILE_FORD) return true;
-  if (tile === TILE_SCRUB) return who === "infantry" || who === "vehicle" || who === "amphib";
+  // Infantry slip through the trunks. Tanks, trucks, and amphibs go around.
+  // Aircraft already returned. Boats never stand on a tree tile.
+  if (tile === TILE_SCRUB) return who === "infantry";
   if (tile === TILE_ROCK || tile === TILE_CLIFF) return false;
   if (isShell(tile) && shellMark < 2) return false;
   const g = groundOf(tile);
@@ -496,7 +498,7 @@ function clampByte(n: number): number {
 }
 
 /**
- * A real field has land or water and a spread of brightness.
+ * A real field has grass, desert, or water, and a spread of brightness.
  * A lost WebGL sheet is one dark fill (navy or black) and fails this.
  */
 export function terrainFieldAlive(rgb: ArrayLike<number>): boolean {
@@ -506,6 +508,7 @@ export function terrainFieldAlive(rgb: ArrayLike<number>): boolean {
   let maxL = 0;
   let land = 0;
   let water = 0;
+  let warm = 0;
   for (let i = 0; i < n; i++) {
     const r = rgb[i * 3] ?? 0;
     const g = rgb[i * 3 + 1] ?? 0;
@@ -515,8 +518,9 @@ export function terrainFieldAlive(rgb: ArrayLike<number>): boolean {
     if (l > maxL) maxL = l;
     if (g > r + 8 && g > 45) land++;
     if (b > r + 10 && b > g && b > 40) water++;
+    if (r > 90 && g > 50 && r > b + 18 && r > g) warm++;
   }
-  return maxL - minL > 12 && (land > n * 0.05 || water > n * 0.05);
+  return maxL - minL > 12 && (land > n * 0.05 || water > n * 0.05 || warm > n * 0.05);
 }
 
 /** Height-shaded field. One surface, lit from the northwest. Used by the match bake. */

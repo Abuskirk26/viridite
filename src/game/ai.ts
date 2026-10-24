@@ -15,6 +15,7 @@
 import {
   CP_MAX,
   HQ_COST,
+  TILE_SCRUB,
   TILE_SHORE,
   resolveBuilding,
   resolveUnit,
@@ -979,19 +980,14 @@ function launch(
   if (!defense && !attackMove && diff === "easy" && sim.time >= EASY_SCOUT_UNTIL) return false;
   const armed = attackMove && (defense || sim.time >= firstPushAt(diff));
   const roles = !defense && armed && (diff === "normal" || diff === "hard") ? baseRoles(sim, team) : [];
-  if (roles.length >= 2) {
+    if (roles.length >= 2) {
     sim.aiGoal[team] = roles[0]!;
     const groups = splitGroups(units, roles.length);
     for (let i = 0; i < groups.length; i++) {
       const group = groups[i]!;
       if (!group.length) continue;
       const step = hop(sim, group[0]!, roles[i]!);
-      sim.issueMove(
-        group.map((u) => u.id),
-        step.x,
-        step.y,
-        true,
-      );
+      sendParty(sim, group, step, true);
     }
   } else {
     sim.aiGoal[team] = dest;
@@ -1002,12 +998,7 @@ function launch(
       );
     } else {
       const step = hop(sim, units[0]!, dest);
-      sim.issueMove(
-        units.map((u) => u.id),
-        step.x,
-        step.y,
-        armed,
-      );
+      sendParty(sim, units, step, armed);
     }
   }
   if (waveClock) {
@@ -1020,6 +1011,70 @@ function launch(
     if (team === 1) sim.aiNext = sim.aiAt[team]!;
   }
   return true;
+}
+
+/** Tanks keep the open step. On Michigan, infantry peel off into a clump beside that step. */
+function sendParty(sim: Sim, units: Unit[], step: { x: number; y: number }, attackMove: boolean) {
+  const foot = sim.mapId === "michigan" ? units.filter((u) => u.armor === "infantry") : [];
+  const rest = foot.length ? units.filter((u) => u.armor !== "infantry") : units;
+  if (rest.length) {
+    sim.issueMove(
+      rest.map((u) => u.id),
+      step.x,
+      step.y,
+      attackMove,
+    );
+  }
+  if (!foot.length) return;
+  const post = ambushTile(sim, foot[0]!, step);
+  sim.issueMove(
+    foot.map((u) => u.id),
+    post.x,
+    post.y,
+    attackMove,
+  );
+}
+
+/** A scrub tile beside the march. Infantry hold there; the order is still an attack-move. */
+function ambushTile(sim: Sim, unit: Unit, step: { x: number; y: number }): { x: number; y: number } {
+  const camp = enemyCamp(sim, unit.team);
+  const home = sim.starts.slots[unit.team] ?? { x: unit.x, y: unit.y };
+  let bestX = step.x;
+  let bestY = step.y;
+  let best = -1;
+  const anchors = [
+    { x: unit.x * 0.45 + camp.x * 0.55, y: unit.y * 0.45 + camp.y * 0.55 },
+    { x: step.x, y: step.y },
+  ];
+  for (const anchor of anchors) {
+    for (let dy = -8; dy <= 8; dy++) {
+      for (let dx = -8; dx <= 8; dx++) {
+        const x = Math.round(anchor.x + dx);
+        const y = Math.round(anchor.y + dy);
+        if (x < 2 || y < 2 || x >= sim.gw - 2 || y >= sim.gh - 2) continue;
+        if ((sim.terrain[y * sim.gw + x] ?? 0) !== TILE_SCRUB) continue;
+        if (!sim.passable(unit, x + 0.5, y + 0.5)) continue;
+        if (Math.hypot(x + 0.5 - home.x, y + 0.5 - home.y) < 7) continue;
+        if (Math.hypot(x + 0.5 - camp.x, y + 0.5 - camp.y) < 10) continue;
+        let around = 0;
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let ox = -1; ox <= 1; ox++) {
+            if (!ox && !oy) continue;
+            if ((sim.terrain[(y + oy) * sim.gw + (x + ox)] ?? 0) === TILE_SCRUB) around++;
+          }
+        }
+        const d = Math.hypot(x + 0.5 - anchor.x, y + 0.5 - anchor.y);
+        const score = around * 2 + (10 - d);
+        if (score > best) {
+          best = score;
+          bestX = x + 0.5;
+          bestY = y + 0.5;
+        }
+      }
+    }
+    if (best > 0) break;
+  }
+  return { x: bestX, y: bestY };
 }
 
 function isArmor(u: Unit): boolean {
