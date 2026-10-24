@@ -454,6 +454,7 @@ export function drawGame(
     const low = sim.powerOf(b.team).low;
     const paint = () => {
       drawBuilding(ctx, b, seatPaint(sim, b.team), ui.buildingId === b.id, sim.time, low, sim);
+      if (!b.complete) drawSiteBar(ctx, b);
       if (b.hit > 0) {
         ctx.save();
         ctx.globalAlpha = Math.min(0.9, b.hit * 2.2);
@@ -855,9 +856,16 @@ export function drawGame(
     const w = footprintSize(ui.placing).w;
     const h = footprintSize(ui.placing).h;
     const lifted = origin.tx !== drop.tx || origin.ty !== drop.ty;
-    ctx.globalAlpha = 0.45;
-    ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
-    ctx.fillRect(origin.tx, origin.ty, w, h);
+    for (let ty = 0; ty < h; ty++) {
+      for (let tx = 0; tx < w; tx++) {
+        const cx = origin.tx + tx;
+        const cy = origin.ty + ty;
+        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, !!resolveBuilding(ui.placing, sim.factionOf(VIEWER)).shore);
+        ctx.globalAlpha = bdef.ok ? 0.5 : blocked ? 0.72 : 0.4;
+        ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
+        ctx.fillRect(cx + 0.05, cy + 0.05, 0.9, 0.9);
+      }
+    }
     ctx.globalAlpha = 1;
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
     ctx.lineWidth = 0.12;
@@ -1006,8 +1014,8 @@ export function placeChrome(
   _ty: number,
   _w: number,
 ): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
-  const bw = 96;
-  const bh = 44;
+  const bw = 112;
+  const bh = 48;
   const padW = 52;
   const x = Math.max(4, Math.round(view.w - bw - padW - 8));
   const y = Math.max(4, Math.round(view.h - (bh * 2 + 6) - 8));
@@ -1103,6 +1111,10 @@ function drawPlaceLabel(
   ui: DrawUi,
 ) {
   if (!ui.placing) return;
+  if (ui.touchPlace) {
+    const visual = ui.ghost ?? ui.hover;
+    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, BUILDINGS[ui.placing].w));
+  }
   let tx = 0;
   let ty = 0;
   let text = "";
@@ -1125,12 +1137,12 @@ function drawPlaceLabel(
     tx = visual.tx;
     ty = visual.ty;
     const power = def.powerUse > 0 ? `Power −${def.powerUse}` : def.powerOut > 0 ? `Power +${def.powerOut}` : "No power draw";
-    text = check.ok ? `${def.cost} credits` : ghostPlaceReason(check.reason);
+    const secs = def.time >= 10 || Number.isInteger(def.time) ? String(def.time) : def.time.toFixed(1);
+    text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
     const s = worldToScreen(cam, tx + def.w / 2, ty, view);
     const lines = check.ok ? [text, power] : [text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
-    if (ui.touchPlace) paintPlaceChrome(ctx, placeChrome(cam, view, visual.tx, visual.ty, def.w));
     return;
   } else return;
   const s = worldToScreen(cam, tx + 0.5, ty, view);
@@ -1195,16 +1207,40 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
     }
     if (p < 0) continue;
     const anchor = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
-    const w = Math.max(56, Math.min(128, b.w * cam.zoom));
+    const w = Math.max(64, Math.min(140, b.w * cam.zoom));
     const x = anchor.x - w / 2;
-    const y = anchor.y - 18;
+    const y = anchor.y - 22;
+    const barH = 12;
     ctx.fillStyle = "#f3ead7";
     ctx.fillText(label, anchor.x, y - 1);
     ctx.fillStyle = "rgba(12,10,8,0.9)";
-    ctx.fillRect(x, y, w, 8);
+    ctx.fillRect(x, y, w, barH);
     ctx.fillStyle = low ? "#e15b48" : "#d7b56a";
-    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, p)), 8);
+    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, p)), barH);
   }
+}
+
+/** Legal cells are green. A blocked cell in the footprint is a stronger red. Not a team color. */
+function footprintCellBlocked(sim: Sim, x: number, y: number, shore: boolean): boolean {
+  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+  if (sim.blockedTile(x, y)) return true;
+  if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) return true;
+  if (shore && sim.terrain[y * sim.gw + x] !== TILE_SHORE) return true;
+  return false;
+}
+
+function drawSiteBar(ctx: CanvasRenderingContext2D, b: Building) {
+  if (b.complete || b.hp <= 0 || b.buildTotal <= 0) return;
+  const p = Math.max(0, Math.min(1, 1 - b.buildLeft / b.buildTotal));
+  const x = b.tx + 0.1;
+  const y = b.ty + b.h - 0.2;
+  const w = Math.max(0.5, b.w - 0.2);
+  ctx.save();
+  ctx.fillStyle = "rgba(12,10,8,0.92)";
+  ctx.fillRect(x, y, w, 0.16);
+  ctx.fillStyle = "#d7b56a";
+  ctx.fillRect(x, y, w * p, 0.16);
+  ctx.restore();
 }
 
 function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
