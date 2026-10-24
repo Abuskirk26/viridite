@@ -1486,6 +1486,18 @@ export function isFence(id: BuildingId): boolean {
   return id === "sandbag" || id === "wall" || id === "gate";
 }
 
+/**
+ * Unmet requirement for a build card, before the player taps.
+ * Tech comes first ("Needs Refinery"), then a gate's wall, then the yard.
+ */
+export function buildNeed(id: BuildingId, faction: FactionId, have: (kind: BuildingId) => boolean): string {
+  const def = resolveBuilding(id, faction);
+  if (def.requires && !have(def.requires)) return `Needs ${BUILDINGS[def.requires].short}`;
+  if (id === "gate" && !have("wall") && !have("sandbag")) return "Needs wall";
+  if (id !== "yard" && !have("yard")) return "Needs Yard";
+  return "";
+}
+
 export function canBuild(id: BuildingId, faction: FactionId): boolean {
   const only = BUILDINGS[id].only;
   if (!only || only === "both") return true;

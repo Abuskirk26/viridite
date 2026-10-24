@@ -28,10 +28,11 @@ test("battle zoom is a tile span, the same pixels per tile on every screen and m
   const deskLimits = zoomLimits(desk, 64, 64);
   const wideLimits = zoomLimits(phone, 96, 96);
   const warLimits = zoomLimits(phone, 128, 128);
-  assert.ok(Math.abs(phone.w / phoneLimits.min - 20) < 0.05, `phone zoom-out tiles ${phone.w / phoneLimits.min}`);
-  assert.ok(Math.abs(phone.w / phoneLimits.max - 10) < 0.05, `phone zoom-in tiles ${phone.w / phoneLimits.max}`);
-  assert.ok(Math.abs(portrait.w / zoomLimits(portrait, 64, 64).min - 14) < 0.05);
-  assert.ok(Math.abs(portrait.w / zoomLimits(portrait, 64, 64).max - 10) < 0.05);
+  assert.ok(Math.abs(phoneLimits.min - 38.4) < 0.05, `phone zoom-out px ${phoneLimits.min}`);
+  assert.ok(Math.abs(phoneLimits.max - 76.8) < 0.05, `phone zoom-in px ${phoneLimits.max}`);
+  assert.ok(Math.abs(phone.w / phoneLimits.min - 915 / 38.4) < 0.05);
+  assert.ok(Math.abs(zoomLimits(portrait, 64, 64).min - 38.4) < 0.05);
+  assert.ok(Math.abs(zoomLimits(portrait, 64, 64).max - 76.8) < 0.05);
   assert.ok(Math.abs(phoneLimits.min - deskLimits.min) < 0.02, "soldier px/tile matches desktop");
   assert.ok(Math.abs(phoneLimits.max - deskLimits.max) < 0.02);
   assert.ok(desk.w / deskLimits.min > 28, "desktop sees more tiles, not a smaller soldier");
@@ -41,7 +42,8 @@ test("battle zoom is a tile span, the same pixels per tile on every screen and m
   const homeTiles = phone.w / tacticalHome(phone);
   const outTiles = tileSpan(phone, "out");
   const inTiles = tileSpan(phone, "in");
-  assert.ok(Math.abs(homeTiles - (inTiles + 0.7 * (outTiles - inTiles))) < 0.05);
+  assert.ok(Math.abs(tacticalHome(phone) - 48) < 0.05, `home px ${tacticalHome(phone)}`);
+  assert.ok(Math.abs(homeTiles - (inTiles + 0.6 * (outTiles - inTiles))) < 0.05);
   assert.equal(openingZoom("continent"), openingZoom("skirmish"));
   assert.equal(openingZoom("warzone"), tacticalHome({ w: 915, h: 412 }));
 });

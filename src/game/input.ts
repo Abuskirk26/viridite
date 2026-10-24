@@ -161,7 +161,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
 
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === "mouse" && e.button === 2) e.preventDefault();
-    el.setPointerCapture(e.pointerId);
+    // Capturing a finger swallows the second touch, so pinch never starts.
+    if (e.pointerType === "mouse") el.setPointerCapture(e.pointerId);
     const p = local(e);
     pts.set(e.pointerId, { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, px: p.x, py: p.y, button: e.button });
     hooks.onPointerKind?.(e.pointerType !== "mouse");

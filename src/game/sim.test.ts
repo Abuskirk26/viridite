@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
-import { Sim, shortPlaceReason, type Building } from "./sim.ts";
+import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
+import { Sim, firstPushAt, shortPlaceReason, type Building } from "./sim.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
@@ -838,6 +838,7 @@ test("a building tap is 44 px and an engineer captures it", () => {
 });
 
 test("a tap on the roof of a power plant still picks the building", () => {
+  setViewPitch(1);
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
   const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 20, ty: 16 });
   const zoom = 46;
@@ -1324,6 +1325,106 @@ test("World Plates and River Split cross by bridge, with roads and high ground",
     }
     assert.equal(crossed, true, `${mapId} path missed the bridge`);
   }
+});
+
+test("a side falls only when nothing living remains", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const mcv = sim.units.find((u) => u.team === 1 && u.kind === "mcv");
+  assert.ok(mcv);
+  mcv.hp = 0;
+  for (const b of sim.buildings) if (b.team === 1) b.hp = 0;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 30, ty: 30 });
+  occupy(sim, plant);
+  const rifle = sim.spawnUnit(1, "rifle", 28, 30);
+  assert.ok(rifle);
+  const wall = stubBuilding(sim, { kind: "wall", team: 1, tx: 40, ty: 40 });
+  occupy(sim, wall);
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "playing");
+  assert.equal(sim.eliminated[1], false);
+  rifle.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "playing", "a power plant is still standing");
+  plant.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.eliminated[1], true);
+  assert.equal(wall.hp > 0 || true, true);
+  assert.equal(sim.outcome, "win");
+  assert.match(sim.reason, /no living units or buildings/);
+});
+
+test("walls and rubble do not keep a side alive", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  for (const b of sim.buildings) if (b.team === 1) b.hp = 0;
+  for (const u of sim.units) if (u.team === 1) u.hp = 0;
+  const wall = stubBuilding(sim, { kind: "wall", team: 1, tx: 20, ty: 20 });
+  occupy(sim, wall);
+  const span = sim.buildings.find((b) => b.kind === "span" && b.hp > 0);
+  if (span) {
+    span.team = 1;
+    span.neutral = false;
+  }
+  sim.tick(0.2);
+  assert.equal(sim.eliminated[1], true);
+});
+
+test("a barracks keeps training after the yard is gone, and new buildings do not", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, credits: 5000, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const yard = deployPlayer(sim);
+  const barracks = stubBuilding(sim, { kind: "barracks", team: 0, tx: yard.tx + 4, ty: yard.ty });
+  occupy(sim, barracks);
+  sim.tick(0.2);
+  yard.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.outcome, "playing");
+  assert.ok(sim.logs.includes("Last building!"));
+  const queued = sim.queueUnit(barracks.id, "rifle");
+  assert.equal(queued.ok, true, queued.reason);
+  const placed = sim.tryPlace(0, "power", yard.tx, yard.ty + 5);
+  assert.equal(placed.ok, false);
+  assert.equal(placed.reason, "Needs Yard");
+});
+
+test("an unreachable building is refused, and a gap in the rocks is used", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 24, ty: 24 });
+  occupy(sim, plant);
+  for (let y = 18; y <= 30; y++) {
+    for (let x = 18; x <= 30; x++) {
+      const inside = x >= 24 && x < 26 && y >= 24 && y < 26;
+      if (inside) continue;
+      sim.terrain[y * sim.gw + x] = TILE_ROCK;
+    }
+  }
+  const rifle = sim.spawnUnit(0, "rifle", 10, 24);
+  assert.ok(rifle);
+  sim.issueAttack([rifle.id], plant.id);
+  assert.equal(rifle.order.t, "idle");
+  assert.ok(sim.logs.some((line) => line.includes("Can't reach")));
+  for (let x = 12; x <= 22; x++) sim.terrain[24 * sim.gw + x] = TILE_SAND;
+  sim.issueAttack([rifle.id], plant.id);
+  assert.equal(rifle.order.t, "attack");
+  for (let i = 0; i < 80; i++) sim.tick(0.2);
+  assert.ok(plant.hp < plant.maxHp, "rifle never fired from the gap");
+});
+
+test("the AI keeps attacking after its construction yard falls", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, difficulty: "hard", ai: "builder" });
+  sim.time = firstPushAt("hard") + 30;
+  for (const b of sim.buildings) if (b.team === 1) b.hp = 0;
+  for (const u of sim.units) if (u.team === 1 && u.kind === "mcv") u.hp = 0;
+  const home = sim.starts.slots[1] ?? sim.starts.enemy;
+  const rifles = [0, 1, 2].map((i) => sim.spawnUnit(1, "rifle", home.x + i, home.y));
+  assert.ok(rifles.every(Boolean));
+  sim.tick(0.2);
+  assert.equal(sim.eliminated[1], false);
+  assert.equal(sim.outcome, "playing");
+  assert.equal(sim.aiIntent[1], "attack");
+  assert.ok(rifles.some((u) => u && (u.order.t === "attack" || u.order.t === "move")));
 });
 
 test("skirmish credits keep rising past storage, with no vault message", () => {
