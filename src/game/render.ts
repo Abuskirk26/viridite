@@ -28,18 +28,20 @@ import {
   isFence,
   resolveBuilding,
   resolveUnit,
+  teamStyle,
   wideField,
+  type TeamShape,
   type BuildingId,
   type Team,
 } from "./data.ts";
 import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
-import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
-import { art, type Painted } from "./art.ts";
+import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
+import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
-import { ensureIso, iso, type IsoBank } from "./iso.ts";
-import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, writeTerrain } from "./tileset.ts";
+import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
+import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, terrainFieldAlive, writeTerrain } from "./tileset.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
 export function frameScale(): number {
@@ -195,7 +197,7 @@ export function paintPreview(
         ctx.fillRect(x * s, y * s, s, s);
       }
       if (map.crystal[i] > 0) {
-        ctx.fillStyle = "#3dcc6e";
+        ctx.fillStyle = "#d08a3a";
         ctx.fillRect(x * s, y * s, s, s);
       }
     }
@@ -212,12 +214,12 @@ let fogTmp: Float32Array | null = null;
 
 function fogAlpha(state: number): number {
   if (state === 2) return 0;
-  if (state === 1) return 58;
-  return 168;
+  if (state === 1) return 42;
+  return 112;
 }
 
 function sampleFog(fog: Uint8Array, wx: number, wy: number, gw: number, gh: number): number {
-  if (wx < 0 || wy < 0 || wx > gw - 1 || wy > gh - 1) return 196;
+  if (wx < 0 || wy < 0 || wx > gw - 1 || wy > gh - 1) return 132;
   const x0 = wx | 0;
   const y0 = wy | 0;
   const x1 = Math.min(gw - 1, x0 + 1);
@@ -255,7 +257,7 @@ function blurBox(src: Float32Array, dst: Float32Array, w: number, h: number, hor
 function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefined, cam: Camera, view: View, gw: number, gh: number) {
   if (!fog || fog.length < gw * gh || view.w < 8 || view.h < 8) return;
   const pitch = viewPitch();
-  const maxSide = 200;
+  const maxSide = 220;
   const aspect = view.w / view.h;
   const bw = Math.max(72, aspect >= 1 ? maxSide : Math.round(maxSide * aspect));
   const bh = Math.max(72, aspect >= 1 ? Math.round(maxSide / aspect) : maxSide);
@@ -281,10 +283,10 @@ function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefin
     }
   }
   if (peak < 1) return;
+  blurBox(src, tmp, bw, bh, true, 8);
+  blurBox(tmp, src, bw, bh, false, 8);
   blurBox(src, tmp, bw, bh, true, 5);
   blurBox(tmp, src, bw, bh, false, 5);
-  blurBox(src, tmp, bw, bh, true, 3);
-  blurBox(tmp, src, bw, bh, false, 3);
   if (!fogCanvas) fogCanvas = document.createElement("canvas");
   if (fogCanvas.width !== bw) fogCanvas.width = bw;
   if (fogCanvas.height !== bh) fogCanvas.height = bh;
@@ -295,10 +297,10 @@ function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefin
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     const a = src[i] ?? 0;
-    data[o] = 10;
-    data[o + 1] = 16;
-    data[o + 2] = 22;
-    data[o + 3] = a < 1 ? 0 : a > 210 ? 210 : a;
+    data[o] = 52;
+    data[o + 1] = 68;
+    data[o + 2] = 82;
+    data[o + 3] = a < 1 ? 0 : a > 150 ? 150 : a;
   }
   fx.putImageData(img, 0, 0);
   ctx.save();
@@ -452,6 +454,7 @@ export function drawGame(
     const low = sim.powerOf(b.team).low;
     const paint = () => {
       drawBuilding(ctx, b, seatPaint(sim, b.team), ui.buildingId === b.id, sim.time, low, sim);
+      if (!b.complete) drawSiteBar(ctx, b);
       if (b.hit > 0) {
         ctx.save();
         ctx.globalAlpha = Math.min(0.9, b.hit * 2.2);
@@ -714,37 +717,8 @@ export function drawGame(
       ctx.lineTo(f.x2, f.y2);
       ctx.stroke();
       ctx.globalAlpha = 1;
-    } else if (f.kind === "boom") {
-      const frames = art()?.boom;
-      if (frames && frames.length >= 6) {
-        const frame = Math.min(5, Math.floor(k * 6));
-        const size = Math.max(0.9, f.r * 2.6);
-        ctx.globalAlpha = k > 0.85 ? 1 - (k - 0.85) / 0.15 : 1;
-        ctx.drawImage(frames[frame]!, f.x - size / 2, f.y - size / 2, size, size);
-        ctx.globalAlpha = 1;
-      } else {
-        ctx.globalAlpha = 1 - k;
-        ctx.fillStyle = k < 0.35 ? "#fff1c4" : "#e25822";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y, Math.max(0.2, f.r * (0.35 + k * 0.9)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "#ffd27a";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y, Math.max(0.08, f.r * (0.18 + k * 0.25)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = (1 - k) * 0.55;
-        ctx.fillStyle = "rgba(28, 26, 24, 0.85)";
-        ctx.beginPath();
-        ctx.arc(f.x, f.y - f.r * 0.35, Math.max(0.15, f.r * (0.45 + k * 0.4)), 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-      }
-    } else if (f.kind === "debris") {
-      const travel = 1 - f.ttl / f.max;
-      ctx.globalAlpha = 1 - travel;
-      ctx.fillStyle = f.color;
-      ctx.fillRect(f.x + f.x2 * travel - 0.06, f.y + f.y2 * travel - 0.04, 0.12, 0.08);
-      ctx.globalAlpha = 1;
+    } else if (f.kind === "boom" || f.kind === "debris" || f.kind === "muzzle" || f.kind === "flash" || f.kind === "num") {
+      // Drawn in screen space after the hall sprites and the fog veil.
     } else {
       ctx.globalAlpha = 1 - k;
       ctx.fillStyle = k < 0.4 ? "#fff1c4" : "#e07a3a";
@@ -774,7 +748,7 @@ export function drawGame(
     const b = sim.buildingById(ui.buildingId);
     if (b && b.hp > 0 && b.kind !== "span") {
       ctx.save();
-      ctx.strokeStyle = "#e7c56a";
+      ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 0.07;
       ctx.beginPath();
       ctx.ellipse(b.tx + b.w / 2, b.ty + b.h / 2, Math.max(0.55, b.w * 0.68), Math.max(0.4, b.h * 0.62), 0, 0, Math.PI * 2);
@@ -800,14 +774,12 @@ export function drawGame(
       ctx.restore();
     }
     if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
-      ctx.strokeStyle = "#f3ead7";
+      ctx.strokeStyle = seatPaint(sim, b.team);
       ctx.lineWidth = 0.06;
       ctx.beginPath();
       ctx.moveTo(b.tx + b.w / 2, b.ty + b.h / 2);
       ctx.lineTo(b.rallyX, b.rallyY);
       ctx.stroke();
-      ctx.fillStyle = "#f3ead7";
-      ctx.fillRect(b.rallyX - 0.15, b.rallyY - 0.15, 0.3, 0.3);
     }
   }
 
@@ -884,9 +856,16 @@ export function drawGame(
     const w = footprintSize(ui.placing).w;
     const h = footprintSize(ui.placing).h;
     const lifted = origin.tx !== drop.tx || origin.ty !== drop.ty;
-    ctx.globalAlpha = 0.45;
-    ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
-    ctx.fillRect(origin.tx, origin.ty, w, h);
+    for (let ty = 0; ty < h; ty++) {
+      for (let tx = 0; tx < w; tx++) {
+        const cx = origin.tx + tx;
+        const cy = origin.ty + ty;
+        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, !!resolveBuilding(ui.placing, sim.factionOf(VIEWER)).shore);
+        ctx.globalAlpha = bdef.ok ? 0.5 : blocked ? 0.72 : 0.4;
+        ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
+        ctx.fillRect(cx + 0.05, cy + 0.05, 0.9, 0.9);
+      }
+    }
     ctx.globalAlpha = 1;
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
     ctx.lineWidth = 0.12;
@@ -921,6 +900,8 @@ export function drawGame(
   ctx.restore();
 
   paintScreenFog(ctx, sim.fog[VIEWER], cam, view, GW, GH);
+  paintDeathFx(ctx, sim, cam, view);
+  paintCaptureBars(ctx, sim, cam, view);
 
   drawJobsScreen(ctx, sim, cam, view);
   drawPlaceLabel(ctx, sim, cam, view, ui);
@@ -938,7 +919,7 @@ export function drawGame(
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
     if (damaged) {
       const pct = u.hp / u.maxHp;
-      bar(ctx, s.x, s.y - 18, pct, "troop", seatPaint(sim, u.team), selected ? `${Math.ceil(pct * 100)}%` : undefined);
+      bar(ctx, s.x, s.y - 18, pct, "troop", hpInk(pct), selected ? `${Math.ceil(pct * 100)}%` : undefined);
     }
     if (cargo) bar(ctx, s.x, s.y - (damaged ? 4 : 18), u.cargo / u.cargoMax, "troop", "#3dcc6e");
   }
@@ -952,7 +933,7 @@ export function drawGame(
     if (damaged || picked) {
       const pct = b.hp / b.maxHp;
       const tag = b.mending ? `Repair ${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}` : `${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}`;
-      bar(ctx, s.x, s.y - 16, pct, "hall", seatPaint(sim, b.team), tag);
+      bar(ctx, s.x, s.y - 16, pct, "hall", hpInk(pct), tag);
     }
     if (picked) {
       ctx.fillStyle = "#e7f6ea";
@@ -963,6 +944,8 @@ export function drawGame(
     }
   }
 
+  paintSeatBadges(ctx, sim, cam, view, a, ui);
+
   const aimed = new Set<number>();
   for (const u of sim.units) {
     if (u.hp <= 0 || u.team !== VIEWER || u.order.t !== "attack") continue;
@@ -970,23 +953,24 @@ export function drawGame(
     if (!b || b.hp <= 0 || b.rubble > 0 || aimed.has(b.id)) continue;
     if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
     aimed.add(b.id);
-    const lift = hallPictureLift(b.kind, b.w, b.h);
-    const s = worldToScreen(cam, b.tx + b.w / 2, b.ty + b.h - lift * 0.42, view);
+    const s = worldToScreen(cam, b.tx + b.w / 2, b.ty + b.h / 2, view);
+    const edge = worldToScreen(cam, b.tx + b.w, b.ty + b.h / 2, view);
     const pulse = 0.65 + 0.35 * Math.sin(sim.time * 6);
+    const radius = Math.max(28, Math.hypot(edge.x - s.x, edge.y - s.y) + 10) + 4 * pulse;
     ctx.save();
     ctx.strokeStyle = "#ff3b30";
     ctx.globalAlpha = 0.95;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 4;
     ctx.beginPath();
-    ctx.arc(s.x, s.y, 18 + 8 * pulse, 0, Math.PI * 2);
+    ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
     ctx.stroke();
     ctx.strokeStyle = "#ffe0d6";
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(s.x - 11, s.y);
-    ctx.lineTo(s.x + 11, s.y);
-    ctx.moveTo(s.x, s.y - 11);
-    ctx.lineTo(s.x, s.y + 11);
+    ctx.moveTo(s.x - 14, s.y);
+    ctx.lineTo(s.x + 14, s.y);
+    ctx.moveTo(s.x, s.y - 14);
+    ctx.lineTo(s.x, s.y + 14);
     ctx.stroke();
     ctx.restore();
   }
@@ -1030,8 +1014,8 @@ export function placeChrome(
   _ty: number,
   _w: number,
 ): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
-  const bw = 96;
-  const bh = 44;
+  const bw = 112;
+  const bh = 48;
   const padW = 52;
   const x = Math.max(4, Math.round(view.w - bw - padW - 8));
   const y = Math.max(4, Math.round(view.h - (bh * 2 + 6) - 8));
@@ -1127,6 +1111,10 @@ function drawPlaceLabel(
   ui: DrawUi,
 ) {
   if (!ui.placing) return;
+  if (ui.touchPlace) {
+    const visual = ui.ghost ?? ui.hover;
+    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, BUILDINGS[ui.placing].w));
+  }
   let tx = 0;
   let ty = 0;
   let text = "";
@@ -1149,12 +1137,12 @@ function drawPlaceLabel(
     tx = visual.tx;
     ty = visual.ty;
     const power = def.powerUse > 0 ? `Power −${def.powerUse}` : def.powerOut > 0 ? `Power +${def.powerOut}` : "No power draw";
-    text = check.ok ? `${def.cost} credits` : ghostPlaceReason(check.reason);
+    const secs = def.time >= 10 || Number.isInteger(def.time) ? String(def.time) : def.time.toFixed(1);
+    text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
     const s = worldToScreen(cam, tx + def.w / 2, ty, view);
     const lines = check.ok ? [text, power] : [text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
-    if (ui.touchPlace) paintPlaceChrome(ctx, placeChrome(cam, view, visual.tx, visual.ty, def.w));
     return;
   } else return;
   const s = worldToScreen(cam, tx + 0.5, ty, view);
@@ -1201,8 +1189,11 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
   for (const b of sim.buildings) {
     if (b.hp <= 0 || b.rubble > 0 || !sim.buildingVisible(VIEWER, b)) continue;
     const mine = sim.allied(b.team, VIEWER);
-    const low = sim.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
-    const rate = low ? 0.5 : 1;
+    const plant = b.kind === "power" || b.kind === "advpower";
+    const pace = plant ? 1 : sim.powerFactor(b.team);
+    const low = pace < 1;
+    const burned = b.complete && b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+    const rate = Math.max(0.05, pace) * burned;
     let p = -1;
     let label = "";
     if (!b.complete) {
@@ -1218,16 +1209,40 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
     }
     if (p < 0) continue;
     const anchor = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
-    const w = Math.max(56, Math.min(128, b.w * cam.zoom));
+    const w = Math.max(64, Math.min(140, b.w * cam.zoom));
     const x = anchor.x - w / 2;
-    const y = anchor.y - 18;
+    const y = anchor.y - 22;
+    const barH = 12;
     ctx.fillStyle = "#f3ead7";
     ctx.fillText(label, anchor.x, y - 1);
     ctx.fillStyle = "rgba(12,10,8,0.9)";
-    ctx.fillRect(x, y, w, 8);
+    ctx.fillRect(x, y, w, barH);
     ctx.fillStyle = low ? "#e15b48" : "#d7b56a";
-    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, p)), 8);
+    ctx.fillRect(x, y, w * Math.max(0, Math.min(1, p)), barH);
   }
+}
+
+/** Legal cells are green. A blocked cell in the footprint is a stronger red. Not a team color. */
+function footprintCellBlocked(sim: Sim, x: number, y: number, shore: boolean): boolean {
+  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+  if (sim.blockedTile(x, y)) return true;
+  if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) return true;
+  if (shore && sim.terrain[y * sim.gw + x] !== TILE_SHORE) return true;
+  return false;
+}
+
+function drawSiteBar(ctx: CanvasRenderingContext2D, b: Building) {
+  if (b.complete || b.hp <= 0 || b.buildTotal <= 0) return;
+  const p = Math.max(0, Math.min(1, 1 - b.buildLeft / b.buildTotal));
+  const x = b.tx + 0.1;
+  const y = b.ty + b.h - 0.2;
+  const w = Math.max(0.5, b.w - 0.2);
+  ctx.save();
+  ctx.fillStyle = "rgba(12,10,8,0.92)";
+  ctx.fillRect(x, y, w, 0.16);
+  ctx.fillStyle = "#d7b56a";
+  ctx.fillRect(x, y, w * p, 0.16);
+  ctx.restore();
 }
 
 function star(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
@@ -1263,7 +1278,7 @@ function miniRgb(t: number, crystal: number, fog: number, x = 0, y = 0): [number
   if (t === TILE_ROCK || t === TILE_CLIFF) return [120, 108, 96];
   if (t === TILE_RAMP) return [168, 136, 88];
   if (t === TILE_HIGH) return THEATER === "snow" ? [214, 224, 232] : [150, 132, 96];
-  if (crystal > 0) return [61, 204, 110];
+  if (crystal > 0) return [208, 138, 58];
   if (t === TILE_SCRUB || t === TILE_STUMP) return seen ? [22, 82, 34] : [12, 40, 18];
   if (t === TILE_ROUGH || t === TILE_VALLEY) return seen ? [62, 92, 48] : [28, 46, 24];
   if (THEATER === "snow") return [228, 236, 244];
@@ -1515,13 +1530,30 @@ function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "c
   ctx.fillText(mark, x, y - h * 0.45 + bob);
 }
 
+/** Health only. A ramp from green through gold to red. Teams never use these. */
+function hpInk(pct: number): string {
+  const mix = (a: readonly number[], b: readonly number[], t: number) => {
+    const k = Math.max(0, Math.min(1, t));
+    const n = (i: number) => Math.round(a[i]! + (b[i]! - a[i]!) * k);
+    return `rgb(${n(0)}, ${n(1)}, ${n(2)})`;
+  };
+  const red = [226, 59, 50] as const;
+  const gold = [230, 179, 37] as const;
+  const green = [61, 204, 110] as const;
+  if (pct >= 0.6) return mix(gold, green, (pct - 0.6) / 0.4);
+  return mix(red, gold, pct / 0.6);
+}
+
+const UNIT_BADGE_PX = 14;
+const HALL_BADGE_PX = 21;
+
 function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, size: "troop" | "hall" = "troop", fill?: string, label?: string) {
-  const w = size === "hall" ? 44 : 28;
-  const h = size === "hall" ? 6 : 5;
+  const w = size === "hall" ? 48 : 34;
+  const h = size === "hall" ? 7 : 6;
   const p = Math.max(0, Math.min(1, pct));
   ctx.fillStyle = "rgba(8, 6, 4, 0.9)";
   ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
-  ctx.fillStyle = fill ?? "#2F7DF6";
+  ctx.fillStyle = fill ?? hpInk(p);
   ctx.fillRect(x - w / 2, y, Math.max(2, w * p), h);
   if (!label) return;
   ctx.font = "bold 12px sans-serif";
@@ -1588,14 +1620,6 @@ function drawBush(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.fill();
 }
 
-function wetNeighbor(terrain: Uint8Array, x: number, y: number, dx: number, dy: number): boolean {
-  const nx = x + dx;
-  const ny = y + dy;
-  if (nx < 0 || ny < 0 || nx >= GW || ny >= GH) return false;
-  const t = terrain[ny * GW + nx];
-  return t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD;
-}
-
 /** Satellite stays on the land. Water and ridges are painted on the same tiles the army uses. */
 function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
   const t = sim.terrain[y * sim.gw + x];
@@ -1616,43 +1640,12 @@ function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
       ctx.fillRect(x + 0.12, y + 0.35, 0.22, 0.08);
       ctx.fillRect(x + 0.55, y + 0.58, 0.28, 0.07);
     }
-    ctx.fillStyle = "rgba(236, 242, 236, 0.55)";
-    const bank = (nx: number, ny: number) => {
-      if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) return false;
-      const n = sim.terrain[ny * sim.gw + nx];
-      return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_BRIDGE;
-    };
-    if (bank(x, y - 1)) ctx.fillRect(x, y, 1, 0.16);
-    if (bank(x, y + 1)) ctx.fillRect(x, y + 0.84, 1, 0.16);
-    if (bank(x - 1, y)) ctx.fillRect(x, y, 0.16, 1);
-    if (bank(x + 1, y)) ctx.fillRect(x + 0.84, y, 0.16, 1);
     return;
   }
-  if ((t === TILE_ROCK || t === TILE_CLIFF) && x > 0 && y > 0 && x < sim.gw - 1 && y < sim.gh - 1) {
-    ctx.fillStyle = "rgba(28, 32, 26, 0.62)";
-    ctx.fillRect(x, y, 1, 1);
-    ctx.fillStyle = "rgba(92, 96, 88, 0.55)";
-    ctx.beginPath();
-    ctx.moveTo(x + 0.08, y + 0.78);
-    ctx.lineTo(x + 0.38, y + 0.28);
-    ctx.lineTo(x + 0.62, y + 0.7);
-    ctx.fill();
-    ctx.fillStyle = "rgba(214, 210, 198, 0.7)";
-    ctx.beginPath();
-    ctx.moveTo(x + 0.38, y + 0.28);
-    ctx.lineTo(x + 0.5, y + 0.18);
-    ctx.lineTo(x + 0.58, y + 0.42);
-    ctx.fill();
-    return;
-  }
+  if (t === TILE_ROCK || t === TILE_CLIFF) return;
   if (t === TILE_SHORE) {
-    ctx.fillStyle = "rgba(236, 228, 206, 0.28)";
+    ctx.fillStyle = "rgba(236, 228, 206, 0.22)";
     ctx.fillRect(x, y, 1, 1);
-    ctx.fillStyle = "rgba(244, 248, 244, 0.7)";
-    if (wetNeighbor(sim.terrain, x, y, 0, -1)) ctx.fillRect(x, y, 1, 0.2);
-    if (wetNeighbor(sim.terrain, x, y, 0, 1)) ctx.fillRect(x, y + 0.8, 1, 0.2);
-    if (wetNeighbor(sim.terrain, x, y, -1, 0)) ctx.fillRect(x, y, 0.2, 1);
-    if (wetNeighbor(sim.terrain, x, y, 1, 0)) ctx.fillRect(x + 0.8, y, 0.2, 1);
   }
 }
 
@@ -1671,40 +1664,63 @@ function paintFieldProps(
   const t = sim.terrain[i] ?? 0;
   const mark = sim.craters[i] ?? 0;
   const ore = sim.crystal[i] ?? 0;
+  if ((t === TILE_CLEAR || t === TILE_SAND || t === TILE_ROUGH) && ore <= 0) paintExpansion(ctx, sim, x, y);
   const wet = t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
   const tree = t === TILE_SCRUB || t === TILE_STUMP;
   const shell = isShell(t);
   const raised = t === TILE_CLIFF || t === TILE_ROCK || t === TILE_RAMP || t === TILE_HIGH;
   if (!wet && !tree && !shell && !raised && t !== TILE_ROAD && t !== TILE_BRIDGE && ore <= 0 && t !== TILE_SPENT && mark <= 0) return "";
-  if (wet && !baked) {
-    paintWaterSheen(ctx, t, x, y, sim.time);
+  if (wet) {
+    if (!baked) paintWaterSheen(ctx, t, x, y, sim.time);
     paintShoreLip(ctx, sim, x, y);
   }
   if (t === TILE_ROAD) return "";
   if (t === TILE_BRIDGE) return "";
   if (mark > 0 && !shell) paintCrater(ctx, x, y, mark);
   if (tree) {
-    const lonely =
-      !scrubAt(sim, x - 1, y) && !scrubAt(sim, x + 1, y) && !scrubAt(sim, x, y - 1) && !scrubAt(sim, x, y + 1);
-    const rep = ((x ^ y) & 1) === 0;
-    if (treeBudget && (lonely || rep)) {
-      if (!paintGrove(ctx, x, y, t === TILE_STUMP)) paintTree(ctx, x, y, t === TILE_STUMP);
-      if (raised) paintVolume(ctx, sim, x, y);
-      return "tree";
-    }
+    // Every scrub tile blocks movement, so every scrub tile draws a tree.
+    // The grove sprite is the expensive one; past the budget a flat canopy still marks the block.
+    ctx.save();
+    ctx.translate((hash(x + 2, y) - 0.5) * 0.22, (hash(x, y + 5) - 0.5) * 0.1);
+    if (!(treeBudget && paintGrove(ctx, x, y, t === TILE_STUMP))) paintTree(ctx, x, y, t === TILE_STUMP);
+    ctx.restore();
+    if (raised) paintVolume(ctx, sim, x, y);
+    return "tree";
   }
   if (raised) paintVolume(ctx, sim, x, y);
   if (shell && shellBudget) {
     paintShell(ctx, t, x, y, mark);
     return "shell";
   }
-  if (ore > 0 || t === TILE_SPENT) paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i));
+  if (ore > 0 || t === TILE_SPENT) {
+    let around = 0;
+    let edge = 0;
+    const side: [number, number, number][] = [
+      [0, -1, 1],
+      [1, 0, 2],
+      [0, 1, 4],
+      [-1, 0, 8],
+    ];
+    for (const [dx, dy, bit] of side) {
+      const nx = x + dx;
+      const ny = y + dy;
+      const has = nx >= 0 && ny >= 0 && nx < sim.gw && ny < sim.gh && (sim.crystal[ny * sim.gw + nx] ?? 0) > 0;
+      if (has) around++;
+      else edge |= bit;
+    }
+    for (const [dx, dy] of [
+      [1, 1],
+      [1, -1],
+      [-1, 1],
+      [-1, -1],
+    ] as const) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < sim.gw && ny < sim.gh && (sim.crystal[ny * sim.gw + nx] ?? 0) > 0) around++;
+    }
+    paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i), around, edge);
+  }
   return "";
-}
-
-function scrubAt(sim: Sim, x: number, y: number): boolean {
-  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return false;
-  return (sim.terrain[y * sim.gw + x] ?? 0) === TILE_SCRUB;
 }
 
 function paintFieldProp(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "wreck" | "fence" | "crate", time: number) {
@@ -1942,6 +1958,15 @@ vec3 wetOf(float id) {
   if (abs(id - 8.0) < 0.45) return vec3(0.0, 0.12, 0.0);
   return vec3(0.0);
 }
+float nearId(float id, float want) {
+  return 1.0 - step(0.45, abs(id - want));
+}
+float walkOf(float id) {
+  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45) return 1.0;
+  if (abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45) return 1.0;
+  if (abs(id - 15.0) < 0.45 || abs(id - 21.0) < 0.45) return 1.0;
+  return 0.0;
+}
 float beachId(float id) {
   if (abs(id - 5.0) < 0.45 || abs(id - 6.0) < 0.45 || abs(id - 8.0) < 0.45) return 1.0;
   if (abs(id - 12.0) < 0.45 || abs(id - 20.0) < 0.45 || abs(id - 9.0) < 0.45) return 1.0;
@@ -2007,7 +2032,8 @@ void main() {
   vec3 grass = matTex(0.0, p);
   grass = vec3(grass.r * 0.92, grass.g * 1.08, grass.b * 0.75);
   float tuft = n2(p * 0.33);
-  grass = mix(grass, grass * vec3(0.94, 1.05, 0.9), tuft * 0.22);
+  grass = mix(grass, grass * vec3(0.82, 1.1, 0.78), tuft * 0.38);
+  grass = mix(grass, grass * vec3(1.06, 0.92, 0.84), n2(p * 0.11 + vec2(2.0, 8.0)) * 0.28);
   vec3 dirt = matTex(1.0, p);
   vec3 sand = matTex(2.0, p);
   vec3 snow = matTex(3.0, p);
@@ -2038,30 +2064,27 @@ void main() {
   float light = 0.66 + 0.5 * ndotl + clamp((h - avg) * 0.7, -0.14, 0.16);
   vec3 col = albedo * light;
   col += vec3(0.16, 0.13, 0.1) * wet.x * ndotl * smoothstep(0.18, 0.72, slope);
-  float foam = smoothstep(0.02, 0.1, h) * (1.0 - smoothstep(0.16, 0.46, h));
-  foam *= wet.y + wet.z * 0.7;
-  foam *= 0.5 + 0.5 * n2(p * 2.4);
-  col = mix(col, vec3(0.94, 0.98, 0.97), foam * 0.88);
+  float foam = smoothstep(0.02, 0.16, h) * (1.0 - smoothstep(0.22, 0.7, h));
+  foam *= wet.y + wet.z * 0.55;
+  foam *= smoothstep(0.38, 0.72, n2(p * 1.15));
+  col = mix(col, vec3(0.86, 0.93, 0.92), clamp(foam * 0.42, 0.0, 0.35));
   float wetAmt = wet.y + wet.z;
   float dryEdge = dry.x + dry.y + dry.z + dry.w;
-  float coast = smoothstep(0.02, 0.38, wetAmt) * smoothstep(0.02, 0.46, dryEdge);
-  float lace = 0.32 + 0.68 * n2(vec2(p.x * 3.2 + n2(p * 0.7) * 2.4, p.y * 2.6));
-  col = mix(col, vec3(0.96, 0.99, 0.97), coast * lace * 0.92);
-  float id = idOf(floor(world));
-  vec2 fr = fract(world);
-  if (abs(id - 12.0) < 0.45) {
-    col = mix(col, vec3(0.78, 0.70, 0.46), smoothstep(0.12, 0.28, fr.y) * (1.0 - smoothstep(0.72, 0.88, fr.y)) * 0.7);
-  } else if (abs(id - 15.0) < 0.45) {
-    col = mix(col, vec3(0.62, 0.50, 0.32), 0.2);
-  } else if (abs(id - 21.0) < 0.45) {
-    col = mix(col, vec3(0.9, 0.93, 0.96), 0.22);
-    col *= 1.06;
-  } else if (abs(id - 3.0) < 0.45 || abs(id - 16.0) < 0.45) {
-    col = mix(col, vec3(0.22, 0.42, 0.16), 0.16);
-  }
-  float walk = 0.0;
-  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45 || abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45 || abs(id - 15.0) < 0.45 || abs(id - 21.0) < 0.45) walk = 1.0;
-  col += vec3(0.04, 0.05, 0.012) * walk;
+  float coast = smoothstep(0.04, 0.4, wetAmt) * smoothstep(0.04, 0.46, dryEdge);
+  float lace = smoothstep(0.46, 0.82, n2(vec2(p.x * 0.85 + n2(p * 0.22) * 2.2, p.y * 0.7)));
+  col = mix(col, vec3(0.9, 0.96, 0.95), clamp(coast * lace * 0.4, 0.0, 0.32));
+  float ford = mix(mix(nearId(i00, 12.0), nearId(i10, 12.0), k.x), mix(nearId(i01, 12.0), nearId(i11, 12.0), k.x), k.y);
+  float ramp = mix(mix(nearId(i00, 15.0), nearId(i10, 15.0), k.x), mix(nearId(i01, 15.0), nearId(i11, 15.0), k.x), k.y);
+  float high = mix(mix(nearId(i00, 21.0), nearId(i10, 21.0), k.x), mix(nearId(i01, 21.0), nearId(i11, 21.0), k.x), k.y);
+  float scrub = mix(mix(nearId(i00, 3.0) + nearId(i00, 16.0), nearId(i10, 3.0) + nearId(i10, 16.0), k.x), mix(nearId(i01, 3.0) + nearId(i01, 16.0), nearId(i11, 3.0) + nearId(i11, 16.0), k.x), k.y);
+  vec2 fr = fract(p);
+  col = mix(col, vec3(0.78, 0.70, 0.46), ford * smoothstep(0.12, 0.28, fr.y) * (1.0 - smoothstep(0.72, 0.88, fr.y)) * 0.7);
+  col = mix(col, vec3(0.62, 0.50, 0.32), ramp * 0.2);
+  col = mix(col, vec3(0.9, 0.93, 0.96), high * 0.22);
+  col *= mix(1.0, 1.06, high);
+  col = mix(col, vec3(0.18, 0.36, 0.14), clamp(scrub, 0.0, 1.0) * 0.14);
+  float walk = mix(mix(walkOf(i00), walkOf(i10), k.x), mix(walkOf(i01), walkOf(i11), k.x), k.y);
+  col += vec3(0.035, 0.045, 0.01) * walk;
   float hCast = hAt(p - vec2(1.35, 1.7));
   float dropSh = smoothstep(0.18, 0.85, hCast - h);
   dropSh *= 1.0 - clamp(wet.y + wet.z, 0.0, 1.0);
@@ -2075,7 +2098,7 @@ void main() {
 }`;
 
 let terrainProg: { gl: WebGLRenderingContext; prog: WebGLProgram; buf: WebGLBuffer; id: number } | null = null;
-const SHADER_ID = 28;
+const SHADER_ID = 30;
 
 function terrainProgram(gl: WebGLRenderingContext) {
   if (terrainProg && terrainProg.gl === gl && terrainProg.id === SHADER_ID) return terrainProg;
@@ -2232,11 +2255,83 @@ function bakeTerrainGl(
   gl.enableVertexAttribArray(pos);
   gl.vertexAttribPointer(pos, 2, gl.FLOAT, false, 0, 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  // drawImage of this canvas leaves transparent holes on SwiftShader. Copy the
+  // framebuffer with readPixels into an opaque 2D sheet the match can sample.
+  const shot = copyGlField(gl, width, height);
   gl.deleteTexture(color);
   gl.deleteTexture(heightTex);
   gl.deleteTexture(ids);
   gl.deleteTexture(atlas);
-  return canvas;
+  return shot;
+}
+
+/** Opaque 2D copy of the bake, or null when the buffer is a flat dark fill. */
+function copyGlField(gl: WebGLRenderingContext, width: number, height: number): HTMLCanvasElement | null {
+  const size = 16;
+  if (width < size || height < size) return null;
+  const spots: Array<[number, number]> = [
+    [0.22, 0.22],
+    [0.5, 0.5],
+    [0.78, 0.72],
+    [0.4, 0.8],
+  ];
+  const rgb = new Uint8Array(spots.length * size * size * 3);
+  const probe = new Uint8Array(size * size * 4);
+  let o = 0;
+  try {
+    for (let n = 0; n < 8 && gl.getError() !== gl.NO_ERROR; n++) {}
+    for (const [fx, fy] of spots) {
+      const x = Math.max(0, Math.min(width - size, Math.floor(width * fx)));
+      const y = Math.max(0, Math.min(height - size, Math.floor(height * fy)));
+      gl.readPixels(x, y, size, size, gl.RGBA, gl.UNSIGNED_BYTE, probe);
+      if (gl.getError() !== gl.NO_ERROR) return null;
+      for (let i = 0; i < size * size; i++) {
+        rgb[o++] = probe[i * 4] ?? 0;
+        rgb[o++] = probe[i * 4 + 1] ?? 0;
+        rgb[o++] = probe[i * 4 + 2] ?? 0;
+      }
+    }
+    if (!terrainFieldAlive(rgb)) return null;
+    const out = document.createElement("canvas");
+    out.width = width;
+    out.height = height;
+    const ctx = out.getContext("2d", { alpha: false });
+    if (!ctx) return null;
+    // Wide readPixels comes back black on SwiftShader. Small tiles do not.
+    const tile = 128;
+    const buf = new Uint8Array(tile * tile * 4);
+    for (let y = 0; y < height; y += tile) {
+      const rows = Math.min(tile, height - y);
+      for (let x = 0; x < width; x += tile) {
+        const cols = Math.min(tile, width - x);
+        const view = cols === tile && rows === tile ? buf : buf.subarray(0, cols * rows * 4);
+        gl.readPixels(x, y, cols, rows, gl.RGBA, gl.UNSIGNED_BYTE, view);
+        if (gl.getError() !== gl.NO_ERROR) return null;
+        const img = ctx.createImageData(cols, rows);
+        for (let row = 0; row < rows; row++) {
+          const src = (rows - 1 - row) * cols * 4;
+          img.data.set(view.subarray(src, src + cols * 4), row * cols * 4);
+        }
+        ctx.putImageData(img, x, height - y - rows);
+      }
+    }
+    const back = new Uint8Array(spots.length * size * size * 3);
+    let b = 0;
+    for (const [fx, fy] of spots) {
+      const sx = Math.max(0, Math.min(width - size, Math.floor(width * fx)));
+      const sy = Math.max(0, Math.min(height - size, Math.floor((1 - fy) * height)));
+      const check = ctx.getImageData(sx, sy, size, size).data;
+      for (let i = 0; i < size * size; i++) {
+        back[b++] = check[i * 4] ?? 0;
+        back[b++] = check[i * 4 + 1] ?? 0;
+        back[b++] = check[i * 4 + 2] ?? 0;
+      }
+    }
+    if (!terrainFieldAlive(back)) return null;
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /** Paint the field once. The match draws a slice of this, not every tile, every tick. */
@@ -2258,9 +2353,15 @@ export function bakeTerrain(
     const gpu = bakeTerrainGl(terrain, w, h, theater, width, height, mats);
     if (gpu) return gpu;
   }
+  // A blank GPU buffer falls back here. Cap the long side so the CPU field
+  // returns on this frame instead of blocking on a 4K bake.
+  const cap = Math.min(longSide, 1280);
+  const cpuScale = cap / Math.max(w, h);
+  const cw = Math.max(1, Math.round(w * cpuScale));
+  const ch = Math.max(1, Math.round(h * cpuScale));
   const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
+  canvas.width = cw;
+  canvas.height = ch;
   const ctx = canvas.getContext("2d", { alpha: false });
   if (!ctx) return null;
   const img = ctx.createImageData(canvas.width, canvas.height);
@@ -2275,7 +2376,7 @@ function gradeTile(ctx: CanvasRenderingContext2D, x: number, y: number, t: numbe
   else if (t === TILE_SHALLOW || t === TILE_FORD) color = "#3aa0a4";
   else if (t === TILE_SHORE) color = "#e4c99a";
   else if (t === TILE_ROCK || t === TILE_CLIFF) color = "#7a7368";
-  else if (t === TILE_CRYSTAL) color = "#3dcc6e";
+  else if (t === TILE_CRYSTAL) color = "#d08a3a";
   else if (THEATER === "snow") color = "#e4eef4";
   else if (THEATER === "temperate" || t === TILE_SCRUB) color = "#3f8a38";
   ctx.save();
@@ -2409,10 +2510,11 @@ function trimFilter(color: string): string {
   return `hue-rotate(${deg.toFixed(1)}deg)`;
 }
 
-function hallFrame(b: Building, img: HTMLImageElement) {
+function hallFrame(b: Building, img: CanvasImageSource) {
   const tall = b.kind === "tower" || b.kind === "aa" || b.kind === "radar";
   const dw = Math.max(b.w, b.h) * (tall ? 1.55 : 1.24);
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const size = sourceSize(img);
+  const aspect = size.h / Math.max(1, size.w);
   const dh = dw * aspect;
   return {
     x: b.tx + (b.w - dw) / 2,
@@ -2467,7 +2569,8 @@ function paintGrove(ctx: CanvasRenderingContext2D, x: number, y: number, stump: 
   const img = bank.jungle[pick < 0.5 ? 0 : bank.jungle.length - 1] ?? bank.jungle[0];
   if (!img) return false;
   const w = 1.55 + hash(x + 1, y + 3) * 0.85;
-  const hh = w * (img.naturalHeight / Math.max(1, img.naturalWidth));
+  const grove = sourceSize(img);
+  const hh = w * (grove.h / Math.max(1, grove.w));
   ctx.save();
   ctx.translate(x + 0.5, y + 0.94);
   ctx.scale(hash(x + 2, y + 5) > 0.5 ? -1 : 1, 1 / viewPitch());
@@ -2508,38 +2611,180 @@ function volumeQuad(
   ctx.fill();
 }
 
-/** The ground leaves the picture here. A drop is a wall in the same height the buildings use. */
+function rockTone(n: number, snow: boolean): string {
+  if (snow) return n > 0.72 ? "#d7e4ec" : n > 0.4 ? "#8ea6b6" : "#516676";
+  return n > 0.72 ? "#d2bba0" : n > 0.4 ? "#9a7d64" : "#5a483c";
+}
+
+/** A continuous rock wall along a high-ground edge. Lit lip, textured face, one soft shadow. */
+function paintRockFace(
+  ctx: CanvasRenderingContext2D,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  rise: number,
+  shear: number,
+  alongX: boolean,
+  snow: boolean,
+  seed: number,
+) {
+  const span = Math.max(0.2, alongX ? x1 - x0 : y1 - y0);
+  const steps = Math.max(4, Math.round(span * 5));
+  const lip = snow ? "#e7eef4" : "#e4d2bc";
+  const strata = snow ? "rgba(18, 26, 32, 0.35)" : "rgba(24, 16, 12, 0.4)";
+  ctx.fillStyle = snow ? "rgba(8, 12, 16, 0.2)" : "rgba(12, 8, 6, 0.22)";
+  ctx.beginPath();
+  if (alongX) ctx.ellipse((x0 + x1) / 2, y1 + 0.16, span * 0.46, 0.11, 0, 0, Math.PI * 2);
+  else ctx.ellipse(x1 + 0.14, (y0 + y1) / 2, 0.1, span * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+  for (let i = 0; i < steps; i++) {
+    const u0 = i / steps;
+    const u1 = (i + 1) / steps;
+    const n = hash(seed + i * 3, 17);
+    const color = rockTone(0.22 + n * 0.28, snow);
+    const top0 = (hash(seed + i, 11) - 0.5) * 0.06;
+    const top1 = (hash(seed + i + 1, 13) - 0.5) * 0.06;
+    if (alongX) {
+      const ax0 = x0 + span * u0;
+      const ax1 = x0 + span * u1;
+      volumeQuad(ctx, ax0, y1, ax1, y1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
+      if (n > 0.4) {
+        const band = 0.32 + hash(seed + i, 31) * 0.28;
+        volumeQuad(
+          ctx,
+          ax0,
+          y1 - rise * band,
+          ax1,
+          y1 - rise * band,
+          ax1 + shear * (1 - band),
+          y1 - rise * (band + 0.07),
+          ax0 + shear * (1 - band),
+          y1 - rise * (band + 0.07),
+          strata,
+        );
+      }
+      volumeQuad(
+        ctx,
+        ax0 + shear * 0.92,
+        y1 - rise + top0 + 0.02,
+        ax1 + shear * 0.92,
+        y1 - rise + top1 + 0.02,
+        ax1 + shear,
+        y1 - rise + top1 - 0.045,
+        ax0 + shear,
+        y1 - rise + top0 - 0.045,
+        lip,
+      );
+    } else {
+      const ay0 = y0 + span * u0;
+      const ay1 = y0 + span * u1;
+      volumeQuad(ctx, x1, ay0, x1, ay1, x1 + shear, ay1 - rise + top1, x1 + shear, ay0 - rise + top0, color);
+      volumeQuad(
+        ctx,
+        x1 + shear * 0.9,
+        ay0 - rise + top0,
+        x1 + shear * 0.9,
+        ay1 - rise + top1,
+        x1 + shear,
+        ay1 - rise + top1 - 0.04,
+        x1 + shear,
+        ay0 - rise + top0 - 0.04,
+        lip,
+      );
+    }
+  }
+}
+
+/** Dirt slope with chevrons aimed at the high ground. */
+function paintRamp(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
+  let ux = 0;
+  let uy = -1;
+  let best = -1;
+  for (const [dx, dy] of [
+    [0, -1],
+    [0, 1],
+    [-1, 0],
+    [1, 0],
+  ] as const) {
+    const nx = x + dx;
+    const ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) continue;
+    const e = tileElev(sim.terrain[ny * sim.gw + nx] ?? 0);
+    if (e > best) {
+      best = e;
+      ux = dx;
+      uy = dy;
+    }
+  }
+  const ang = Math.atan2(uy, ux);
+  const grd = ctx.createLinearGradient(x + 0.5 - ux * 0.5, y + 0.55 - uy * 0.4, x + 0.5 + ux * 0.5, y + 0.55 + uy * 0.4);
+  grd.addColorStop(0, "rgba(72, 54, 32, 0.38)");
+  grd.addColorStop(0.55, "rgba(128, 96, 58, 0.22)");
+  grd.addColorStop(1, "rgba(168, 140, 96, 0.08)");
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.ellipse(x + 0.5, y + 0.58, 0.5, 0.34, ang, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(48, 34, 20, 0.2)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.5 - ux * 0.12, y + 0.64 - uy * 0.08, 0.28, 0.1, ang, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** A cleared plot beside a deposit, away from the starting pads. */
+function paintExpansion(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
+  const t = sim.terrain[y * sim.gw + x] ?? 0;
+  if (t !== TILE_CLEAR && t !== TILE_SAND && t !== TILE_ROUGH) return;
+  if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) return;
+  for (const s of sim.starts.slots) {
+    if (s && (s.x - (x + 0.5)) ** 2 + (s.y - (y + 0.5)) ** 2 < 100) return;
+  }
+  let ore = 0;
+  let open = 0;
+  for (let dy = -1; dy <= 1; dy++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) continue;
+      const nt = sim.terrain[ny * sim.gw + nx] ?? 0;
+      if ((sim.crystal[ny * sim.gw + nx] ?? 0) > 0) ore++;
+      if (nt === TILE_CLEAR || nt === TILE_SAND || nt === TILE_ROUGH) open++;
+    }
+  }
+  if (ore < 2 || open < 4) return;
+  const j = hash(x * 5, y * 3);
+  ctx.fillStyle = `rgba(120, 92, 52, ${0.1 + j * 0.08})`;
+  ctx.beginPath();
+  ctx.ellipse(x + 0.46 + j * 0.12, y + 0.6, 0.36 + j * 0.1, 0.18, j - 0.4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/** A drop is a rock face that meets the ground above and below. Ramps stay slopes. */
 function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
   const t = sim.terrain[y * sim.gw + x] ?? 0;
+  if (t === TILE_RAMP) {
+    paintRamp(ctx, sim, x, y);
+    return;
+  }
   const h = tileElev(t);
   const at = (nx: number, ny: number) => {
     if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) return h;
     return tileElev(sim.terrain[ny * sim.gw + nx] ?? 0);
   };
   const snow = THEATER === "snow";
-  const drop = (edge: number, draw: (rise: number, shear: number) => void) => {
-    const gap = h - edge;
-    if (gap < 0.16) return;
-    draw(gap * SOLID_LIFT, gap * SOLID_SHEAR);
-  };
-  drop(at(x, y + 1), (rise, shear) => {
-    if (rise < 0.22) return;
-    const yb = y + 1;
-    const wall = t === TILE_CLIFF ? (snow ? "#6a7c88" : "#3a342c") : t === TILE_ROCK ? (snow ? "#7d8d98" : "#4a433c") : snow ? "#9aa8b0" : "#6a6258";
-    volumeQuad(ctx, x, yb, x + 1, yb, x + 1 + shear, yb - rise, x + shear, yb - rise, wall);
-    if (t === TILE_CLIFF || t === TILE_ROCK) {
-      volumeQuad(ctx, x, yb - rise, x + 1, yb - rise, x + 1 + shear * 0.15, yb - rise - 0.04, x + shear * 0.15, yb - rise - 0.04, snow ? "#f4f7fa" : "rgba(236,226,206,0.45)");
-    }
-  });
-  drop(at(x + 1, y), (rise, shear) => {
-    const xb = x + 1;
-    volumeQuad(ctx, xb, y, xb, y + 1, xb + shear, y + 1 - rise, xb + shear, y - rise, t === TILE_CLIFF ? "#241e1a" : "#2e2924");
-  });
-  if (t === TILE_CLIFF && h - at(x, y + 1) > 0.4) {
-    ctx.fillStyle = "rgba(10, 12, 10, 0.28)";
-    ctx.beginPath();
-    ctx.ellipse(x + 0.7, y + 1.28, 0.72, 0.2, 0.15, 0, Math.PI * 2);
-    ctx.fill();
+  // Pitch squashes world Y. Grow the face so a drop still reads as rock at the phone zoom.
+  const face = 1 / Math.max(0.62, viewPitch());
+  const south = h - at(x, y + 1);
+  if (south >= 0.2) {
+    const rise = south * SOLID_LIFT * face;
+    if (rise >= 0.2) paintRockFace(ctx, x, y, x + 1, y + 1, rise, south * SOLID_SHEAR, true, snow, x * 17 + y);
+  }
+  const east = h - at(x + 1, y);
+  if (east >= 0.28) {
+    const rise = east * SOLID_LIFT * face;
+    if (rise >= 0.24) paintRockFace(ctx, x, y, x + 1, y + 1, rise, east * SOLID_SHEAR * 0.85, false, snow, x * 13 + y * 3);
   }
 }
 
@@ -2743,14 +2988,11 @@ function paintRoadNet(
       }
     }
   }
-  ctx.strokeStyle = "rgba(48, 34, 20, 0.42)";
-  ctx.lineWidth = 0.84;
+  ctx.strokeStyle = "rgba(86, 62, 34, 0.22)";
+  ctx.lineWidth = 0.34;
   ctx.stroke();
-  ctx.strokeStyle = "rgba(154, 116, 68, 0.96)";
-  ctx.lineWidth = 0.56;
-  ctx.stroke();
-  ctx.strokeStyle = "rgba(226, 198, 150, 0.38)";
-  ctx.lineWidth = 0.12;
+  ctx.strokeStyle = "rgba(140, 108, 64, 0.16)";
+  ctx.lineWidth = 0.16;
   ctx.stroke();
   ctx.restore();
 }
@@ -2778,11 +3020,27 @@ function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
     const n = sim.terrain[ny * sim.gw + nx] ?? 0;
     return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_WRECK && n !== TILE_BRIDGE;
   };
-  ctx.fillStyle = THEATER === "snow" ? "rgba(236, 244, 248, 0.72)" : "rgba(232, 244, 236, 0.55)";
-  if (land(x, y - 1)) ctx.fillRect(x, y, 1, 0.07);
-  if (land(x, y + 1)) ctx.fillRect(x, y + 0.93, 1, 0.07);
-  if (land(x - 1, y)) ctx.fillRect(x, y, 0.07, 1);
-  if (land(x + 1, y)) ctx.fillRect(x + 0.93, y, 0.07, 1);
+  const soft = THEATER === "snow" ? "rgba(226, 236, 242, 0.34)" : "rgba(214, 232, 226, 0.32)";
+  const body = THEATER === "snow" ? "rgba(244, 250, 252, 0.28)" : "rgba(236, 248, 244, 0.26)";
+  const wash = (alongX: boolean, edge: number) => {
+    for (let i = 0; i < 3; i++) {
+      const h1 = hash(x * 4 + i * 11, y * 3 + i + (alongX ? 1 : 5));
+      const h2 = hash(x + i * 5 + (alongX ? 2 : 8), y * 6 + 2);
+      if (h1 < 0.06) continue;
+      const along = (alongX ? x : y) + 0.05 + h1 * 0.9;
+      const perp = edge + (h2 - 0.42) * 0.36;
+      const wide = 0.26 + h1 * 0.38;
+      const thick = 0.09 + h2 * 0.16;
+      ctx.fillStyle = i === 1 ? body : soft;
+      ctx.beginPath();
+      ctx.ellipse(alongX ? along : perp, alongX ? perp : along, alongX ? wide : thick, alongX ? thick : wide, (h1 - 0.5) * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  };
+  if (land(x, y - 1)) wash(true, y + 0.04);
+  if (land(x, y + 1)) wash(true, y + 0.96);
+  if (land(x - 1, y)) wash(false, x + 0.04);
+  if (land(x + 1, y)) wash(false, x + 0.96);
 }
 
 function paintBuilding(
@@ -2846,17 +3104,17 @@ function paintBuilding(
   return true;
 }
 
-function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color = "#fff6df", time = 0) {
-  const pulse = 0.22 + 0.08 * Math.sin(time * 4);
+function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, _color = "#ffffff", _time = 0) {
   ctx.save();
-  ctx.fillStyle = color;
-  ctx.globalAlpha = pulse;
   ctx.beginPath();
-  ctx.ellipse(x, y + 0.02, r * 1.15, r * 0.46, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.globalAlpha = 0.8;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 0.045;
+  ctx.ellipse(x, y + 0.02, r * 1.2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(16, 12, 8, 0.9)";
+  ctx.lineWidth = 0.1;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x, y + 0.02, r * 1.2, r * 0.5, 0, 0, Math.PI * 2);
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 0.06;
   ctx.stroke();
   ctx.restore();
 }
@@ -2870,8 +3128,8 @@ function drawStand(ctx: CanvasRenderingContext2D, x: number, y: number, radius: 
   ctx.beginPath();
   ctx.ellipse(x + 0.12, y + 0.1, rx, ry, 0.4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = shade(color, 1.2);
-  ctx.globalAlpha = 0.55;
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = 0.035;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.02, rx * 0.7, ry * 0.7, 0, 0, Math.PI * 2);
@@ -3213,23 +3471,271 @@ function unitPlate(kind: string): keyof IsoBank | null {
   return null;
 }
 
-const PLATE_SCRATCH_W = 128;
-const PLATE_SCRATCH_H = 300;
-let plateScratch: HTMLCanvasElement | null = null;
+const tintedRoofs = new WeakMap<CanvasImageSource, Map<string, HTMLCanvasElement>>();
+const roofAnchors = new WeakMap<CanvasImageSource, { nx: number; ny: number }>();
+const TINT_MAX_W = 320;
+
+function hexRgb(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function isRoofGray(r: number, g: number, b: number, a: number): boolean {
+  if (a < 48) return false;
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return lum >= 140 && Math.max(r, g, b) - Math.min(r, g, b) <= 50;
+}
+
+/** Light-gray roof and trim, tinted once per picture and seat color. */
+function tintedRoof(img: CanvasImageSource, color: string): CanvasImageSource {
+  if (typeof document === "undefined") return img;
+  let byColor = tintedRoofs.get(img);
+  if (!byColor) {
+    byColor = new Map();
+    tintedRoofs.set(img, byColor);
+  }
+  const cached = byColor.get(color);
+  if (cached) return cached;
+  const size = sourceSize(img);
+  const scale = Math.min(1, TINT_MAX_W / Math.max(1, size.w));
+  const cw = Math.max(1, Math.round(size.w * scale));
+  const ch = Math.max(1, Math.round(size.h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = cw;
+  canvas.height = ch;
+  const c = canvas.getContext("2d", { willReadFrequently: true });
+  if (!c) return img;
+  c.drawImage(img, 0, 0, cw, ch);
+  let data: ImageData;
+  try {
+    data = c.getImageData(0, 0, cw, ch);
+  } catch {
+    return img;
+  }
+  const px = data.data;
+  const [tr, tg, tb] = hexRgb(color);
+  let bestY = -1;
+  const grayAt: number[] = [];
+  for (let i = 0; i < px.length; i += 4) {
+    if (!isRoofGray(px[i]!, px[i + 1]!, px[i + 2]!, px[i + 3]!)) continue;
+    const p = i >> 2;
+    const py = (p / cw) | 0;
+    if (py > bestY) bestY = py;
+    grayAt.push(p);
+  }
+  if (!roofAnchors.has(img)) {
+    let sx = 0;
+    let sy = 0;
+    let sn = 0;
+    for (const p of grayAt) {
+      const py = (p / cw) | 0;
+      if (py < bestY - 2) continue;
+      sx += p % cw;
+      sy += py;
+      sn++;
+    }
+    roofAnchors.set(img, sn > 0 ? { nx: sx / sn / cw, ny: sy / sn / ch } : { nx: 0.68, ny: 0.48 });
+  }
+  for (const p of grayAt) {
+    const i = p << 2;
+    px[i] = px[i]! * 0.6 + tr * 0.4;
+    px[i + 1] = px[i + 1]! * 0.6 + tg * 0.4;
+    px[i + 2] = px[i + 2]! * 0.6 + tb * 0.4;
+  }
+  c.putImageData(data, 0, 0);
+  byColor.set(color, canvas);
+  return canvas;
+}
+
+/** Front eave of the light-gray roof, in picture space. Nearest the camera. */
+function roofFront(img: CanvasImageSource, color: string): { nx: number; ny: number } {
+  tintedRoof(img, color);
+  return roofAnchors.get(img) ?? { nx: 0.68, ny: 0.48 };
+}
+
+function hallBadgeWorld(b: Building, img: CanvasImageSource, color: string): { x: number; y: number } {
+  const { nx, ny } = roofFront(img, color);
+  const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+  const size = sourceSize(img);
+  const aspect = size.h / Math.max(1, size.w);
+  const imgH = wide * aspect;
+  const footX = b.tx + b.w / 2;
+  const footY = b.ty + b.h - 0.02;
+  return {
+    x: footX + (nx - 0.5) * wide,
+    y: footY + ((ny - 1) * imgH) / viewPitch(),
+  };
+}
+
+/** Push a screen badge below a health bar when the two would overlap. */
+function clearOfBar(x: number, y: number, r: number, barX: number, barY: number, barW: number, barH: number): number {
+  const left = barX - barW / 2 - 1;
+  const right = barX + barW / 2 + 1;
+  const top = barY - 1;
+  const bottom = barY + barH + 1;
+  const hit = x + r > left && x - r < right && y + r > top && y - r < bottom;
+  return hit ? bottom + r + 2 : y;
+}
+
+/** Filled seat shape. Field badges carry a 2 px dark outline so the color is not the only tell. Size is in screen pixels. */
+export function paintTeamShape(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  color: string,
+  shape: TeamShape,
+  line = 2,
+) {
+  const edge = Math.max(1, size / 2 - line / 2);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  if (shape === "circle") ctx.arc(0, 0, edge, 0, Math.PI * 2);
+  else if (shape === "square") ctx.rect(-edge, -edge, edge * 2, edge * 2);
+  else if (shape === "diamond") {
+    ctx.moveTo(0, -edge);
+    ctx.lineTo(edge, 0);
+    ctx.lineTo(0, edge);
+    ctx.lineTo(-edge, 0);
+    ctx.closePath();
+  } else {
+    ctx.moveTo(0, -edge);
+    ctx.lineTo(edge * 0.92, edge);
+    ctx.lineTo(-edge * 0.92, edge);
+    ctx.closePath();
+  }
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#1a1510";
+  ctx.lineWidth = line;
+  ctx.lineJoin = "round";
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Screen-space seat marks. Constant size, above health bars, not a hit target. */
+function paintSeatBadges(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  cam: Camera,
+  view: View,
+  alpha: number,
+  ui: DrawUi,
+) {
+  const a = Math.max(0, Math.min(1, alpha));
+  const pad = HALL_BADGE_PX;
+  for (const u of sim.units) {
+    if (u.hp <= 0 || !sim.visibleUnit(VIEWER, u)) continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const o = airPictureOffset(u);
+    const s = worldToScreen(cam, x + o.x, y + o.y, view);
+    if (s.x < -pad || s.y < -pad || s.x > view.w + pad || s.y > view.h + pad) continue;
+    const style = teamStyle(u.team);
+    const barY = s.y - 18;
+    const badgeY = barY - 1 - 2 - UNIT_BADGE_PX / 2;
+    paintTeamShape(ctx, s.x, badgeY, UNIT_BADGE_PX, seatPaint(sim, u.team), style.shape);
+  }
+  for (const b of sim.buildings) {
+    if (b.hp <= 0 || b.rubble > 0 || isFence(b.kind) || b.kind === "span") continue;
+    if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
+    const plate = hallPlate(b.kind);
+    const img = plate ? iso()?.[plate] : undefined;
+    const color = seatPaint(sim, b.team);
+    const style = teamStyle(b.team);
+    let sx: number;
+    let sy: number;
+    if (img) {
+      const at = hallBadgeWorld(b, img, color);
+      const s = worldToScreen(cam, at.x, at.y, view);
+      sx = s.x;
+      sy = s.y - 4;
+    } else {
+      const corners: [number, number][] = [
+        [b.tx, b.ty],
+        [b.tx + b.w, b.ty],
+        [b.tx, b.ty + b.h],
+        [b.tx + b.w, b.ty + b.h],
+      ];
+      let near = worldToScreen(cam, corners[0]![0], corners[0]![1], view);
+      for (let i = 1; i < corners.length; i++) {
+        const s = worldToScreen(cam, corners[i]![0], corners[i]![1], view);
+        if (s.y > near.y) near = s;
+      }
+      const top = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
+      sx = near.x;
+      sy = near.y + (top.y - near.y) * 0.32;
+    }
+    const bar = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
+    sy = clearOfBar(sx, sy, HALL_BADGE_PX / 2, bar.x, bar.y - 16, 44, 6);
+    if (sx < -pad || sy < -pad || sx > view.w + pad || sy > view.h + pad) continue;
+    paintTeamShape(ctx, sx, sy, HALL_BADGE_PX, color, style.shape);
+  }
+  if (ui.buildingId) {
+    const b = sim.buildingById(ui.buildingId);
+    if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
+      const s = worldToScreen(cam, b.rallyX, b.rallyY, view);
+      const style = teamStyle(b.team);
+      paintTeamShape(ctx, s.x, s.y, UNIT_BADGE_PX, seatPaint(sim, b.team), style.shape);
+    }
+  }
+}
+
+const tintedMasks = new WeakMap<CanvasImageSource, Map<string, HTMLCanvasElement>>();
+
+/** White mask pixels take the seat color. Cached once per picture. */
+function tintedMask(img: CanvasImageSource, color: string): CanvasImageSource {
+  if (typeof document === "undefined") return img;
+  let byColor = tintedMasks.get(img);
+  if (!byColor) {
+    byColor = new Map();
+    tintedMasks.set(img, byColor);
+  }
+  const cached = byColor.get(color);
+  if (cached) return cached;
+  const size = sourceSize(img);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, size.w);
+  canvas.height = Math.max(1, size.h);
+  const c = canvas.getContext("2d", { willReadFrequently: true });
+  if (!c) return img;
+  c.drawImage(img, 0, 0, canvas.width, canvas.height);
+  let data: ImageData;
+  try {
+    data = c.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return img;
+  }
+  const px = data.data;
+  const [tr, tg, tb] = hexRgb(color);
+  for (let i = 0; i < px.length; i += 4) {
+    if ((px[i + 3] ?? 0) === 0) continue;
+    px[i] = ((px[i] ?? 0) * tr) / 255;
+    px[i + 1] = ((px[i + 1] ?? 0) * tg) / 255;
+    px[i + 2] = ((px[i + 2] ?? 0) * tb) / 255;
+  }
+  c.putImageData(data, 0, 0);
+  byColor.set(color, canvas);
+  return canvas;
+}
 
 function paintPlate(
   ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
+  img: CanvasImageSource,
   x: number,
   y: number,
   w: number,
   flip: boolean,
   _outline = false,
   cast: "unit" | "hall" = "unit",
-  color = "#2F7DF6",
+  color = "#2EC4F0",
+  mask: CanvasImageSource | null = null,
 ) {
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const plateSize = sourceSize(img);
+  const aspect = plateSize.h / Math.max(1, plateSize.w);
   const h = w * aspect;
+  const picture = mask ? img : cast === "hall" ? tintedRoof(img, color) : img;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(flip ? -1 : 1, 1 / viewPitch());
@@ -3237,117 +3743,38 @@ function paintPlate(
   ctx.save();
   ctx.filter = "brightness(0)";
   ctx.globalAlpha = 0.45;
-  ctx.drawImage(img, -w / 2, -h + o, w, h);
+  ctx.drawImage(picture, -w / 2, -h + o, w, h);
   ctx.restore();
-  if (!paintTeamTrim(ctx, img, -w / 2, -h, w, h, color, cast)) {
-    ctx.drawImage(img, -w / 2, -h, w, h);
-  }
-  if (cast === "hall" || w > 0.75) paintFlag(ctx, w, h, color, cast);
+  ctx.drawImage(picture, -w / 2, -h, w, h);
+  if (mask) ctx.drawImage(tintedMask(mask, color), -w / 2, -h, w, h);
   ctx.restore();
 }
 
-/** Neutral body, with team color on the helmet, turret, or roof only. */
-function paintTeamTrim(
-  ctx: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  dx: number,
-  dy: number,
-  dw: number,
-  dh: number,
-  ink: string,
-  cast: "unit" | "hall",
-): boolean {
-  if (typeof document === "undefined") return false;
-  if (!plateScratch) {
-    plateScratch = document.createElement("canvas");
-    plateScratch.width = PLATE_SCRATCH_W;
-    plateScratch.height = PLATE_SCRATCH_H;
-  }
-  const s = plateScratch.getContext("2d");
-  if (!s) return false;
-  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
-  const ph = Math.max(1, Math.min(PLATE_SCRATCH_H, Math.round(PLATE_SCRATCH_W * aspect)));
-  s.setTransform(1, 0, 0, 1, 0, 0);
-  s.globalCompositeOperation = "source-over";
-  s.globalAlpha = 1;
-  s.filter = "none";
-  s.clearRect(0, 0, PLATE_SCRATCH_W, ph);
-  s.drawImage(img, 0, 0, PLATE_SCRATCH_W, ph);
-  s.save();
-  s.globalCompositeOperation = "source-atop";
-  s.fillStyle = ink;
-  s.globalAlpha = cast === "hall" ? 0.62 : 0.8;
-  s.fillRect(0, 0, PLATE_SCRATCH_W, ph);
-  s.restore();
-  const band = cast === "hall" ? 0.42 : 0.36;
-  s.save();
-  s.beginPath();
-  s.rect(0, 0, PLATE_SCRATCH_W, ph * band);
-  s.clip();
-  s.globalCompositeOperation = "source-atop";
-  s.fillStyle = ink;
-  s.globalAlpha = 0.95;
-  s.fillRect(0, 0, PLATE_SCRATCH_W, ph * band);
-  s.restore();
-  s.globalCompositeOperation = "source-over";
-  s.globalAlpha = 1;
-  ctx.drawImage(plateScratch, 0, 0, PLATE_SCRATCH_W, ph, dx, dy, dw, dh);
-  return true;
-}
-
-/** Small flag so the side still reads when the trim band is in shadow. */
-function paintFlag(ctx: CanvasRenderingContext2D, w: number, h: number, ink: string, cast: "unit" | "hall") {
-  const fw = Math.max(0.08, w * (cast === "unit" ? 0.28 : 0.18));
-  const fh = Math.max(0.04, h * (cast === "unit" ? 0.08 : 0.055));
-  const x0 = w * (cast === "unit" ? 0.02 : 0.16);
-  const y0 = -h * (cast === "unit" ? 0.96 : 0.9);
-  const pole = Math.max(0.015, w * 0.035);
-  ctx.fillStyle = "#14110e";
-  ctx.fillRect(x0, y0, pole, h * (cast === "unit" ? 0.18 : 0.12));
-  ctx.fillStyle = ink;
-  ctx.fillRect(x0 + pole, y0, fw, fh);
-  ctx.strokeStyle = "#14110e";
-  ctx.lineWidth = Math.max(0.012, w * 0.02);
-  ctx.strokeRect(x0 + pole, y0, fw, fh);
-}
-
-/** Team ring under a troop. Selected troops get the gold ground hex. */
+/** Base ring under a troop, tinted 35% with the seat color. Selection is a white ring. */
 function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
-  const rx = Math.max(selected ? 0.46 : 0.34, wide * (selected ? 0.72 : 0.9));
-  const ry = Math.max(0.1, rx * 0.4);
+  const rx = Math.max(0.16, wide * 0.72);
+  const ry = Math.max(0.1, rx * 0.38);
   ctx.save();
-  if (!selected) {
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(0.04, wide * 0.07);
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-  ctx.translate(x, y + 0.03);
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = Math.max(0.035, wide * 0.05);
   ctx.beginPath();
-  const reach = Math.max(0.5, rx);
-  for (let i = 0; i < 6; i++) {
-    const a = -Math.PI / 2 + (i * Math.PI) / 3;
-    const px = Math.cos(a) * reach;
-    const py = Math.sin(a) * reach * 0.42;
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
-  ctx.closePath();
-  ctx.fillStyle = "rgba(242, 194, 48, 0.16)";
-  ctx.fill();
-  ctx.strokeStyle = "#f2c230";
-  ctx.globalAlpha = 1;
-  ctx.lineWidth = Math.max(0.045, wide * 0.06);
+  ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
   ctx.stroke();
+  if (selected) {
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = "rgba(16, 12, 8, 0.9)";
+    ctx.lineWidth = Math.max(0.09, wide * 0.09);
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(0.055, wide * 0.06);
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -3384,7 +3811,9 @@ function drawBuilding(
     return;
   }
   const plate = hallPlate(b.kind);
-  const img = plate ? iso()?.[plate] : undefined;
+  const healthy = plate ? iso()?.[plate] : undefined;
+  const frac = b.maxHp > 0 ? b.hp / b.maxHp : 1;
+  const img = (plate && b.complete && frac < 0.5 ? isoDmg(plate) : null) ?? healthy;
   if (img) {
     const footX = b.tx + b.w / 2;
     const footY = b.ty + b.h - 0.02;
@@ -3396,29 +3825,22 @@ function drawBuilding(
     ctx.globalAlpha = low && b.complete ? 0.62 : 1;
     if (!b.complete) {
       const p = Math.max(0.08, 1 - b.buildLeft / Math.max(0.01, b.buildTotal));
-      const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+      const hallSize = sourceSize(img);
+      const aspect = hallSize.h / Math.max(1, hallSize.w);
       const h = (wide * aspect) / viewPitch();
       ctx.save();
       ctx.beginPath();
       ctx.rect(footX - wide / 2, footY - h * p, wide, h * p + 0.08);
       ctx.clip();
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, plate ? isoMask(plate) : null);
       ctx.restore();
     } else {
-      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color, plate ? isoMask(plate) : null);
     }
     ctx.globalAlpha = 1;
     paintStructureHurt(ctx, b, footX, footY, wide, time);
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 0.16;
-    ctx.globalAlpha = 0.95;
-    ctx.strokeRect(b.tx + 0.05, b.ty + b.h - 0.28, Math.max(0.4, b.w - 0.1), 0.2);
-    ctx.fillStyle = color;
-    ctx.fillRect(b.tx + 0.08, b.ty + b.h - 0.24, Math.max(0.32, b.w - 0.16), 0.12);
-    ctx.restore();
     if (selected) {
-      ctx.strokeStyle = "#f4f7ea";
+      ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 0.05;
       ctx.beginPath();
       ctx.ellipse(footX, footY, Math.max(0.35, b.w * 0.42), Math.max(0.14, b.h * 0.16), 0, 0, Math.PI * 2);
@@ -3430,7 +3852,7 @@ function drawBuilding(
   paintStructureHurt(ctx, b, b.tx + b.w / 2, b.ty + b.h * 0.45, Math.max(b.w, b.h), time);
 }
 
-/** Damage stages. Procedural fire and smoke. No texture, no magenta. */
+/** Damage stages. Smoke and fire sit on the hall picture, not the pitched ground. */
 function paintStructureHurt(
   ctx: CanvasRenderingContext2D,
   b: Building,
@@ -3446,39 +3868,139 @@ function paintStructureHurt(
   }
   if (b.rubble > 0 || b.hp <= 0) return;
   const frac = b.hp / b.maxHp;
-  if (frac >= 0.66) return;
+  if (frac >= 0.6) return;
+  const burning = frac < 0.3;
   ctx.save();
-  if (frac < 0.66) {
-    ctx.globalAlpha = 0.18 + (0.66 - frac) * 0.4;
-    ctx.fillStyle = "rgba(20, 16, 12, 0.55)";
-    ctx.beginPath();
-    ctx.ellipse(x, y - wide * 0.15, wide * 0.42, wide * 0.18, 0, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  const light = frac >= 0.33;
-  const points = light ? 2 : 4;
-  if (!light) {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(0.04 + 0.02 * Math.sin(time * 2 + b.id));
-    ctx.translate(-x, -y);
-  }
+  ctx.translate(x, y);
+  ctx.scale(1, 1 / viewPitch());
+  const roof = -wide * 0.92;
+  ctx.globalAlpha = 0.45 + (0.6 - frac) * 0.4;
+  ctx.fillStyle = "rgba(36, 32, 28, 0.85)";
+  ctx.beginPath();
+  ctx.ellipse(0, roof + wide * 0.08, wide * 0.46, wide * 0.2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  const points = burning ? 5 : 3;
   for (let i = 0; i < points; i++) {
-    const ox = (i - (points - 1) / 2) * wide * 0.22;
-    const oy = -wide * (0.35 + (i % 2) * 0.12);
-    paintSmoke(ctx, x + ox, y + oy, wide * (light ? 0.14 : 0.22), time + i * 0.7, light);
-    if (!light) {
-      paintFlame(ctx, x + ox, y + oy + wide * 0.08, wide * 0.16, time + i);
-      if (Math.sin(time * 9 + i) > 0.6) {
-        ctx.fillStyle = "#fff6d0";
-        ctx.globalAlpha = 0.8;
-        ctx.fillRect(x + ox + 0.04, y + oy - 0.1, 0.04, 0.04);
-        ctx.globalAlpha = 1;
-      }
+    const ox = (i - (points - 1) / 2) * wide * 0.3;
+    const oy = roof - (i % 2) * wide * 0.16;
+    paintSmoke(ctx, ox, oy, wide * (burning ? 0.32 : 0.2), time + i * 0.7, !burning);
+    if (burning) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "#ff7a1a";
+      ctx.beginPath();
+      ctx.ellipse(ox, oy + wide * 0.18, wide * 0.22, wide * 0.12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      paintFlame(ctx, ox, oy + wide * 0.22, wide * 0.42, time + i);
     }
   }
-  if (!light) ctx.restore();
   ctx.restore();
+}
+
+/** Death bursts in screen pixels, on top of sprites and the fog veil. */
+function paintDeathFx(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view: View) {
+  for (const f of sim.fx) {
+    const k = 1 - f.ttl / Math.max(0.001, f.max);
+    const life = Math.max(0, 1 - k);
+    if (f.kind === "debris") {
+      const s = worldToScreen(cam, f.x + f.x2 * k, f.y + f.y2 * k, view);
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.translate(s.x, s.y);
+      ctx.rotate(k * 4);
+      ctx.fillStyle = f.color;
+      const w = Math.max(11, f.r * cam.zoom * 2.4);
+      ctx.fillRect(-w, -w * 0.45, w * 2, w * 0.9);
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "muzzle") {
+      const from = worldToScreen(cam, f.x, f.y, view);
+      const to = worldToScreen(cam, f.x2, f.y2, view);
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const ux = dx / len;
+      const uy = dy / len;
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.translate(from.x + ux * 10, from.y + uy * 6);
+      ctx.fillStyle = "#fff6d2";
+      ctx.beginPath();
+      ctx.arc(0, 0, 7 + (1 - life) * 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ffe08a";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(ux * 14, uy * 14);
+      ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "flash") {
+      const s = worldToScreen(cam, f.x, f.y, view);
+      ctx.save();
+      ctx.globalAlpha = life * 0.9;
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, f.r * (0.7 + k * 0.5), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      continue;
+    }
+    if (f.kind === "num") {
+      const s = worldToScreen(cam, f.x, f.y, view);
+      const rise = k * 22;
+      ctx.save();
+      ctx.globalAlpha = life;
+      ctx.font = "13px sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#1a140e";
+      ctx.strokeText(String(f.n ?? ""), s.x, s.y - rise);
+      ctx.fillStyle = f.color;
+      ctx.fillText(String(f.n ?? ""), s.x, s.y - rise);
+      ctx.restore();
+      continue;
+    }
+    if (f.kind !== "boom") continue;
+    const s = worldToScreen(cam, f.x, f.y, view);
+    const lift = f.r > 0.7 ? cam.zoom * 0.55 : cam.zoom * 0.12;
+    const rad = Math.max(18, f.r * cam.zoom * (1.45 + k * 0.9));
+    const punch = k < 0.42 ? 1 : life;
+    ctx.save();
+    ctx.translate(s.x, s.y - lift);
+    ctx.globalAlpha = punch;
+    ctx.strokeStyle = "#fff6d0";
+    ctx.lineWidth = Math.max(2.5, rad * 0.07);
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * (0.62 + k * 0.55), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = k < 0.22 ? "#fff8e6" : k < 0.5 ? "#ff9a1f" : "#e23b18";
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * (k < 0.28 ? 0.7 : 0.48), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#fffdf6";
+    ctx.beginPath();
+    ctx.arc(0, 0, rad * 0.24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = punch * 0.95;
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2 + 0.35;
+      const d = rad * (0.4 + k * 0.85);
+      ctx.save();
+      ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
+      ctx.rotate(a + k * 2.4);
+      ctx.fillStyle = i % 2 ? "#241810" : "#f0c078";
+      const w = Math.max(6, rad * 0.16);
+      ctx.fillRect(-w * 0.5, -w * 0.22, w, w * 0.44);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
 }
 
 function paintSmoke(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, time: number, light: boolean) {
@@ -3531,9 +4053,39 @@ function paintCollapse(ctx: CanvasRenderingContext2D, b: Building, x: number, y:
   ctx.restore();
 }
 
+function captureGoal(b: Building): number {
+  if (b.kind === "span" && b.rubble > 0) return 6;
+  if (isFence(b.kind)) return 2.6;
+  return 3;
+}
+
+/** Phone-readable bar over a hall an engineer is taking. Team color fills as the capture runs. */
+function paintCaptureBars(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view: View) {
+  for (const u of sim.units) {
+    if (u.hp <= 0 || u.kind !== "engineer" || u.order.t !== "capture" || u.capture <= 0) continue;
+    const b = sim.buildingById(u.order.id);
+    if (!b || b.hp <= 0) continue;
+    const s = worldToScreen(cam, b.tx + b.w / 2, b.ty + b.h * 0.12, view);
+    const w = 68;
+    const h = 8;
+    const x = Math.round(s.x - w / 2);
+    const y = Math.round(s.y - 22);
+    const frac = Math.max(0, Math.min(1, u.capture / captureGoal(b)));
+    ctx.save();
+    ctx.fillStyle = "rgba(16, 12, 8, 0.88)";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = seatPaint(sim, u.team);
+    ctx.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * frac), h - 2);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.restore();
+  }
+}
+
 function paintCaptureRing(ctx: CanvasRenderingContext2D, x: number, y: number, progress: number) {
   ctx.save();
-  ctx.strokeStyle = "#2F7DF6";
+  ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 0.06;
   ctx.beginPath();
   ctx.arc(x, y, 0.35, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
@@ -3554,6 +4106,15 @@ function rubbleSeen(sim: Sim, b: Building): boolean {
 }
 
 function paintRubble(ctx: CanvasRenderingContext2D, b: Building) {
+  const plate = hallPlate(b.kind);
+  const ruin = plate ? isoRuin(plate) : null;
+  if (ruin) {
+    const footX = b.tx + b.w / 2;
+    const footY = b.ty + b.h - 0.02;
+    const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+    paintPlate(ctx, ruin, footX, footY, wide, false, true, "hall", "#8a8070", null);
+    return;
+  }
   const x0 = b.tx + 0.08;
   const y0 = b.ty + 0.12;
   ctx.save();
@@ -3586,7 +4147,7 @@ function airPictureOffset(u: Unit): { x: number; y: number } {
   return { x: -0.52 * lift, y: -0.7 * lift };
 }
 
-function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number, color = "#2F7DF6") {
+function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number, color = "#2EC4F0") {
   const lift = airLift(u);
   const span = unitWorldSpan(u.kind);
   const ox = x + 0.16 + 0.42 * lift;
@@ -3603,7 +4164,7 @@ function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: num
   ctx.ellipse(ox, oy, rx, ry, 0.18, 0, Math.PI * 2);
   ctx.fill();
   ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.9;
+  ctx.globalAlpha = 0.35;
   ctx.lineWidth = 0.04;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.04, Math.max(0.28, span * 0.42), Math.max(0.1, span * 0.16), 0, 0, Math.PI * 2);
@@ -3627,7 +4188,8 @@ function drawUnit(
   const moving = Math.hypot(u.x - u.px, u.y - u.py) > 0.004;
   const plate = unitPlate(u.kind);
   const img = plate ? iso()?.[plate] : undefined;
-  const aspect = img && img.naturalWidth > 0 ? img.naturalHeight / Math.max(1, img.naturalWidth) : 1;
+  const unitSize = img ? sourceSize(img) : null;
+  const aspect = unitSize && unitSize.w > 0 ? unitSize.h / Math.max(1, unitSize.w) : 1;
   const wide = img ? unitPictureWidth(u.kind, aspect) : unitWorldSpan(u.kind);
   const ground = u.loco !== "air";
   if (ground) {
@@ -3640,34 +4202,16 @@ function drawUnit(
   // The battle camera stays close. A dot is only for a sprite that would
   // be smaller than a finger-tip, which this zoom range does not reach.
   if (wide * zoom < 8) {
-    paintSideIcon(ctx, x, y, wide, color);
     if (leaf) paintLeaf(ctx, x, y);
     return;
   }
   if (img) {
-    paintPlate(ctx, img, x, y + 0.04, wide, Math.cos(aim) < -0.15, true, "unit", color);
+    paintPlate(ctx, img, x, y + 0.04, wide, Math.cos(aim) < -0.15, true, "unit", color, plate ? isoMask(plate) : null);
     if (leaf) paintLeaf(ctx, x, y);
     return;
   }
   paintSolidUnit(ctx, u, x, y, color, selected, time, aim, moving, THEATER === "snow", VIEWER);
   if (selected) paintUnitMark(ctx, x, y + 0.04, wide, color, true);
-}
-
-/** Far-zoom mark. Infantry stay a smaller dot than a tank. */
-function paintSideIcon(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string) {
-  const foot = wide < 0.55;
-  ctx.save();
-  ctx.fillStyle = "#100c08";
-  ctx.beginPath();
-  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.7, 0, Math.PI * 2);
-  else ctx.ellipse(x, y - wide * 0.2, wide * 0.42, wide * 0.24, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.5, 0, Math.PI * 2);
-  else ctx.ellipse(x, y - wide * 0.2, wide * 0.3, wide * 0.16, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
 }
 
 function paintLeaf(ctx: CanvasRenderingContext2D, x: number, y: number) {
@@ -3934,27 +4478,93 @@ function minimapFogVeil(sim: Sim): HTMLCanvasElement | null {
   return canvas;
 }
 
-function paintMiniRoutes(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy: number, cell: number) {
-  const fog = sim.fog[VIEWER];
-  for (let y = 0; y < sim.gh; y++) {
-    for (let x = 0; x < sim.gw; x++) {
-      const i = y * sim.gw + x;
-      const t = sim.terrain[i] ?? 0;
-      let color = "";
-      if (t === TILE_BRIDGE) color = "#c4a06a";
-      else if (t === TILE_ROAD) color = "#8d6840";
-      else if (t === TILE_HIGH) color = "#e4dcc8";
-      else if (t === TILE_CLIFF) color = "#5c5348";
-      else if (t === TILE_RAMP) color = "#b08a58";
-      else continue;
-      const f = fog?.[i] ?? 0;
-      ctx.globalAlpha = f === 2 ? 1 : f === 1 ? 0.72 : 0.38;
-      ctx.fillStyle = color;
-      const pad = t === TILE_ROAD ? 0.35 : 0.45;
-      ctx.fillRect(ox + x * cell, oy + y * cell, cell + pad, cell + pad);
+let miniMarks: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+/** One pixel per tile, rebuilt when the ground changes. Forests, ore, and bridges sit on the photo. */
+function minimapMarks(sim: Sim): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  const key = `${sim.mapId}|${sim.gw}x${sim.gh}|${sim.groundRev}|${sim.theater}`;
+  if (miniMarks?.key === key) return miniMarks.canvas;
+  const canvas = miniMarks?.canvas ?? document.createElement("canvas");
+  if (canvas.width !== sim.gw) canvas.width = sim.gw;
+  if (canvas.height !== sim.gh) canvas.height = sim.gh;
+  const g = canvas.getContext("2d");
+  if (!g) return null;
+  const img = g.createImageData(sim.gw, sim.gh);
+  const d = img.data;
+  const n = sim.gw * sim.gh;
+  for (let i = 0; i < n; i++) {
+    const t = sim.terrain[i] ?? 0;
+    const ore = (sim.crystal[i] ?? 0) > 0;
+    let r = 0;
+    let gc = 0;
+    let b = 0;
+    let a = 0;
+    if (ore) {
+      r = 208;
+      gc = 138;
+      b = 58;
+      a = 235;
+    } else if (t === TILE_BRIDGE) {
+      r = 196;
+      gc = 154;
+      b = 96;
+      a = 235;
+    } else if (t === TILE_WRECK) {
+      r = 42;
+      gc = 32;
+      b = 24;
+      a = 200;
+    } else if (t === TILE_SCRUB || t === TILE_STUMP) {
+      r = 14;
+      gc = 72;
+      b = 28;
+      a = 210;
+    } else if (t === TILE_CLIFF || t === TILE_ROCK) {
+      r = 72;
+      gc = 62;
+      b = 52;
+      a = 80;
+    } else if (t === TILE_RAMP) {
+      r = 186;
+      gc = 146;
+      b = 88;
+      a = 150;
+    } else if (t === TILE_ROAD) {
+      r = 150;
+      gc = 112;
+      b = 68;
+      a = 90;
+    } else if (t === TILE_HIGH) {
+      r = 214;
+      gc = 204;
+      b = 176;
+      a = 50;
     }
+    const o = i * 4;
+    d[o] = r;
+    d[o + 1] = gc;
+    d[o + 2] = b;
+    d[o + 3] = a;
   }
-  ctx.globalAlpha = 1;
+  g.putImageData(img, 0, 0);
+  miniMarks = { key, canvas };
+  return canvas;
+}
+
+function paintMiniMarks(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy: number, size: number) {
+  const marks = minimapMarks(sim);
+  if (!marks) return;
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(marks, ox, oy, size, size);
+  const shade = minimapFogVeil(sim);
+  if (shade) {
+    ctx.globalCompositeOperation = "multiply";
+    ctx.drawImage(shade, ox, oy, size, size);
+  }
+  ctx.restore();
 }
 
 function paintEnemySpawns(ctx: CanvasRenderingContext2D, sim: Sim, r: { x: number; y: number; s: number }) {
@@ -4003,27 +4613,10 @@ function drawMinimap(
   ctx.lineWidth = 2;
   ctx.strokeRect(r.x - 4, r.y - 4, r.s + 8, r.s + 8);
   const cell = r.s / sim.gw;
-  const fog = sim.fog[VIEWER];
   if (!ground && relief) {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(relief, r.x, r.y, r.s, r.s);
-    const shade = minimapFogVeil(sim);
-    if (shade) {
-      ctx.save();
-      ctx.globalCompositeOperation = "multiply";
-      ctx.imageSmoothingEnabled = true;
-      ctx.drawImage(shade, r.x, r.y, r.s, r.s);
-      ctx.restore();
-    }
-    for (let y = 0; y < sim.gh; y++) {
-      for (let x = 0; x < sim.gw; x++) {
-        const i = y * sim.gw + x;
-        if ((fog[i] ?? 0) === 0 || (sim.crystal[i] ?? 0) <= 0) continue;
-        ctx.fillStyle = "#3dcc6e";
-        ctx.fillRect(r.x + x * cell, r.y + y * cell, Math.max(1.5, cell), Math.max(1.5, cell));
-      }
-    }
     for (const b of sim.buildings) {
       if (b.hp <= 0 || !sim.buildingVisible(VIEWER, b)) continue;
       ctx.fillStyle = seatPaint(sim, b.team);
@@ -4036,21 +4629,15 @@ function drawMinimap(
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(sheet, r.x, r.y, r.s, r.s);
   } else {
-    const fog = sim.fog[VIEWER];
-    if (ground) ctx.drawImage(ground, r.x, r.y, r.s, r.s);
-    for (let y = 0; y < sim.gh; y++) {
-      for (let x = 0; x < sim.gw; x++) {
-        const i = y * sim.gw + x;
-        const t = sim.terrain[i];
-        const seen = (fog[i] ?? 0) === 2;
-        if (!ground) {
-          ctx.fillStyle = miniTone(t, (fog[i] ?? 0) === 2 ? sim.crystal[i] : 0, 2);
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (seen && sim.crystal[i] > 0) {
-          ctx.fillStyle = "#3dcc6e";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (seen && t === TILE_ROCK) {
-          ctx.fillStyle = "rgba(20,16,12,0.75)";
+    if (ground) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(ground, r.x, r.y, r.s, r.s);
+    } else {
+      for (let y = 0; y < sim.gh; y++) {
+        for (let x = 0; x < sim.gw; x++) {
+          const i = y * sim.gw + x;
+          ctx.fillStyle = miniTone(sim.terrain[i] ?? 0, sim.crystal[i] ?? 0, 2);
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
         }
       }
@@ -4062,16 +4649,19 @@ function drawMinimap(
     }
   }
   }
-  paintMiniRoutes(ctx, sim, r.x, r.y, cell);
+  paintMiniMarks(ctx, sim, r.x, r.y, r.s);
   for (const c of sim.starts.corners) {
     const seat = seatAtCorner(sim, c.x, c.y);
     const cx = r.x + c.x * cell;
     const cy = r.y + c.y * cell;
-    ctx.fillStyle = seat >= 0 ? seatPaint(sim, seat) : "rgba(237,230,217,0.45)";
-    ctx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
-    ctx.strokeStyle = "#100e0c";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(cx - 2.5, cy - 2.5, 5, 5);
+    if (seat >= 0) paintTeamShape(ctx, cx, cy, 6, seatPaint(sim, seat), teamStyle(seat).shape, 1);
+    else {
+      ctx.fillStyle = "rgba(237,230,217,0.45)";
+      ctx.fillRect(cx - 2.5, cy - 2.5, 5, 5);
+      ctx.strokeStyle = "#100e0c";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx - 2.5, cy - 2.5, 5, 5);
+    }
   }
   for (const u of sim.units) {
     if (!sim.minimapUnit(VIEWER, u)) continue;
@@ -4079,25 +4669,8 @@ function drawMinimap(
     const cy = r.y + u.y * cell;
     const foe = !sim.allied(u.team, VIEWER);
     const combat = foe && u.damage > 0 && u.kind !== "harvester";
-    ctx.fillStyle = seatPaint(sim, u.team);
-    if (u.loco === "air") {
-      ctx.beginPath();
-      ctx.moveTo(cx, cy - (combat ? 3.4 : 2.6));
-      ctx.lineTo(cx + (combat ? 3 : 2.3), cy);
-      ctx.lineTo(cx, cy + (combat ? 3.4 : 2.6));
-      ctx.lineTo(cx - (combat ? 3 : 2.3), cy);
-      ctx.closePath();
-      ctx.fill();
-      continue;
-    }
-    if (combat) {
-      ctx.fillStyle = "#fff1e4";
-      ctx.fillRect(cx - 2.4, cy - 2.4, 4.8, 4.8);
-      ctx.fillStyle = seatPaint(sim, u.team);
-      ctx.fillRect(cx - 1.3, cy - 1.3, 2.6, 2.6);
-      continue;
-    }
-    ctx.fillRect(cx - 1, cy - 1, 2.2, 2.2);
+    const dot = combat ? 7 : 5;
+    paintTeamShape(ctx, cx, cy, dot, seatPaint(sim, u.team), teamStyle(u.team).shape, 1);
   }
   for (const c of sim.crates) {
     if (c.x < 0) continue;
@@ -4121,14 +4694,8 @@ function drawMinimap(
     if (!sim.buildingVisible(VIEWER, b)) continue;
     const cx = r.x + (b.tx + b.w / 2) * cell;
     const cy = r.y + (b.ty + b.h / 2) * cell;
-    ctx.fillStyle = "#e5483b";
-    ctx.beginPath();
-    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = "#fff";
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = "#fff";
+    paintTeamShape(ctx, cx, cy, 9, seatPaint(sim, b.team), teamStyle(b.team).shape, 1);
+    ctx.fillStyle = "#14110e";
     ctx.font = "8px sans-serif";
     ctx.textAlign = "center";
     ctx.fillText("B", cx, cy + 2);

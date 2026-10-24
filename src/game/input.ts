@@ -99,6 +99,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   let tapTimer: ReturnType<typeof setTimeout> | null = null;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let armedBox = false;
+  let fromPending = false;
+  let gestureCam: { x: number; y: number } | null = null;
   let lastTap = { t: 0, x: 0, y: 0, pending: false };
 
   const local = (e: PointerEvent) => {
@@ -227,6 +229,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       return;
     }
     mode = "pending";
+    fromPending = false;
+    gestureCam = { x: hooks.camera.x, y: hooks.camera.y };
     armedBox = !!hooks.selectMode?.() && !hooks.suppressBox?.();
     clearHold();
     if (!armedBox && !hooks.suppressBox?.() && e.pointerType !== "mouse") {
@@ -253,7 +257,6 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     cur.y = p.y;
 
     if (mode === "pinch") {
-      if (touchPinch) return;
       const pair = pinchPair();
       if (!pair) return;
       const dist = Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) || 1;
@@ -303,6 +306,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
         const touchPan = strike || (e.pointerType !== "mouse" && !hooks.selectMode?.() && !armedBox);
         if (touchPan) {
           mode = "pan";
+          fromPending = true;
           const cam = hooks.camera;
           const view = hooks.getView();
           const g = grid();
@@ -353,14 +357,25 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
     if (mode === "pan" || mode === "minimap") {
       const slide = Math.hypot(p.x - cur.sx, p.y - cur.sy);
+      const tapLimit = hooks.suppressBox?.() ? 48 : e.pointerType !== "mouse" ? 28 : 10;
+      if (mode === "pan" && fromPending && gestureCam && e.button === 0 && slide < tapLimit) {
+        const cam = hooks.camera;
+        cam.x = gestureCam.x;
+        cam.y = gestureCam.y;
+        cam.vx = 0;
+        cam.vy = 0;
+        const view = hooks.getView();
+        const g = grid();
+        clampCamera(cam, g.w, g.h, view, !!hooks.warzone?.());
+        mode = "none";
+        fromPending = false;
+        fireTap(p.x, p.y, false);
+        if (pts.size === 0) cam.hold = false;
+        return;
+      }
       if (mode === "minimap" && slide < 12) {
         const hit = minimapHit(p.x, p.y, hooks.getView(), grid().w, grid().h, !!hooks.warzone?.());
         if (hit) hooks.onMinimapTap?.(hit.x, hit.y);
-      } else if (mode === "pan" && hooks.suppressBox?.() && slide < 36) {
-        mode = "none";
-        fireTap(p.x, p.y, false);
-        if (pts.size === 0) hooks.camera.hold = false;
-        return;
       }
       if (pts.size === 0) mode = "none";
       return;
@@ -444,6 +459,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   const onTouchStart = (e: TouchEvent) => {
     if (e.touches.length < 2) return;
     e.preventDefault();
+    if (pts.size >= 2) return;
     const a = touchPoint(e.touches[0]!);
     const b = touchPoint(e.touches[1]!);
     touchPinch = true;
@@ -452,6 +468,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   const onTouchMove = (e: TouchEvent) => {
     if (e.touches.length < 2) return;
     e.preventDefault();
+    if (pts.size >= 2) return;
     const a = touchPoint(e.touches[0]!);
     const b = touchPoint(e.touches[1]!);
     const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;

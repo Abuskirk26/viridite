@@ -9,9 +9,11 @@ import {
   BUILDINGS,
   BUILD_GAP,
   BUILD_ORDER,
-  CP_BASE,
   CP_MAX,
-  CP_STEP,
+  HQ_COST,
+  HQ_CP,
+  HQ_TIME,
+  airTier,
   HAUL_AT,
   MAP_SIZE,
   SEAT_NAME,
@@ -19,6 +21,7 @@ import {
   START_STORAGE,
   SUPPLY_DRIP,
   SILO_DRIP,
+  supplyShare,
   SURVIVE_SECONDS,
   TILE_FORD,
   TILE_HIGH,
@@ -51,10 +54,7 @@ import {
   normalizeSize,
   normalizeStart,
   normalizeTeams,
-  SIDE_BLUE,
-  SIDE_GREEN,
-  SIDE_RED,
-  SIDE_YELLOW,
+  teamStyle,
   otherFaction,
   resolveBuilding,
   resolveUnit,
@@ -83,7 +83,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -237,8 +237,10 @@ export interface Building {
   vsAir: number;
   /** Friendly gate passage. Enemies never use it. Locked gates stop your own troops too. */
   open: boolean;
-  /** Rubble still blocks until this counts down to 0. */
+  /** Rubble still blocks until this counts down to 0. Walls use a short count. A fallen hall keeps a high value so the pile stays. */
   rubble: number;
+  /** Seconds a fallen hall's footprint still blocks movement. */
+  block: number;
   /** Seconds left on the red damage flash. */
   hit: number;
   /** Sim time until the attack bar hides. Visual only. */
@@ -277,7 +279,7 @@ export interface Shot {
 }
 
 export interface Fx {
-  kind: "boom" | "beam" | "debris";
+  kind: "boom" | "beam" | "debris" | "muzzle" | "flash" | "num";
   x: number;
   y: number;
   x2: number;
@@ -286,6 +288,8 @@ export interface Fx {
   max: number;
   color: string;
   r: number;
+  /** Rounded damage for a floating number. */
+  n?: number;
 }
 
 /** A move or attack the player just issued. Drawn, not simulated. */
@@ -618,6 +622,8 @@ export class Sim {
   outcome: "playing" | "win" | "lose" = "playing";
   reason = "";
   hadYard: boolean[] = [false, false, false, false];
+  /** True after "Last building!" so a rebuild can warn again. */
+  private lastOne = [false, false, false, false];
   eliminated: boolean[] = [false, false, false, false];
   /** Units this seat destroyed. */
   statKills: number[] = [0, 0, 0, 0];
@@ -770,6 +776,7 @@ export class Sim {
     this.fog = [0, 1, 2, 3].map(() => new Uint8Array(gw * gh));
     if (!opts.empty) {
       for (const s of slots) stampCamp(this.terrain, this.crystal, s.x, s.y, gw, gh);
+      if (!custom) fairNearbyOre(this.terrain, this.crystal, gw, gh, slots);
       this.seedPods();
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
@@ -924,23 +931,16 @@ export class Sim {
   }
 
   /**
-   * Battlefield paint. The local viewer is blue, an ally is green, the first
-   * enemy is red, and the next enemy is yellow. A fallen commander goes gray.
+   * Seat paint from TEAM_STYLES. Slot 0 is cyan, then orange, purple, yellow.
+   * A fallen commander goes gray. Red and green are health, never a team.
    */
-  seatColor(team: number, viewer = this.ear): string {
+  seatColor(team: number, _viewer = this.ear): string {
     if (this.eliminated[team]) return "#8d8478";
-    const who = team > 3 ? 3 : team;
-    if (who === viewer) return SIDE_BLUE;
-    if (this.allied(who, viewer)) return SIDE_GREEN;
-    const foes: number[] = [];
-    for (let t = 0; t < 4; t++) {
-      if (t === viewer || this.allied(t, viewer)) continue;
-      foes.push(t);
-    }
-    const i = foes.indexOf(who);
-    if (i <= 0) return SIDE_RED;
-    if (i === 1) return "#F27A30";
-    return SIDE_GREEN;
+    return teamStyle(team).color;
+  }
+
+  seatShape(team: number) {
+    return teamStyle(team).shape;
   }
 
   /** Same alliance. Free-for-all is never friendly across seats. One opponent matches the old 1v1. */
@@ -1021,6 +1021,19 @@ export class Sim {
     }
     if (plant) this.gridOn[team] = true;
     return { supply, use, low: !!this.gridOn[team] && use > supply };
+  }
+
+  /**
+   * Reserved power. 1 while the grid covers every building, 0 with no supply
+   * once a plant has run, otherwise supply / demand. The first plant still
+   * builds at full speed because the grid is not on yet.
+   */
+  powerFactor(team: Team): number {
+    const live = this.powerOf(team);
+    if (!this.gridOn[team]) return 1;
+    if (live.use <= live.supply) return 1;
+    if (live.supply <= 0) return 0;
+    return live.supply / live.use;
   }
 
   storageOf(team: Team): number {
@@ -1146,6 +1159,7 @@ export class Sim {
   }
 
   canPlace(team: Team, kind: BuildingId, tx: number, ty: number): PlaceResult {
+    if (!this.hasYard(team)) return { ok: false, reason: "Needs a yard" };
     if (isFence(kind)) {
       const step = this.previewFence(team, kind, [{ tx, ty }])[0];
       if (!step || !step.ok) return { ok: false, reason: step?.reason || "Blocked" };
@@ -1267,6 +1281,12 @@ export class Sim {
       if (b.team === this.ear || b.team === 0) this.say(`Needs ${need}`, "tech", 0.8);
       return { ok: false, reason: `Needs ${need}` };
     }
+    const needTier = airTier(unitId);
+    const tier = 1 + (this.commandLv[b.team] ?? 0);
+    if (needTier > tier) {
+      if (b.team === this.ear || b.team === 0) this.say(`HQ ${needTier}`, "tech", 0.8);
+      return { ok: false, reason: `HQ ${needTier}` };
+    }
     if (b.kind === "helipad") {
       const parked = this.units.filter((u) => u.hp > 0 && u.home === b.id && u.loco === "air").length;
       if (parked + b.queue.length >= 3) return { ok: false, reason: "Pad holds 3" };
@@ -1300,9 +1320,9 @@ export class Sim {
     this.say("Rally set", "rally", 0.4);
   }
 
-  /** Flat army room. Skirmish does not sell a bigger cap mid-match. */
-  commandCap(_team: Team): number {
-    return CP_BASE + CP_MAX * CP_STEP;
+  /** Command points from the HQ tier. Extra yards do not stack. */
+  commandCap(team: Team): number {
+    return HQ_CP * (1 + (this.commandLv[team] ?? 0));
   }
 
   commandLoad(team: Team, includeQueue: boolean): number {
@@ -1323,18 +1343,26 @@ export class Sim {
     return this.commandLoad(team, true);
   }
 
-  /** Credits per second from the yard and supply centers. Zero until a plant is up, and while power is low. */
+  /**
+   * Credits per second from the yard and supply centers. Zero until a plant is up.
+   * Each later supply center pays a smaller share. A short grid still pays, slower.
+   * There is no credit storage cap.
+   */
   supplyPerSec(team: Team): number {
-    const live = this.powerOf(team);
-    if (this.eliminated[team] || !this.gridOn[team] || live.low) return 0;
+    if (this.eliminated[team]) return 0;
+    const factor = this.powerFactor(team);
+    if (!this.gridOn[team] || factor <= 0) return 0;
     let n = 0;
+    const supplies: Building[] = [];
     for (const b of this.buildings) {
       if (b.team !== team || !b.complete || b.hp <= 0 || b.neutral) continue;
       if (b.kind === "yard") n += YARD_DRIP;
-      else if (b.kind === "supply") n += SUPPLY_DRIP;
+      else if (b.kind === "supply") supplies.push(b);
       else if (b.kind === "silo") n += SILO_DRIP;
     }
-    return n;
+    supplies.sort((a, b) => a.id - b.id);
+    for (let i = 0; i < supplies.length; i++) n += SUPPLY_DRIP * supplyShare(i);
+    return n * factor;
   }
 
   /** Spend credits at the yard to raise the command cap. Takes time. */
@@ -1343,13 +1371,14 @@ export class Sim {
     if ((this.commandLv[team] ?? 0) >= CP_MAX) return { ok: false, reason: "Command is maxed" };
     const yard = this.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
     if (!yard) return { ok: false, reason: "Needs a yard" };
-    const cost = 600 + (this.commandLv[team] ?? 0) * 450;
+    const lv = this.commandLv[team] ?? 0;
+    const cost = HQ_COST[lv] ?? HQ_COST[HQ_COST.length - 1] ?? 0;
     if (this.credits[team] < cost) {
       if (team === this.ear) this.say("Insufficient funds", "credits", 0.8);
       return { ok: false, reason: "Not enough credits" };
     }
     this.credits[team] -= cost;
-    this.commandLeft[team] = 14;
+    this.commandLeft[team] = HQ_TIME[lv] ?? HQ_TIME[HQ_TIME.length - 1] ?? 14;
     if (team === this.ear) this.say("Raising command");
     return { ok: true, reason: "" };
   }
@@ -1436,12 +1465,13 @@ export class Sim {
     if (!target) return;
     const team = target.kind === "unit" ? target.u.team : target.b.team;
     const wreckedSpan = target.kind === "building" && target.b.kind === "span" && target.b.rubble > 0 && target.b.hp > 0;
+    const liveSpan = target.kind === "building" && target.b.kind === "span" && target.b.hp > 0;
     const neutralBuilding = target.kind === "building" && target.b.neutral && target.b.kind !== "span" && target.b.rubble <= 0;
     let any = false;
     let mine: Unit | null = null;
     const fighters: Unit[] = [];
     for (const u of this.idsToUnits(ids)) {
-      if (!wreckedSpan && !neutralBuilding && this.allied(u.team, team)) continue;
+      if (!liveSpan && !neutralBuilding && this.allied(u.team, team)) continue;
       if (target.kind === "unit" && target.u.loco === "air" && !u.hitsAir) {
         if (u.team === 0) this.say("Can't target aircraft", "noair", 0.7);
         continue;
@@ -1858,6 +1888,7 @@ export class Sim {
     this.tickTowers(dt);
     this.tickCrates(dt);
     this.tickMend(dt);
+    this.tickBaseHeal(dt);
     this.tickIncome(dt);
     this.applyCloak();
     this.sweep();
@@ -2127,9 +2158,10 @@ export class Sim {
       if (b.team === this.ear) this.say("Repairs finished", "repair", 0.6);
       return;
     }
-    const low = this.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
+    const plant = b.kind === "power" || b.kind === "advpower";
+    const pace = plant ? 1 : this.powerFactor(b.team);
     const budget = Math.min(this.credits[b.team] | 0, Math.ceil((b.maxHp - b.hp) / 4));
-    const spend = Math.min(budget, Math.max(0, Math.round((low ? 4 : 8) * dt)));
+    const spend = Math.min(budget, Math.max(0, Math.round(8 * pace * dt)));
     if (spend <= 0) {
       if ((this.credits[b.team] | 0) < 1) {
         b.mending = false;
@@ -2150,11 +2182,10 @@ export class Sim {
       if (b.hp <= 0 || b.rubble > 0) continue;
       if (b.neutral || this.eliminated[b.team]) continue;
       if (!b.complete) {
-        const low = this.powerOf(b.team).low;
         const plant = b.kind === "power" || b.kind === "advpower";
         const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
-        const brown = low ? (plant ? 0.8 : 0.5) : 1;
-        b.buildLeft -= dt * brown * 1.25 * rush;
+        const pace = plant ? 1 : this.powerFactor(b.team);
+        b.buildLeft -= dt * pace * 1.25 * rush;
         const p = 1 - b.buildLeft / Math.max(0.01, b.buildTotal);
         b.hp = Math.max(1, b.maxHp * (0.12 + 0.88 * clamp01(p)));
         if (b.buildLeft <= 0) {
@@ -2185,9 +2216,9 @@ export class Sim {
       if (b.hit > 0) b.hit = Math.max(0, b.hit - dt);
       if (b.mending) this.tickRepair(b, dt);
       if (!b.queue.length) continue;
-      const low = this.powerOf(b.team).low;
       const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
-      b.prod += dt * (low ? 0.5 : 1) * rush;
+      const burned = b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+      b.prod += dt * this.powerFactor(b.team) * rush * burned;
       const spec = resolveUnit(b.queue[0], this.factionOf(b.team));
       if (b.prod >= spec.time) {
         const kind = b.queue[0];
@@ -2448,7 +2479,8 @@ export class Sim {
       if (shore) return shore;
     }
     if (u.order.t === "move" && u.order.attackMove) {
-      const foe = this.nearestFoe(u.team, u.x, u.y, u.sight * 0.92, u.hitsAir, false, false);
+      const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+      const foe = this.nearestOnPath(u.team, u.x, u.y, reach + 1.2, u.hitsAir);
       if (foe) return foe;
       return this.liveBreach(u);
     }
@@ -2543,7 +2575,45 @@ export class Sim {
     this.navigate(u, tile.x + 0.5, tile.y + 0.5, dt);
   }
 
+  private standKind(u: Unit): "boat" | "amphib" | "infantry" | "vehicle" {
+    if (u.loco === "sea") return "boat";
+    if (u.loco === "amphib") return "amphib";
+    if (u.armor === "infantry") return "infantry";
+    return "vehicle";
+  }
+
+  /** The deck under this route is gone. Occupied tiles do not count — only the ground. */
+  private routeBroken(u: Unit): boolean {
+    if (u.loco === "air" || u.path.length === 0) return false;
+    const who = this.standKind(u);
+    for (const p of u.path) {
+      const i = p.y * this.gw + p.x;
+      if (i < 0 || i >= this.terrain.length) return true;
+      if (!allows(this.terrain[i] ?? 0, who, this.craters[i] ?? 0)) return true;
+    }
+    return false;
+  }
+
+  private stepOffWreck(u: Unit) {
+    if (u.loco === "air" || u.loco === "sea") return;
+    const tx = u.x | 0;
+    const ty = u.y | 0;
+    const t = this.terrain[ty * this.gw + tx] ?? 0;
+    if (t !== TILE_WRECK && t !== TILE_DEEP) return;
+    const tile = this.nearestDomainTile(u, tx, ty, 8);
+    if (!tile) return;
+    u.x = tile.x + 0.5;
+    u.y = tile.y + 0.5;
+    u.path = [];
+    u.repath = 0;
+  }
+
   private navigate(u: Unit, x: number, y: number, dt: number) {
+    this.stepOffWreck(u);
+    if (this.routeBroken(u)) {
+      u.path = [];
+      u.repath = 0;
+    }
     if (u.path.length === 0 && u.repath <= 0 && hypot(u.x, u.y, x, y) > 0.35) {
       this.requestPath(u, x, y, false);
       if (u.order.t === "idle") return;
@@ -2798,8 +2868,9 @@ export class Sim {
     for (const b of this.buildings) {
       const aa = b.special === "aa";
       if ((b.kind !== "tower" && !aa) || !b.complete || b.hp <= 0) continue;
-      if (b.cooldown > 0) b.cooldown -= dt;
-      if (this.powerOf(b.team).low) continue;
+      const pace = this.powerFactor(b.team);
+      if (b.cooldown > 0) b.cooldown -= dt * pace;
+      if (pace <= 0) continue;
       const cx = b.tx + b.w / 2;
       const cy = b.ty + b.h / 2;
       const reach = this.reachOf(b.range, cx, cy, "ground");
@@ -2811,6 +2882,7 @@ export class Sim {
       b.cooldown = b.rof;
       this.applyDamage(foe, b.damage, b.vsInf, b.vsVeh, b.vsBld, aa ? b.vsAir : 0, "structure", b.team);
       const p = this.targetPoint(foe);
+      this.muzzle(cx, cy, p.x, p.y);
       this.beam(cx, cy, p.x, p.y, b.team);
       this.markPoint(b.team, cx, cy);
       this.blip("tower", 0.16);
@@ -2828,6 +2900,7 @@ export class Sim {
     u.cooldown = u.rof;
     if (u.stealth) u.reveal = 1.7;
     this.markFire(u);
+    this.muzzle(u.x, u.y, pos.x, pos.y);
     if (u.ammoMax > 0) {
       u.ammo -= 1;
       if (u.ammo <= 0) this.beginRearm(u);
@@ -2934,6 +3007,8 @@ export class Sim {
     if (u.hp <= 0 || dmg <= 0) return;
     u.hp -= dmg;
     u.hit = 0.28;
+    this.flashAt(u.x, u.y);
+    this.floatDmg(u.x, u.y - 0.15, dmg);
     if (attacker > 0 && from !== undefined && !this.allied(from, u.team)) {
       u.aggro = attacker;
       u.aggroUntil = this.time + 5;
@@ -2977,6 +3052,8 @@ export class Sim {
     if (from !== undefined) this.noteThreat(b.team, b.tx + b.w / 2, b.ty + b.h / 2, from);
     b.hit = 0.4;
     b.shown = this.time + 4;
+    this.flashAt(b.tx + b.w / 2, b.ty + b.h / 2);
+    this.floatDmg(b.tx + b.w / 2, b.ty - 0.2, dmg);
     spawnSparks(b.tx + b.w / 2, b.ty + b.h / 2, 5);
     if (b.rubble > 0) {
       b.hp = 1;
@@ -3023,13 +3100,29 @@ export class Sim {
     else this.say(`Enemy ${b.name} destroyed`, "kb", 1.2);
   }
 
+  private spanDist(b: Building, x: number, y: number): number {
+    const cx = Math.max(b.tx, Math.min(x + 0.5, b.tx + b.w));
+    const cy = Math.max(b.ty, Math.min(y + 0.5, b.ty + b.h));
+    return Math.hypot(x + 0.5 - cx, y + 0.5 - cy);
+  }
+
+  /** Drop the deck that belongs to this span. A neighboring span keeps its own planks. */
   private collapseSpan(b: Building) {
+    const mine = (x: number, y: number) => {
+      const d = this.spanDist(b, x, y);
+      for (const o of this.buildings) {
+        if (o.id === b.id || o.kind !== "span" || o.hp <= 0 || o.rubble > 0) continue;
+        if (this.spanDist(o, x, y) + 0.2 < d) return false;
+      }
+      return true;
+    };
     const seen = new Uint8Array(this.gw * this.gh);
     const stack: number[] = [];
     const seed = (x: number, y: number) => {
       if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) return;
       const i = y * this.gw + x;
       if (seen[i] || this.terrain[i] !== TILE_BRIDGE) return;
+      if (!mine(x, y)) return;
       seen[i] = 1;
       stack.push(i);
     };
@@ -3044,6 +3137,14 @@ export class Sim {
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) seed(x + dx, y + dy);
       }
+    }
+    for (const u of this.units) {
+      if (u.hp <= 0) continue;
+      if (this.routeBroken(u)) {
+        u.path = [];
+        u.repath = 0;
+      }
+      this.stepOffWreck(u);
     }
   }
 
@@ -3076,6 +3177,10 @@ export class Sim {
   ): { steps: { tx: number; ty: number; ok: boolean; reason: string }[]; placed: number } {
     const def = BUILDINGS[kind];
     const steps: { tx: number; ty: number; ok: boolean; reason: string }[] = [];
+    if (!this.hasYard(team)) {
+      for (const t of tiles) steps.push({ tx: t.tx, ty: t.ty, ok: false, reason: "Needs a yard" });
+      return { steps, placed: 0 };
+    }
     const virtual = new Set<number>();
     let credits = this.credits[team];
     let placed = 0;
@@ -3256,12 +3361,19 @@ export class Sim {
       b.collapse = 0;
       b.hp = 0;
       b.rubble = 9999;
-      this.clearOcc(b);
+      b.block = 6;
     }
   }
 
   private tickRubble(dt: number) {
     for (const b of this.buildings) {
+      if (b.block > 0) {
+        b.block -= dt;
+        if (b.block <= 0) {
+          b.block = 0;
+          if (b.hp <= 0) this.clearOcc(b);
+        }
+      }
       if (b.rubble <= 0 || b.rubble > 100 || b.hp <= 0 || b.kind === "span") continue;
       b.rubble -= dt;
       if (b.rubble <= 0) {
@@ -3435,6 +3547,9 @@ export class Sim {
     if (u.capture < 3) return;
     b.team = u.team;
     b.neutral = false;
+    b.hp = b.maxHp;
+    b.mending = false;
+    b.block = 0;
     this.say(u.team === 0 ? "Building captured" : `Lost ${b.name}`, "cap", 0.4);
     u.hp = 0;
     this.statLost[u.team] = (this.statLost[u.team] ?? 0) + 1;
@@ -3522,6 +3637,23 @@ export class Sim {
     if (t === TILE_ROUGH || t === TILE_VALLEY) return 1.35;
     if (t === TILE_SHALLOW) return 1.5;
     return 1;
+  }
+
+  /** Bots mend at their own camp. Players still heal only from a field-repair crate. */
+  private tickBaseHeal(dt: number) {
+    for (let t = 1; t <= this.opponents; t++) {
+      const team = t as Team;
+      if (!this.cpu[team]) continue;
+      const home = this.starts.slots[team];
+      if (!home) continue;
+      for (const u of this.units) {
+        if (u.team !== team || u.hp <= 0 || u.hp >= u.maxHp || u.aboard) continue;
+        if (u.order.t === "attack") continue;
+        if (this.time < u.aggroUntil) continue;
+        if (Math.hypot(u.x - home.x, u.y - home.y) > 8) continue;
+        u.hp = Math.min(u.maxHp, u.hp + u.maxHp * 0.07 * dt);
+      }
+    }
   }
 
   private tickMend(dt: number) {
@@ -3811,6 +3943,7 @@ export class Sim {
 
   private checkEnd() {
     if (this.outcome !== "playing") return;
+    this.noteLastBuilding();
     for (let t = 0; t <= this.opponents; t++) {
       const team = t as Team;
       if (!this.eliminated[team] && this.campDown(team)) this.eliminate(team);
@@ -3825,14 +3958,14 @@ export class Sim {
       const won = side === mine && sides.size === 1;
       this.finish(
         won ? "win" : "lose",
-        won ? "Enemy Construction Yard destroyed" : "Construction Yard lost and no MCV remains",
+        won ? "Enemy forces destroyed" : "No buildings or units remain",
       );
       return;
     }
     if (this.mode === "survive" && this.time >= this.surviveFor) {
       const mine = this.alliance[0] ?? 0;
       const up = [...sides].some((side) => side === mine);
-      this.finish(up ? "win" : "lose", up ? "Held the field" : "Construction Yard lost and no MCV remains");
+      this.finish(up ? "win" : "lose", up ? "Held the field" : "No buildings or units remain");
       return;
     }
     if (this.mode === "destroy" && this.difficulty === "hard" && this.time >= HARD_CAP_SECS) {
@@ -3862,14 +3995,47 @@ export class Sim {
     }
   }
 
-  /** No yard and no MCV. Seat 0 falls at once so a 1v1 loss still lands on the next tick. */
+  /** A completed Construction Yard. Without one, that side cannot place buildings. */
+  private hasYard(team: Team): boolean {
+    return this.buildings.some(
+      (b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0 && b.rubble <= 0 && b.collapse <= 0,
+    );
+  }
+
+  /** Walls, bridges, and rubble do not keep a side alive. */
+  private realBuildings(team: Team): number {
+    let n = 0;
+    for (const b of this.buildings) {
+      if (b.team !== team || b.neutral) continue;
+      if (b.hp <= 0 || b.rubble > 0 || b.collapse > 0) continue;
+      if (isFence(b.kind) || b.kind === "span") continue;
+      n++;
+    }
+    return n;
+  }
+
+  private noteLastBuilding() {
+    for (let t = 0; t <= this.opponents; t++) {
+      const team = t as Team;
+      if (this.eliminated[team]) continue;
+      const n = this.realBuildings(team);
+      if (n === 1) {
+        if (!this.lastOne[team]) {
+          this.lastOne[team] = true;
+          if (team === this.ear) this.say("Last building!", "lastb", 6);
+        }
+      } else if (n > 1) {
+        this.lastOne[team] = false;
+      }
+    }
+  }
+
+  /** Eliminated only when nothing real is left: no buildings and no live units. */
   private campDown(team: Team): boolean {
     if (this.eliminated[team]) return true;
-    const yard = this.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0);
-    const mcv = this.units.some((u) => u.team === team && u.kind === "mcv" && u.hp > 0);
-    if (yard || mcv) return false;
-    if (team === 0 || this.hadYard[team]) return true;
-    return this.time > 0.4;
+    if (this.realBuildings(team) > 0) return false;
+    if (this.units.some((u) => u.team === team && u.hp > 0)) return false;
+    return true;
   }
 
   private finish(outcome: "win" | "lose", reason: string) {
@@ -4070,6 +4236,7 @@ export class Sim {
       vsAir: def.vsAir ?? 0,
       open: kind === "gate",
       rubble: 0,
+      block: 0,
       hit: 0,
       shown: 0,
       mending: false,
@@ -4499,6 +4666,33 @@ export class Sim {
           bestD = d;
           best = { x, y };
         }
+      }
+    }
+    return best;
+  }
+
+  /** Closest hostile unit or hall inside the leash. Fences and far targets do not pull an attack-move off its path. */
+  private nearestOnPath(team: Team, x: number, y: number, radius: number, hitsAir: boolean): Target | null {
+    let best: Target | null = null;
+    let bestD = radius;
+    for (const u of this.units) {
+      if (this.allied(u.team, team) || u.hp <= 0 || u.aboard) continue;
+      if (u.loco === "air" && !hitsAir) continue;
+      if (!this.visibleUnit(team, u)) continue;
+      const d = Math.hypot(u.x - x, u.y - y);
+      if (d < bestD) {
+        bestD = d;
+        best = { kind: "unit", u };
+      }
+    }
+    for (const b of this.buildings) {
+      if (this.allied(b.team, team) || b.neutral || b.hp <= 0 || b.rubble > 0) continue;
+      if (isFence(b.kind) || b.kind === "span") continue;
+      if (!this.buildingVisible(team, b)) continue;
+      const d = distPointToRect(x, y, b);
+      if (d < bestD) {
+        bestD = d;
+        best = { kind: "building", b };
       }
     }
     return best;
@@ -4959,8 +5153,61 @@ export class Sim {
     }
   }
 
+  private pushFx(f: Fx) {
+    this.fx.push(f);
+    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
+  }
+
+  private muzzle(x: number, y: number, x2: number, y2: number) {
+    this.pushFx({
+      kind: "muzzle",
+      x,
+      y,
+      x2,
+      y2,
+      ttl: 0.1,
+      max: 0.1,
+      color: "#fff6d2",
+      r: 12,
+    });
+  }
+
+  private flashAt(x: number, y: number) {
+    this.pushFx({
+      kind: "flash",
+      x,
+      y,
+      x2: x,
+      y2: y,
+      ttl: 0.14,
+      max: 0.14,
+      color: "#ffffff",
+      r: 18,
+    });
+  }
+
+  /** Small rising number. Skipped when it would crowd a phone, and still under the 80 effect cap. */
+  private floatDmg(x: number, y: number, dmg: number) {
+    if (dmg < 8) return;
+    let n = 0;
+    for (const f of this.fx) if (f.kind === "num") n++;
+    if (n >= 8) return;
+    this.pushFx({
+      kind: "num",
+      x,
+      y,
+      x2: 0,
+      y2: 0,
+      ttl: 0.7,
+      max: 0.7,
+      color: "#fff6e4",
+      r: 13,
+      n: Math.max(1, Math.round(dmg)),
+    });
+  }
+
   private beam(x: number, y: number, x2: number, y2: number, team: Team) {
-    this.fx.push({
+    this.pushFx({
       kind: "beam",
       x,
       y,
@@ -4971,22 +5218,20 @@ export class Sim {
       color: team === 0 ? "#f2e2b0" : "#ffb089",
       r: 1,
     });
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   private boom(x: number, y: number, r: number) {
-    this.fx.push({
+    this.pushFx({
       kind: "boom",
       x,
       y,
       x2: x,
       y2: y,
-      ttl: 0.5,
-      max: 0.5,
+      ttl: 0.7,
+      max: 0.7,
       color: "#e7c27a",
       r,
     });
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   /** Fixed angles so debris does not touch the match seed. */
@@ -4994,19 +5239,18 @@ export class Sim {
     const count = Math.max(3, Math.min(7, n));
     for (let i = 0; i < count; i++) {
       const a = (i / count) * Math.PI * 2 + 0.4;
-      this.fx.push({
+      this.pushFx({
         kind: "debris",
         x,
         y,
-        x2: Math.cos(a) * 1.1,
-        y2: Math.sin(a) * 0.7,
-        ttl: 0.65,
-        max: 0.65,
+        x2: Math.cos(a) * 1.45,
+        y2: Math.sin(a) * 0.9,
+        ttl: 0.7,
+        max: 0.7,
         color: i % 2 ? "#6a5344" : "#c6a56a",
         r: 0.1,
       });
     }
-    if (this.fx.length > 80) this.fx.splice(0, this.fx.length - 80);
   }
 
   private decayFx(dt: number) {

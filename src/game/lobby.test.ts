@@ -12,7 +12,9 @@ import {
   clampSetup,
   chooseOpponents,
   DEFAULT_SETUP,
+  RULES_KEY,
   listMyMaps,
+  loadSetup,
   lobbyBlock,
   LOBBY_MAPS,
   maxOpponents,
@@ -358,13 +360,47 @@ test("four factions keep their colors, rosters, and spare seats", () => {
   assert.equal(sim.factionOf(1), "syndicate");
   assert.equal(sim.factionOf(2), "steel");
   assert.equal(sim.factionOf(3), "prism");
-  assert.equal(sim.seatColor(0), "#2F7DF6");
-  assert.equal(sim.seatColor(1), "#E5483B");
-  assert.equal(sim.seatColor(2), "#F27A30");
-  assert.equal(sim.seatColor(3), "#3FBF5A");
+  assert.equal(sim.seatColor(0), "#2EC4F0");
+  assert.equal(sim.seatColor(1), "#FF7A1A");
+  assert.equal(sim.seatColor(2), "#9B5CFF");
+  assert.equal(sim.seatColor(3), "#F2D02E");
+  assert.equal(sim.seatShape(0), "circle");
+  assert.equal(sim.seatShape(1), "triangle");
+  assert.equal(sim.seatShape(2), "square");
+  assert.equal(sim.seatShape(3), "diamond");
   const teams = new Sim({ mapId: "basin", faction: "concord", enemy: "syndicate", opponents: 3, teams: "tvt", mode: "destroy", fog: false });
-  assert.equal(teams.seatColor(0), "#2F7DF6");
-  assert.equal(teams.seatColor(2), "#3FBF5A");
-  assert.equal(teams.seatColor(1), "#E5483B");
-  assert.equal(teams.seatColor(3), "#F27A30");
+  assert.equal(teams.seatColor(0), "#2EC4F0");
+  assert.equal(teams.seatColor(1), "#FF7A1A");
+  assert.equal(teams.seatColor(2), "#9B5CFF");
+  assert.equal(teams.seatColor(3), "#F2D02E");
+});
+
+test("loading viridite-skirmish-rules always starts every bot at Normal", () => {
+  const mem = new Map<string, string>();
+  const store = {
+    getItem: (key: string) => mem.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      mem.set(key, value);
+    },
+    removeItem: (key: string) => {
+      mem.delete(key);
+    },
+    clear: () => mem.clear(),
+    key: () => null,
+    length: 0,
+  };
+  const prev = globalThis.localStorage;
+  globalThis.localStorage = store as unknown as Storage;
+  try {
+    localStorage.setItem(
+      RULES_KEY,
+      JSON.stringify({ ...DEFAULT_SETUP, difficulty: "easy", skills: ["easy", "hard", "easy"] }),
+    );
+    const loaded = loadSetup();
+    assert.equal(loaded?.difficulty, "normal");
+    assert.deepEqual(loaded?.skills, ["normal", "normal", "normal"]);
+  } finally {
+    if (prev) globalThis.localStorage = prev;
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  }
 });

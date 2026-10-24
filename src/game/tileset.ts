@@ -495,6 +495,30 @@ function clampByte(n: number): number {
   return n < 0 ? 0 : n > 255 ? 255 : n | 0;
 }
 
+/**
+ * A real field has land or water and a spread of brightness.
+ * A lost WebGL sheet is one dark fill (navy or black) and fails this.
+ */
+export function terrainFieldAlive(rgb: ArrayLike<number>): boolean {
+  const n = Math.floor(rgb.length / 3);
+  if (n < 16) return false;
+  let minL = 255;
+  let maxL = 0;
+  let land = 0;
+  let water = 0;
+  for (let i = 0; i < n; i++) {
+    const r = rgb[i * 3] ?? 0;
+    const g = rgb[i * 3 + 1] ?? 0;
+    const b = rgb[i * 3 + 2] ?? 0;
+    const l = 0.3 * r + 0.5 * g + 0.2 * b;
+    if (l < minL) minL = l;
+    if (l > maxL) maxL = l;
+    if (g > r + 8 && g > 45) land++;
+    if (b > r + 10 && b > g && b > 40) water++;
+  }
+  return maxL - minL > 12 && (land > n * 0.05 || water > n * 0.05);
+}
+
 /** Height-shaded field. One surface, lit from the northwest. Used by the match bake. */
 export function writeTerrain(
   pixels: Uint8ClampedArray,
@@ -796,6 +820,7 @@ export function paintWaterSheen(
   }
 }
 
+/** One tile of a deposit. Crystals pack into an irregular cluster and spill past the cell, so the field is not a grid. */
 export function paintOre(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -804,6 +829,8 @@ export function paintOre(
   spent: boolean,
   time: number,
   spark = false,
+  around = 4,
+  _edge = 0,
 ) {
   if (spent || amount <= 0) {
     if (!spent) return;
@@ -812,36 +839,63 @@ export function paintOre(
     ctx.fillRect(x + 0.55, y + 0.7, 0.14, 0.07);
     return;
   }
-  const fill = Math.max(0.18, Math.min(1, amount / 1400));
-  const n = 2 + ((hash(x + 3, y + 1) * 3) | 0);
-  const bob = Math.sin(time * 2 + x + y) * 0.015;
+  const fill = Math.max(0.55, Math.min(1, amount / 1200));
+  const gx = x + 0.42 + (hash(x * 3, y + 2) - 0.5) * 0.55;
+  const gy = y + 0.48 + (hash(x + 5, y * 2) - 0.5) * 0.4;
+  const reach = 0.72 + (around >= 4 ? 0.28 : 0);
+  const glow = ctx.createRadialGradient(gx, gy, 0.04, gx, gy, reach);
+  glow.addColorStop(0, `rgba(255, 214, 140, ${0.42 + fill * 0.28})`);
+  glow.addColorStop(0.42, `rgba(232, 122, 36, ${0.22 + fill * 0.16})`);
+  glow.addColorStop(1, "rgba(232, 122, 36, 0)");
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(gx, gy, reach, 0, Math.PI * 2);
+  ctx.fill();
+  const n = around >= 6 ? 6 : around >= 3 ? 5 : 3;
+  const bright = ["#ffe2a4", "#ffb03a", "#f08428", "#ffd27a"];
+  const deep = ["#c45e16", "#a84812", "#e07020", "#d47828"];
   for (let i = 0; i < n; i++) {
     const hx = hash(x * 5 + i * 13, y * 3 + 4);
-    const hy = hash(x + i * 7, y * 9 + 2);
-    if (hx < 0.18) continue;
-    const px = x + 0.18 + hx * 0.64;
-    const py = y + 0.22 + hy * 0.52 + bob;
-    const s = (0.07 + fill * 0.13) * (0.65 + hy * 0.7);
-    const rot = hash(x + i, y + 11) * Math.PI;
+    const hy = hash(x + i * 9, y * 8 + 2);
+    const px = x - 0.22 + hx * 1.4;
+    const py = y - 0.16 + hy * 1.15 + Math.sin(time * 1.6 + x + y + i) * 0.01;
+    const s = (around >= 4 ? 0.2 : 0.16) + fill * 0.08 + hash(x + i, y + 11) * 0.06;
+    const rot = (hash(x + i * 4, y + 9) - 0.5) * 2.2;
     ctx.save();
     ctx.translate(px, py);
     ctx.rotate(rot);
-    ctx.fillStyle = fill > 0.7 ? "#b7f0c4" : fill > 0.4 ? "#2f9a52" : "#1c6b38";
     ctx.beginPath();
-    ctx.moveTo(0, -s * 1.35);
-    ctx.lineTo(s * 0.42, -s * 0.15);
-    ctx.lineTo(s * 0.22, s);
-    ctx.lineTo(-s * 0.38, s * 0.45);
+    if (hash(x + i, y * 2) > 0.5) {
+      ctx.moveTo(0, -s * 1.25);
+      ctx.lineTo(s * 0.62, -s * 0.1);
+      ctx.lineTo(s * 0.22, s * 0.95);
+      ctx.lineTo(-s * 0.48, s * 0.42);
+      ctx.lineTo(-s * 0.7, -s * 0.22);
+    } else {
+      ctx.moveTo(-s * 0.15, -s * 1.05);
+      ctx.lineTo(s * 0.9, -s * 0.2);
+      ctx.lineTo(s * 0.4, s * 0.85);
+      ctx.lineTo(-s * 0.55, s * 0.55);
+      ctx.lineTo(-s * 0.85, -s * 0.05);
+    }
+    ctx.closePath();
+    ctx.fillStyle = i % 2 === 0 ? bright[i % bright.length]! : deep[i % deep.length]!;
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 248, 220, 0.9)";
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.08, -s * 0.72);
+    ctx.lineTo(s * 0.18, -s * 0.28);
+    ctx.lineTo(-s * 0.1, -s * 0.12);
     ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = "rgba(230, 255, 236, 0.55)";
-    ctx.fillRect(-s * 0.08, -s * 0.7, s * 0.12, s * 0.28);
     ctx.restore();
   }
-  if (spark) {
-    const glint = (Math.sin(time * 9 + x * 2 + y) + 1) * 0.5;
-    ctx.fillStyle = `rgba(255, 255, 240, ${0.35 + glint * 0.55})`;
-    ctx.fillRect(x + 0.32 + glint * 0.2, y + 0.28, 0.05, 0.05);
+  if (spark || hash(x * 11 + 2, y * 7 + 5) > 0.72) {
+    const glint = (Math.sin(time * 5 + x * 2 + y) + 1) * 0.5;
+    ctx.fillStyle = `rgba(255, 250, 230, ${0.35 + glint * 0.55})`;
+    ctx.beginPath();
+    ctx.arc(gx + 0.08, gy - 0.1, 0.045 + glint * 0.02, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 

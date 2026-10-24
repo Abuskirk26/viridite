@@ -41,11 +41,18 @@ import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, un
 import {
   BUILDINGS,
   BUILD_ORDER,
+  CP_MAX,
+  HQ_COST,
+  HQ_TIME,
+  airTier,
+  buildClock,
+  supplyShare,
   FACTION_NAME,
   SEAT_NAME,
   SURVIVE_SECONDS,
   commandCost,
   isFence,
+  matchupTag,
   resolveBuilding,
   resolveUnit,
   trainedList,
@@ -81,6 +88,7 @@ import { ensureIso, iso } from "@/game/iso";
 import { SheetBody, SheetHead } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
+import { TeamPip } from "@/components/TeamPip";
 import { SkirmishLobby } from "@/components/SkirmishLobby";
 import { doctrineOf, packById, type SheetTab } from "@/game/doctrine";
 import { MapEditor } from "@/components/MapEditor";
@@ -90,7 +98,7 @@ import { lobbySize, offersNavy } from "@/game/editor";
 import { NetPlay, parseRoomCode } from "@/game/netplay";
 import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
-import { clampCamera, minimapHit, openingZoom, screenToWorld, seekZoom, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
+import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 
 const SAVE_KEY = "viridite-last-match";
 
@@ -173,8 +181,9 @@ function WarStrip({
   const worksWait = !worksOn && sim.worksCd[team]! > 0;
   const marchWait = !marchOn && sim.marchCd[team]! > 0;
   const raising = sim.commandLeft[team]! > 0;
-  const maxed = sim.commandLv[team]! >= 3;
-  const raiseCost = 600 + (sim.commandLv[team] ?? 0) * 450;
+  const lv = sim.commandLv[team] ?? 0;
+  const maxed = lv >= CP_MAX;
+  const raiseCost = HQ_COST[lv] ?? 0;
   const h = compact ? "h-8" : "h-11";
   return (
     <div
@@ -325,7 +334,7 @@ function hintFor(sim: Sim, team: Team = 0): string {
   const done = (k: BuildingId) => sim.buildings.some((b) => b.team === team && b.kind === k && b.complete && b.hp > 0);
   if (!yard && mcv) return "Deploy the MCV a few tiles toward the center. The yard is your headquarters.";
   if (!yard) return "Yard lost. Train an MCV at the War Factory, then deploy it.";
-  if (!has("power")) return "Power Plant first. Low power stops supply income and shuts the base down.";
+  if (!has("power")) return "Power Plant first. Low power slows production, turret fire, and supply income.";
   if (!done("power")) return "Plant spinning up. Supply Centers wait on power.";
   if (!has("supply")) return "Build a Supply Center. It drips war material every second. Two of them win the opening.";
   if (!done("supply")) return "Supply Center rising. Hit Works to finish the opening faster.";
@@ -378,6 +387,7 @@ export function GameScreen() {
   const [portrait, setPortrait] = useState(false);
   const [phone, setPhone] = useState(false);
   const [short, setShort] = useState(false);
+  const [hostBar, setHostBar] = useState(0);
   const [trayUp, setTrayUp] = useState(false);
   const [hasSave, setHasSave] = useState(false);
   const [muted, setMutedUi] = useState(() => isMuted());
@@ -467,6 +477,13 @@ export function GameScreen() {
   }, [arming, strike]);
 
   useEffect(() => {
+    if (phase !== "play") return;
+    const blockMenu = (e: Event) => e.preventDefault();
+    window.addEventListener("contextmenu", blockMenu, true);
+    return () => window.removeEventListener("contextmenu", blockMenu, true);
+  }, [phase]);
+
+  useEffect(() => {
     if (sel.length > 0 || selB != null || placing) setTrayUp(false);
   }, [sel, selB, placing]);
 
@@ -501,6 +518,18 @@ export function GameScreen() {
       setPortrait(h > w + 40);
       setPhone(Math.min(w, h) < 520 || w < 800);
       setShort(h < 500);
+      let bar = 0;
+      const root = document.querySelector("[data-testid='game-root']");
+      for (const el of Array.from(document.body.children)) {
+        if (!(el instanceof HTMLElement)) continue;
+        if (root && (el === root || el.contains(root))) continue;
+        const pos = getComputedStyle(el).position;
+        if (pos !== "fixed" && pos !== "sticky") continue;
+        const r = el.getBoundingClientRect();
+        if (r.top > 4 || r.height < 8 || r.height > 96 || r.width < w * 0.5) continue;
+        bar = Math.max(bar, Math.round(r.bottom));
+      }
+      setHostBar((prev) => (prev === bar ? prev : bar));
     };
     onResize();
     window.addEventListener("resize", onResize);
@@ -920,7 +949,7 @@ export function GameScreen() {
         wallRun = tiles.length ? sim.previewFence(me, kind, tiles) : null;
       }
       const alpha = pausedRef.current ? 1 : Math.max(0, Math.min(1, acc / 0.1));
-      const sheetKey = `b31:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
+      const sheetKey = `b32:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
       const had = sheetRef.current?.key === sheetKey;
       let pack = sheetRef.current;
       const big = Math.max(sim.gw, sim.gh);
@@ -1104,6 +1133,8 @@ export function GameScreen() {
       },
       onBox: (box) => {
         const sim = simRef.current;
+        setSelecting(false);
+        selectRef.current = false;
         if (!sim || pausedRef.current || placingRef.current || armRef.current) return;
         const a = screenToWorld(camRef.current, box.x0, box.y0, viewRef.current);
         const b = screenToWorld(camRef.current, box.x1, box.y1, viewRef.current);
@@ -1119,6 +1150,8 @@ export function GameScreen() {
       },
       onTap: (sx, sy, isDouble, shift) => {
         const sim = simRef.current;
+        setSelecting(false);
+        selectRef.current = false;
         if (!sim || pausedRef.current || phaseRef.current !== "play") return;
         unlockAudio();
         const world = screenToWorld(camRef.current, sx, sy, viewRef.current);
@@ -1400,6 +1433,8 @@ export function GameScreen() {
   const orderScatter = () => {
     const ids = sel.slice();
     act("scatter", { ids }, () => sim?.issueScatter(ids));
+    setSelecting(false);
+    selectRef.current = false;
     setArming(false);
   };
   const orderHarvest = () => {
@@ -1522,16 +1557,6 @@ export function GameScreen() {
     setProdTab("build");
   };
 
-  const nudgeZoom = (factor: number) => {
-    const sim = simRef.current;
-    const view = viewRef.current;
-    if (!sim || view.w < 8 || view.h < 8) return;
-    const cam = camRef.current;
-    seekZoom(cam, view.w / 2, view.h / 2, view, factor, sim.gw, sim.gh, wideField(sim.mapSize));
-    cam.vx = 0;
-    cam.vy = 0;
-  };
-
   const land = short && !portrait;
   const trainHallOnly = (() => {
     if (!sim || placing || buildOpen || sel.length > 0 || selB == null) return false;
@@ -1542,9 +1567,10 @@ export function GameScreen() {
   return (
     <div
       className="fixed inset-x-0 z-0 flex flex-col bg-field text-ink"
+      data-testid="game-root"
       style={{
-        top: "var(--grok-banner-h, var(--app-top, 0px))",
-        height: "calc(var(--app-h, 100dvh) - var(--grok-banner-h, 0px))",
+        top: hostBar,
+        height: `calc(var(--app-h, 100dvh) - ${hostBar}px)`,
       }}
     >
       {soundGate && !muted && (
@@ -1634,12 +1660,12 @@ export function GameScreen() {
         sim && (
           <div className="flex min-h-0 flex-1 flex-col" style={{ WebkitTouchCallout: "none", userSelect: "none" }} onContextMenu={(e) => e.preventDefault()} data-testid="battle-shell">
             <header
-              className={`flex items-center gap-1 bg-field/90 px-1 ${
+              className={`flex items-start gap-1 bg-field/90 px-1 ${
                 portrait
                   ? "h-11 shrink-0"
                   : short
-                    ? "z-30 h-8 shrink-0 overflow-x-auto"
-                    : "absolute top-0 left-0 z-30 h-8 overflow-x-auto"
+                    ? "z-30 h-8 shrink-0 overflow-visible"
+                    : "absolute top-0 left-0 z-30 h-8 overflow-visible"
               }`}
               style={portrait || short ? undefined : { right: "7.5rem" }}
               data-testid="resource-bar"
@@ -1649,16 +1675,22 @@ export function GameScreen() {
                 value={String(Math.floor(sim.credits[viewer] ?? 0))}
                 tone="text-gold"
                 compact={!portrait}
+                minW={portrait ? "6.5rem" : "5.75rem"}
               >
                 <Box className="size-3.5 text-gold" />
               </ResourcePill>
               <PowerPill sim={sim} team={viewer} compact={!portrait} />
-              {short && !portrait && (
+              {!portrait && (
                 <ResourcePill
                   label="Command points"
                   value={`${Math.floor(sim.commandLoad(viewer as 0, false))}/${sim.commandCap(viewer as 0)}`}
                   tone="text-ink"
                   compact
+                  minW="5.5rem"
+                  bar={{
+                    pct: sim.commandLoad(viewer as 0, false) / Math.max(1, sim.commandCap(viewer as 0)),
+                    hot: sim.commandLoad(viewer as 0, false) >= sim.commandCap(viewer as 0),
+                  }}
                 >
                   <span className="font-display text-xs text-brass">CP</span>
                 </ResourcePill>
@@ -1668,17 +1700,11 @@ export function GameScreen() {
                 value={sim.mode === "survive" ? clock(SURVIVE_SECONDS - sim.time) : clock(sim.time)}
                 tone="text-crystal"
                 compact={!portrait}
+                minW={portrait ? "5rem" : "4.5rem"}
               >
                 <Timer className="size-3.5 text-crystal" />
               </ResourcePill>
-              <span
-                data-testid="pace-label"
-                className="shrink-0 font-display text-[13px] leading-none tracking-wide text-brass"
-              >
-                {climbLabel(sim)}
-              </span>
               <div className="ml-auto flex shrink-0 items-center gap-1">
-                <ZoomControl compact onIn={() => nudgeZoom(1.25)} onOut={() => nudgeZoom(0.8)} />
                 {online ? null : <SpeedControl speed={speed} onChange={setSpeed} compact />}
                 <IconButton
                   label={muted ? "Unmute" : "Mute"}
@@ -1721,14 +1747,57 @@ export function GameScreen() {
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
               <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
+              <div
+                data-testid="alert-lane"
+                className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
+              >
+              {sim.alarm[viewer] && sim.time < sim.alarm[viewer]!.until && phase === "play" && (
+                <button
+                  type="button"
+                  data-testid="base-alarm"
+                  className="pulse pointer-events-auto flex h-11 items-center steel px-3 font-display text-xs uppercase tracking-wide text-danger"
+                  onClick={() => {
+                    const at = sim.alarm[viewer];
+                    if (!at) return;
+                    camRef.current.x = at.x;
+                    camRef.current.y = at.y;
+                    camRef.current.vx = 0;
+                    camRef.current.vy = 0;
+                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
+                    setFrame((n) => n + 1);
+                  }}
+                >
+                  Our base is under attack
+                </button>
+              )}
               {sim.powerOf(viewer as 0).low && (
                 <div
                   data-testid="low-power"
-                  className="pulse pointer-events-none absolute top-1 left-1 z-20 flex h-11 max-w-[58%] items-center bg-danger px-2 font-display text-xs uppercase tracking-wide text-ink"
+                  className="pulse flex h-11 items-center bg-danger px-2 font-display text-xs uppercase tracking-wide text-ink"
                 >
                   Low power — supply stopped
                 </div>
               )}
+              {phase === "play" && sim.time < DEPLOY_SECS && (
+                <p
+                  data-testid="deploy-countdown"
+                  className="border border-brass-dim bg-field/92 px-3 py-1 font-display text-sm tracking-wide text-gold"
+                >
+                  Deployment {clock(DEPLOY_SECS - sim.time)} — hold fire
+                </p>
+              )}
+              {setup.showAi && viewer === 0 && phase === "play" && sim && (
+                <p
+                  data-testid="ai-intent"
+                  className="steel-inset px-2 py-1 font-display text-xs uppercase tracking-wide text-gold"
+                >
+                  {Array.from({ length: sim.opponents }, (_, i) => i + 1)
+                    .filter((t) => sim.cpu[t])
+                    .map((t) => `${SEAT_NAME[t] ?? "AI"} ${sim.aiIntent[t] ?? "idle"}`)
+                    .join(" · ") || "AI idle"}
+                </p>
+              )}
+              </div>
               {land && buildOpen && phase === "play" && (
                 <BuildColumn
                   sim={sim}
@@ -1762,10 +1831,7 @@ export function GameScreen() {
                   raised={!portrait}
                   dock={land ? "bottom-2" : undefined}
                   onArmy={selectArmy}
-                  onBuild={() => {
-                    setBuildOpen((v) => !v);
-                    setProdTab("build");
-                  }}
+                  onBuild={openBuild}
                   onMove={() => {
                     selectRef.current = false;
                     armRef.current = false;
@@ -1787,46 +1853,6 @@ export function GameScreen() {
                     setSelecting(next);
                   }}
                 />
-              )}
-              {phase === "play" && sim.time < DEPLOY_SECS && (
-                <p
-                  data-testid="deploy-countdown"
-                  className={`pointer-events-none absolute left-2 z-20 border border-brass-dim bg-field/92 px-3 py-1 font-display text-sm tracking-wide text-gold ${land ? "top-1 max-w-[58%]" : "top-2"}`}
-                >
-                  Deployment {clock(DEPLOY_SECS - sim.time)} — hold fire
-                </p>
-              )}
-              {sim.alarm[viewer] && sim.time < sim.alarm[viewer]!.until && phase === "play" && (
-                <button
-                  type="button"
-                  data-testid="base-alarm"
-                  className={`pulse absolute left-2 z-20 flex h-11 max-w-[58%] items-center steel px-3 font-display text-xs uppercase tracking-wide text-danger ${
-                    land ? (sim.time < DEPLOY_SECS || sim.powerOf(viewer as 0).low ? "top-12" : "top-1") : "top-2"
-                  }`}
-                  onClick={() => {
-                    const at = sim.alarm[viewer];
-                    if (!at) return;
-                    camRef.current.x = at.x;
-                    camRef.current.y = at.y;
-                    camRef.current.vx = 0;
-                    camRef.current.vy = 0;
-                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
-                    setFrame((n) => n + 1);
-                  }}
-                >
-                  Our base is under attack
-                </button>
-              )}
-              {setup.showAi && viewer === 0 && phase === "play" && sim && (
-                <p
-                  data-testid="ai-intent"
-                  className="pointer-events-none absolute top-2 left-2 z-10 steel-inset px-2 py-1 font-display text-xs uppercase tracking-wide text-gold"
-                >
-                  {Array.from({ length: sim.opponents }, (_, i) => i + 1)
-                    .filter((t) => sim.cpu[t])
-                    .map((t) => `${SEAT_NAME[t] ?? "AI"} ${sim.aiIntent[t] ?? "idle"}`)
-                    .join(" · ") || "AI idle"}
-                </p>
               )}
               {stall && phase === "play" && (
                 <p className="pointer-events-none absolute top-2 right-2 steel-inset px-2 py-1 text-xs text-gold" data-testid="net-stall">
@@ -1900,6 +1926,9 @@ export function GameScreen() {
               {paused && phase === "play" && !pauseSheet && (
                 <Overlay title="Paused">
                   <PauseSound />
+                  <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
+                    Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
+                  </p>
                   <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
                     {botBrief(sim)}
                   </p>
@@ -2239,6 +2268,18 @@ export function GameScreen() {
   );
 }
 
+function nextSupplyPct(sim: Sim, team: number): number {
+  const placed = sim.buildings.filter((b) => b.team === team && b.kind === "supply" && b.hp > 0 && b.rubble <= 0 && !b.neutral).length;
+  return Math.round(supplyShare(placed) * 100);
+}
+
+function unmetNeed(sim: Sim, team: number, id: BuildingId): string | null {
+  const req = resolveBuilding(id, sim.factionOf(team as 0)).requires;
+  if (!req) return null;
+  const has = sim.buildings.some((b) => b.team === team && b.kind === req && b.complete && b.hp > 0 && b.rubble <= 0);
+  return has ? null : `Needs ${BUILDINGS[req].name}`;
+}
+
 function isTrainHall(kind: string | undefined): kind is TrainAt {
   return kind === "barracks" || kind === "factory" || kind === "dock" || kind === "helipad";
 }
@@ -2352,8 +2393,12 @@ function ProductionColumn({
           <div className="min-h-0 flex-1 overflow-y-auto p-0.5">
             {active === "build" ? (
               <div className="grid grid-cols-2 gap-0.5">
+                <div className="col-span-2">
+                  <HqCard sim={sim} team={team} />
+                </div>
                 {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
                   const def = BUILDINGS[id];
+                  const need = unmetNeed(sim, team, id);
                   const broke = sim.credits[team] < def.cost;
                   const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
                   const Icon = BUILD_ICON[id];
@@ -2362,16 +2407,19 @@ function ProductionColumn({
                       key={id}
                       type="button"
                       data-testid={`build-${id}`}
-                      onClick={() => onPlace(id)}
-                      className={`bevel-btn flex h-10 flex-col items-center justify-center px-0.5 ${broke || low ? "text-muted" : "text-ink"}`}
+                      aria-disabled={need ? true : undefined}
+                      onClick={() => {
+                        if (!need) onPlace(id);
+                      }}
+                      className={`bevel-btn flex min-h-11 flex-col items-center justify-center px-0.5 ${need || broke || low ? "text-muted" : "text-ink"}`}
                     >
-                      <span className="flex items-center gap-1 font-display text-[10px] uppercase">
+                      <span className="flex items-center gap-1 font-display text-[11px] uppercase">
                         <Icon className="size-3.5" />
                         {def.short}
                       </span>
-                      <span className="text-[10px] text-gold tabular-nums">
-                        {def.cost}
-                        {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
+                      <span className={`whitespace-normal text-center text-[11px] leading-tight ${need ? "normal-case text-muted" : "text-gold tabular-nums"}`}>
+                        {need ??
+                          `${def.cost} · ${buildClock(def.time)}${id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}${def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}`}
                       </span>
                     </button>
                   );
@@ -2396,7 +2444,6 @@ function ProductionColumn({
                       <X className="size-4" />
                     </BarButton>
                   )}
-                  <SellButton buildingId={selB} onConfirm={onSell} />
                 </div>
               </div>
             ) : (
@@ -2408,6 +2455,16 @@ function ProductionColumn({
               Cancel place
             </button>
           )}
+        </div>
+        <div className="shrink-0 border-t border-brass-dim p-1" data-testid="column-sell">
+          <SellButton
+            buildingId={selB}
+            disabled={(() => {
+              const b = selB != null ? sim.buildingById(selB) : undefined;
+              return !b || b.team !== team || b.rubble > 0 || !b.complete || b.kind === "span";
+            })()}
+            onConfirm={onSell}
+          />
         </div>
       </div>
     </aside>
@@ -2856,7 +2913,8 @@ function QueueStrip({ sim, team }: { sim: Sim; team: number }) {
         const plant = b.kind === "power" || b.kind === "advpower";
         const brown = !low ? 1 : plant ? 0.8 : 0.5;
         const works = sim.worksLeft[team]! > 0 ? 1.65 : 1;
-        const rate = !b.complete ? brown * 1.25 * works : brown * works;
+        const burned = b.complete && b.maxHp > 0 && b.hp / b.maxHp < 0.3 ? 0.55 : 1;
+        const rate = !b.complete ? brown * 1.25 * works : brown * works * burned;
         let label = b.name;
         let p = 0;
         if (!b.complete) {
@@ -2891,29 +2949,57 @@ function ResourcePill({
   tone,
   children,
   compact = false,
+  minW,
+  bar,
 }: {
   label: string;
   value: string;
   tone: string;
   children: ReactNode;
   compact?: boolean;
+  minW?: string;
+  bar?: { pct: number; hot: boolean; warn?: boolean };
 }) {
   return (
     <div
-      className={`flex min-w-0 items-center gap-1 border border-brass-dim bg-field ${compact ? "h-7 px-1" : "h-9 px-1.5"}`}
+      className={`flex shrink-0 flex-col justify-center border border-brass-dim bg-field ${compact ? "h-8 px-1.5" : "h-9 px-1.5"}`}
+      style={minW ? { minWidth: minW } : undefined}
       aria-label={label}
     >
-      {children}
-      <span className={`truncate font-display tabular-nums ${tone} text-xs`}>{value}</span>
+      <div className="flex items-center gap-1">
+        {children}
+        <span className={`whitespace-nowrap font-display tabular-nums ${tone} text-xs`}>{value}</span>
+      </div>
+      {bar ? (
+        <div className="mt-0.5 h-0.5 w-full bg-well" aria-hidden>
+          <div
+            className={`h-full ${bar.hot ? "bg-danger" : bar.warn ? "bg-[#c9842a]" : "bg-crystal"}`}
+            style={{ width: `${Math.max(0, Math.min(100, Math.round(bar.pct * 100)))}%` }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function PowerPill({ sim, team, compact = false }: { sim: Sim; team: number; compact?: boolean }) {
-  const p = sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0);
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const p = sim.powerOf(seat);
+  const factor = sim.powerFactor(seat);
+  const hot = factor < 0.67;
+  const warn = !hot && factor < 1;
+  const pct = p.supply <= 0 ? 1 : Math.min(1, p.use / Math.max(1, p.supply));
+  const tone = hot ? "text-danger" : warn ? "text-[#c9842a]" : "text-crystal";
   return (
-    <ResourcePill label="Power" value={`${p.supply}/${p.use}`} tone={p.low ? "text-danger" : "text-crystal"} compact={compact}>
-      <Zap className={`${compact ? "size-3" : "size-3.5"} ${p.low ? "text-danger" : "text-crystal"}`} />
+    <ResourcePill
+      label="Power"
+      value={`${p.supply}/${p.use}`}
+      tone={tone}
+      compact={compact}
+      minW={compact ? "6.5rem" : "7.25rem"}
+      bar={{ pct, hot, warn }}
+    >
+      <Zap className={`${compact ? "size-3" : "size-3.5"} ${tone}`} />
     </ResourcePill>
   );
 }
@@ -2923,6 +3009,33 @@ function CraneMark() {
     <svg viewBox="0 0 24 24" className="size-6" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
       <path d="M5 20h9M8 20V7M8 7h12M20 7v7M17 14h3" />
     </svg>
+  );
+}
+
+function HqCard({ sim, team, dock = false }: { sim: Sim; team: number; dock?: boolean }) {
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const lv = sim.commandLv[seat] ?? 0;
+  const yard = sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
+  if (!yard || lv >= CP_MAX) return null;
+  const cost = HQ_COST[lv] ?? 0;
+  const time = HQ_TIME[lv] ?? 0;
+  const raising = (sim.commandLeft[seat] ?? 0) > 0;
+  const broke = sim.credits[team] < cost;
+  const price = raising ? "Rising" : `${cost} · ${buildClock(time)}`;
+  return (
+    <button
+      type="button"
+      data-testid="build-hq"
+      onClick={() => sim.raiseCommand(seat)}
+      className={
+        dock
+          ? `bevel-btn flex min-h-11 w-16 shrink-0 flex-col items-center justify-center px-1 ${broke && !raising ? "text-muted" : "text-ink"}`
+          : `bevel-btn relative mb-1 flex min-h-11 w-full items-center justify-between gap-2 px-2 font-display text-xs uppercase ${broke && !raising ? "text-brass" : "text-ink"}`
+      }
+    >
+      <span className="font-display text-[11px] uppercase">HQ {lv + 2}</span>
+      <span className={`text-[11px] leading-tight tabular-nums ${broke && !raising ? "text-danger" : "text-gold"}`}>{price}</span>
+    </button>
   );
 }
 
@@ -2990,7 +3103,7 @@ function BuildColumn({
           const d = drag.current;
           d.active = false;
           d.swallow = true;
-          if (!d.moved && d.kind) onPlace(d.kind);
+          if (!d.moved && d.kind && !unmetNeed(sim, team, d.kind)) onPlace(d.kind);
         }}
         onPointerCancel={() => {
           drag.current.active = false;
@@ -2999,10 +3112,14 @@ function BuildColumn({
         {!yard && (
           <p className="px-1 py-2 text-[11px] text-muted">No Construction Yard.</p>
         )}
+        <HqCard sim={sim} team={team} />
         {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
           const def = BUILDINGS[id];
-          const broke = sim.credits[team] < def.cost;
-          const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
+          const need = unmetNeed(sim, team, id);
+          const broke = !need && sim.credits[team] < def.cost;
+          const low = !need && power.low && !isFence(id) && id !== "power" && id !== "advpower";
+          const site = sim.buildings.find((b) => b.team === team && b.kind === id && b.hp > 0 && !b.complete && b.rubble <= 0);
+          const prog = site && site.buildTotal > 0 ? 1 - site.buildLeft / site.buildTotal : 0;
           const Icon = BUILD_ICON[id];
           return (
             <button
@@ -3010,7 +3127,9 @@ function BuildColumn({
               type="button"
               data-testid={`build-${id}`}
               data-build={id}
+              aria-disabled={need ? true : undefined}
               onClick={() => {
+                if (need) return;
                 if (drag.current.swallow || drag.current.moved) {
                   drag.current.swallow = false;
                   drag.current.moved = false;
@@ -3018,11 +3137,26 @@ function BuildColumn({
                 }
                 onPlace(id);
               }}
-              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
+              className={`bevel-btn relative mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need ? "text-brass" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
             >
               <Icon className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 whitespace-normal text-left text-[11px] leading-tight">{def.short}</span>
-              <span className="shrink-0 text-[11px] tabular-nums text-gold">{def.cost}</span>
+              <span className="min-w-0 flex-1 text-left">
+                <span className="block whitespace-normal text-[11px] leading-tight">{def.short}</span>
+                {need ? <span className="block whitespace-normal text-[11px] leading-tight normal-case">{need}</span> : null}
+                {low ? <span className="block text-[11px] leading-tight text-brass normal-case">Low power</span> : null}
+              </span>
+              <span className={`shrink-0 text-right text-[11px] leading-tight tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
+                {def.cost}
+                <span className="block text-brass">
+                  {buildClock(def.time)}
+                  {id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}
+                </span>
+              </span>
+              {site ? (
+                <span className="pointer-events-none absolute right-1 bottom-1 left-1 h-1 bg-well">
+                  <span className="block h-full bg-crystal" style={{ width: `${Math.max(4, Math.floor(prog * 100))}%` }} />
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -3163,7 +3297,6 @@ function CommandBar({
   onRepair,
   onClear,
   onOpenBuild,
-  onSell,
   onToggleGate,
   onLoad,
   onUnload,
@@ -3333,9 +3466,6 @@ function CommandBar({
         <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
         </BarButton>
-        {building.team === team && (
-          <SellButton tile buildingId={building.id} onConfirm={onSell} />
-        )}
       </>
     );
   }
@@ -3358,9 +3488,6 @@ function CommandBar({
             <Wrench className="size-5" /> {building.mending ? "Stop" : "Repair"}
           </BarButton>
         )}
-        {!rubble && (
-          <SellButton tile buildingId={building.id} onConfirm={onSell} />
-        )}
         <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
         </BarButton>
@@ -3374,8 +3501,10 @@ function CommandBar({
 
   return (
     <>
+      <HqCard sim={sim} team={team} dock />
       {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
         const def = BUILDINGS[id];
+        const need = unmetNeed(sim, team, id);
         const broke = sim.credits[team] < def.cost;
         const low = sim.powerOf(team as 0).low && !isFence(id) && id !== "power" && id !== "advpower";
         const Icon = BUILD_ICON[id];
@@ -3384,17 +3513,22 @@ function CommandBar({
             key={id}
             type="button"
             data-testid={`build-${id}`}
-            onClick={() => onPlace(id)}
-            className={`bevel-btn flex h-16 w-16 shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${
-              broke || low ? "text-muted" : "text-ink"
+            aria-disabled={need ? true : undefined}
+            onClick={() => {
+              if (!need) onPlace(id);
+            }}
+            className={`bevel-btn flex min-h-11 w-16 shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${
+              need || broke || low ? "text-muted" : "text-ink"
             }`}
           >
             <Icon className="size-6" />
-            <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{def.short}</span>
-            <span className="text-xs text-gold tabular-nums">
-              {def.cost}
-              {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
-            </span>
+            <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{need ? need : def.short}</span>
+            {need ? null : (
+              <span className="text-center text-[11px] leading-tight text-gold tabular-nums">
+                {def.cost} · {buildClock(def.time)}
+                {id === "supply" ? ` · ${nextSupplyPct(sim, team)}%` : ""}
+              </span>
+            )}
           </button>
         );
       })}
@@ -3505,9 +3639,15 @@ function TrainButton({
   icons?: boolean;
 }) {
   const spec = resolveUnit(unitId, sim.factionOf(team as 0));
+  const tag = matchupTag(unitId);
   const need = unitRequires(unitId);
-  const unlocked = !need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
-  const afford = unlocked && sim.credits[team] >= spec.cost && building.queue.length < 5;
+  const seat = (team === 1 || team === 2 || team === 3 ? team : 0) as 0;
+  const needTier = airTier(unitId);
+  const hqLocked = needTier > 1 + (sim.commandLv[seat] ?? 0);
+  const unlocked = !hqLocked && (!need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0));
+  const broke = unlocked && sim.credits[team] < spec.cost;
+  const low = unlocked && sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0).low;
+  const afford = unlocked && !broke && building.queue.length < 5;
   const mark = UNIT_MARK[unitId];
   const queued = building.queue.filter((id) => id === unitId).length;
   const head = building.queue[0] === unitId;
@@ -3528,7 +3668,13 @@ function TrainButton({
       <button
         type="button"
         data-testid={`train-${unitId}`}
-        aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
+        aria-label={
+          hqLocked
+            ? `${spec.name}. HQ ${needTier}.`
+            : unlocked
+              ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command${tag ? `, ${tag.detail}` : ""}`
+              : `${spec.name}. Needs ${BUILDINGS[need!].name}.`
+        }
         disabled={!building.complete || !unlocked}
         onContextMenu={(e) => e.preventDefault()}
         style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "manipulation" }}
@@ -3582,21 +3728,27 @@ function TrainButton({
         {icons ? null : (
           <span className={`flex min-w-0 flex-col leading-none ${tight ? "items-start" : "items-center"}`}>
             <span className="whitespace-nowrap font-display text-[11px] uppercase">{spec.short}</span>
-            <span className="whitespace-nowrap text-[11px] tabular-nums text-gold">
-              {unlocked ? (
+            <span className={`whitespace-nowrap text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
+              {hqLocked ? (
+                `HQ ${needTier}`
+              ) : unlocked ? (
                 <>
                   {spec.cost}
                   <span className="text-brass"> · {commandCost(spec)}</span>
+                  {tag ? (
+                    <span className={tag.tone === "strong" ? "text-gold" : "text-brass"}>{` · ${tag.short}`}</span>
+                  ) : null}
+                  {low ? <span className="text-brass"> · low</span> : null}
                 </>
               ) : (
-                BUILDINGS[need!].short
+                `Needs ${BUILDINGS[need!].short}`
               )}
             </span>
           </span>
         )}
         {head && (
-          <span className="pointer-events-none absolute right-11 bottom-0 left-0 h-1 bg-well">
-            <span className="block h-full bg-crystal" style={{ width: `${Math.floor(p * 100)}%` }} />
+          <span className="pointer-events-none absolute right-11 bottom-0 left-0 h-1.5 bg-well">
+            <span className={`block h-full ${low ? "bg-danger" : "bg-crystal"}`} style={{ width: `${Math.floor(p * 100)}%` }} />
           </span>
         )}
       </button>
@@ -3810,7 +3962,7 @@ function IconButton({
       aria-label={label}
       data-testid={testId}
       onClick={onClick}
-      className={`bevel-btn flex items-center justify-center ${compact ? "size-8" : "size-11"}`}
+      className={`bevel-btn hud-hit flex items-center justify-center size-11`}
     >
       {children}
     </button>
@@ -3819,9 +3971,9 @@ function IconButton({
 
 function Overlay({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2" data-testid="match-end">
       <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
-        <h2 className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
+        <h2 data-testid="match-end-title" className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
     </div>
@@ -3869,7 +4021,7 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
             className={`mt-1 grid grid-cols-[1.5fr_0.7fr_0.8fr_0.8fr_0.55fr] items-center gap-x-1 border px-1 py-1.5 ${you ? "border-gold bg-field" : "border-brass-dim"}`}
           >
             <div className="flex min-w-0 items-center gap-1">
-              <span className="h-7 w-1 shrink-0" style={{ background: sim.seatColor(row.t) }} />
+              <TeamPip team={row.t} eliminated={!!sim.eliminated[row.t]} />
               {champ ? <Star className="size-3.5 shrink-0 text-gold" aria-label="Winner" /> : null}
               <span className="truncate font-display text-xs uppercase text-ink">{you ? "You" : (SEAT_NAME[row.t] ?? "Bot")}</span>
             </div>
@@ -3912,7 +4064,7 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
         data-testid="speed-down"
         disabled={i <= 0}
         onClick={() => onChange(SPEED_STEPS[Math.max(0, i - 1)])}
-        className={`flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`}
+        className={`hud-hit flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-11 w-11 text-base" : "h-11 w-11 text-xl"}`}
       >
         −
       </button>
@@ -3925,29 +4077,13 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
         data-testid="speed-up"
         disabled={i >= SPEED_STEPS.length - 1}
         onClick={() => onChange(SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, i + 1)])}
-        className={`flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`}
+        className={`hud-hit flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-11 w-11 text-base" : "h-11 w-11 text-xl"}`}
       >
         +
       </button>
     </div>
   );
 }
-
-function ZoomControl({ onIn, onOut, compact = false }: { onIn: () => void; onOut: () => void; compact?: boolean }) {
-  const btn = `flex items-center justify-center font-display text-ink ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`;
-  return (
-    <div className="steel-inset flex shrink-0 items-center" data-testid="zoom-controls">
-      <button type="button" aria-label="Zoom out" data-testid="zoom-out" onClick={onOut} className={btn}>
-        −
-      </button>
-      <span className={`whitespace-nowrap text-center font-display text-brass ${compact ? "px-0.5 text-[11px]" : "px-1 text-xs"}`}>Zoom</span>
-      <button type="button" aria-label="Zoom in" data-testid="zoom-in" onClick={onIn} className={btn}>
-        +
-      </button>
-    </div>
-  );
-}
-
 
 declare global {
   interface Window {

@@ -78,59 +78,62 @@ export type BuildingId =
 
 export type Armor = "infantry" | "vehicle" | "light" | "heavy" | "building";
 export type ShotKind = "hit" | "shell" | "rocket";
-/** What a weapon cares about. Infantry and buggies are light. A light tank is medium. A medium tank is heavy. */
-export type Plate = "light" | "medium" | "heavy" | "building";
-
-export function plateOf(kind: string, armor: Armor): Plate {
-  if (armor === "infantry") return "light";
-  if (armor === "heavy") return "heavy";
-  if (armor === "light") return "light";
-  if (kind === "scout" || kind === "razor") return "light";
-  if (kind === "tank" || kind === "scatter" || kind === "harvester" || kind === "mcv") return "medium";
-  if (armor === "vehicle") return "medium";
-  return "medium";
-}
+/** Three classes. Infantry and light vehicles share light. Tanks are armored. Halls are buildings. */
+export type ArmorClass = "light" | "armored" | "building";
+export type Plate = ArmorClass;
+export type WeaponFamily = "rifle" | "rocket" | "cannon" | "gun";
 
 /**
- * Extra multiplier on top of vsInf / vsVeh / vsBld.
- * Rifles chew light armor and bounce off heavy. Rockets want vehicles and buildings.
- * Artillery and bombers are the building breakers.
+ * One damage-vs-armor table. Applied on top of each weapon's vsInf / vsVeh / vsBld.
+ * Rifles bounce off tanks. Rockets punch tanks and halls. Cannons and artillery break halls.
  */
-export function counterMul(kind: string, plate: Plate): number {
-  const rifle =
-    kind === "rifle" ||
-    kind === "marksman" ||
-    kind === "wader" ||
-    kind === "vanguard" ||
-    kind === "scout" ||
-    kind === "apc" ||
-    kind === "gunboat";
-  const rocket = kind === "rocket" || kind === "missile" || kind === "attackheli";
-  const siege = kind === "artillery" || kind === "bomber";
-  if (plate === "building") {
-    if (siege) return 1.7;
-    if (rocket) return 1.45;
-    if (rifle) return 0.42;
-    return 1;
+export const ARMOR_MULT: Record<WeaponFamily, Record<ArmorClass, number>> = {
+  rifle: { light: 1.15, armored: 0.5, building: 0.45 },
+  rocket: { light: 0.85, armored: 1.45, building: 1.4 },
+  cannon: { light: 0.95, armored: 1.05, building: 1.65 },
+  gun: { light: 1, armored: 1, building: 1 },
+};
+
+const RIFLE_WEAPONS = new Set(["rifle", "marksman", "wader", "vanguard", "scout", "apc", "gunboat"]);
+const ROCKET_WEAPONS = new Set(["rocket", "missile", "attackheli"]);
+const CANNON_WEAPONS = new Set(["tank", "medium", "artillery", "bomber", "scatter", "frigate"]);
+const LIGHT_CHASSIS = new Set(["scout", "razor", "apc", "gunboat", "artillery"]);
+
+export function weaponFamily(kind: string): WeaponFamily {
+  if (RIFLE_WEAPONS.has(kind)) return "rifle";
+  if (ROCKET_WEAPONS.has(kind)) return "rocket";
+  if (CANNON_WEAPONS.has(kind)) return "cannon";
+  return "gun";
+}
+
+export function plateOf(kind: string, armor: Armor): ArmorClass {
+  if (armor === "infantry" || armor === "light") return "light";
+  if (LIGHT_CHASSIS.has(kind)) return "light";
+  return "armored";
+}
+
+/** Extra multiplier on top of vsInf / vsVeh / vsBld. Reads ARMOR_MULT and nothing else. */
+export function counterMul(kind: string, plate: ArmorClass): number {
+  return ARMOR_MULT[weaponFamily(kind)][plate];
+}
+
+/** Short strong/weak line for a unit card. Null when the weapon has no clear counter. */
+export function matchupTag(kind: string): { short: string; tone: "strong" | "weak"; detail: string } | null {
+  const spec = UNITS[kind as UnitId];
+  if (!spec || spec.damage <= 0) return null;
+  const row = ARMOR_MULT[weaponFamily(kind)];
+  const vsArmored = spec.vsVeh * row.armored;
+  const vsHall = spec.vsBld * row.building;
+  if (weaponFamily(kind) === "rifle" && vsArmored < 0.7) {
+    return { short: "weak tank", tone: "weak", detail: "weak against tanks and buildings" };
   }
-  if (rifle) {
-    if (plate === "light") return 1.22;
-    if (plate === "medium") return 0.58;
-    return 0.28;
+  if (weaponFamily(kind) === "rocket" && vsArmored >= 1.2) {
+    return { short: "strong tank", tone: "strong", detail: "strong against tanks and buildings" };
   }
-  if (rocket) {
-    if (plate === "light") return 0.78;
-    if (plate === "medium") return 1.38;
-    return 1.55;
+  if (vsHall >= 1.3) {
+    return { short: "strong bldg", tone: "strong", detail: "strong against buildings" };
   }
-  if (siege) {
-    if (plate === "heavy") return 0.7;
-    if (plate === "medium") return 0.88;
-    return 1.05;
-  }
-  if (plate === "heavy") return 1.18;
-  if (plate === "medium") return 1.06;
-  return 1;
+  return null;
 }
 
 export interface UnitDef {
@@ -216,16 +219,25 @@ export const MAP_MAX = 192;
 export const TICK = 0.1;
 export const START_CREDITS = 3500;
 export const START_STORAGE = 5000;
-/** Credits per second from a completed Supply Center while the base has power. */
+/** Credits per second from the first Supply Center while the base has power. */
 export const SUPPLY_DRIP = 8;
+/** 1st through 5th supply center, then the 5th rate again. Not a credit cap. */
+export const SUPPLY_STEPS = [1, 0.7, 0.49, 0.34, 0.23] as const;
+
+export function supplyShare(index: number): number {
+  const i = index < 0 ? 0 : index;
+  return SUPPLY_STEPS[Math.min(i, SUPPLY_STEPS.length - 1)] ?? 0.23;
+}
 /** Credits per second from a powered Construction Yard. */
 export const YARD_DRIP = 2;
 /** Credits per second from a completed Silo. A bonus only — never a storage cap. */
 export const SILO_DRIP = 3;
-/** Starting command points. Each yard upgrade adds CP_STEP, up to CP_MAX times. */
-export const CP_BASE = 22;
-export const CP_STEP = 8;
-export const CP_MAX = 3;
+/** Five HQ tiers. Tier 1 is free with the yard. Each upgrade adds HQ_CP. */
+export const HQ_TIERS = 5;
+export const HQ_CP = 20;
+export const CP_MAX = HQ_TIERS - 1;
+export const HQ_COST = [400, 800, 1300, 1600] as const;
+export const HQ_TIME = [14, 18, 22, 26] as const;
 /** Heavy field haul lands on the center at this match time. */
 export const HAUL_AT = 210;
 /** Crystal pulled per second while a harvester sits on a field. */
@@ -304,11 +316,24 @@ export const FACTION_COLOR: Record<FactionId, string> = {
   prism: "#12e6ff",
 };
 
-/** Battlefield sides. The local player is always blue. Not the faction chip colors. */
-export const SIDE_BLUE = "#2F7DF6";
-export const SIDE_RED = "#E5483B";
-export const SIDE_GREEN = "#3FBF5A";
-export const SIDE_YELLOW = "#F2C230";
+/**
+ * One seat style for the whole game. Red and green stay on health bars.
+ * Shape is the colorblind tell: circle, triangle, square, diamond.
+ */
+export type TeamShape = "circle" | "triangle" | "square" | "diamond";
+export type TeamStyle = { readonly seat: 1 | 2 | 3 | 4; readonly color: string; readonly shape: TeamShape };
+
+export const TEAM_STYLES: readonly TeamStyle[] = [
+  { seat: 1, color: "#2EC4F0", shape: "circle" },
+  { seat: 2, color: "#FF7A1A", shape: "triangle" },
+  { seat: 3, color: "#9B5CFF", shape: "square" },
+  { seat: 4, color: "#F2D02E", shape: "diamond" },
+];
+
+export function teamStyle(team: number): TeamStyle {
+  const i = ((team % TEAM_STYLES.length) + TEAM_STYLES.length) % TEAM_STYLES.length;
+  return TEAM_STYLES[i]!;
+}
 
 /** Olive plates in the unit art. Spin is how far a seat sits from that green. */
 const PLATE_HUE = 78;
@@ -971,6 +996,32 @@ export const UNITS: Record<UnitId, UnitDef> = {
   },
 };
 
+/**
+ * One table for skirmish build cost and time. A Normal match should still
+ * be fighting by the bot's push and be over in about 8–12 minutes.
+ * Walls stay short so a drag-line does not stall the battle.
+ */
+export const BUILD_ECONOMY: Record<BuildingId, { cost: number; time: number }> = {
+  yard: { cost: 0, time: 2 },
+  power: { cost: 300, time: 10 },
+  refinery: { cost: 1600, time: 22 },
+  barracks: { cost: 400, time: 12 },
+  factory: { cost: 1200, time: 24 },
+  tower: { cost: 500, time: 12 },
+  silo: { cost: 150, time: 8 },
+  supply: { cost: 400, time: 12 },
+  dock: { cost: 1100, time: 22 },
+  helipad: { cost: 900, time: 18 },
+  aa: { cost: 600, time: 12 },
+  radar: { cost: 800, time: 16 },
+  wall: { cost: 100, time: 0.4 },
+  sandbag: { cost: 25, time: 0.4 },
+  gate: { cost: 75, time: 0.4 },
+  advpower: { cost: 900, time: 18 },
+  stealth: { cost: 1000, time: 18 },
+  span: { cost: 0, time: 0 },
+};
+
 export const BUILDINGS: Record<BuildingId, BuildingDef> = {
   yard: {
     id: "yard",
@@ -1367,6 +1418,16 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
   },
 };
 
+for (const id of Object.keys(BUILD_ECONOMY) as BuildingId[]) {
+  const row = BUILD_ECONOMY[id];
+  BUILDINGS[id].cost = row.cost;
+  BUILDINGS[id].time = row.time;
+}
+
+export function buildClock(seconds: number): string {
+  return `${Number.isInteger(seconds) ? seconds : seconds}s`;
+}
+
 export const BUILD_ORDER: BuildingId[] = [
   "power",
   "supply",
@@ -1511,7 +1572,6 @@ export function unitRequires(id: UnitId): BuildingId | null {
     case "transport":
       return "advpower";
     case "bomber":
-    case "chinook":
       return "advpower";
     default:
       return null;
@@ -1521,7 +1581,7 @@ export function unitRequires(id: UnitId): BuildingId | null {
 export function trainedList(at: TrainAt, faction: FactionId): UnitId[] {
   const slice: Partial<Record<TrainAt, UnitId[]>> = {
     dock: ["gunboat", "frigate", "missile"],
-    helipad: ["attackheli", "bomber"],
+    helipad: ["chinook", "attackheli", "bomber"],
   };
   const order = slice[at] ?? UNIT_ORDER;
   return order.filter((id) => UNITS[id].trainedAt === at && canTrain(id, faction));
@@ -1529,6 +1589,14 @@ export function trainedList(at: TrainAt, faction: FactionId): UnitId[] {
 
 export function locoOf(u: { loco?: Loco }): Loco {
   return u.loco ?? "land";
+}
+
+/** HQ tier that unlocks this aircraft. 0 means the unit is not gated by HQ. Helicopters, then fighters, then bombers. */
+export function airTier(id: UnitId): number {
+  if (id === "chinook") return 2;
+  if (id === "attackheli") return 3;
+  if (id === "bomber") return 4;
+  return 0;
 }
 
 /** Command points a unit occupies. Infantry are cheap. Armor and air are not. */

@@ -169,6 +169,14 @@
   box-shadow: inset 1px 1px 0 #2a2c28;
 }
 
+/* 44px hit box that can hang out of a 32px bar. */
+.hud-hit {
+  position: relative;
+  z-index: 1;
+  min-width: 44px;
+  min-height: 44px;
+}
+
 /* Landscape command bar. The field is dark, so the bar has to read at a glance. */
 .cmd-dock {
   height: 64px;
