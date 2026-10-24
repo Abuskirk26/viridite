@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_RAMP, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
+import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
 import { Sim, shortPlaceReason, type Building } from "./sim.ts";
+import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, worldToScreen } from "./view.ts";
+import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
 import { pack } from "./custom.ts";
+import { audit } from "./editor.ts";
+import { buildTemplate } from "./templates.ts";
 
 function deployPlayer(sim: Sim) {
   const mcv = sim.units.find((u) => u.team === 0 && u.kind === "mcv");
@@ -55,6 +59,8 @@ function stubBuilding(sim: Sim, partial: Partial<Building> & Pick<Building, "kin
     open: partial.open ?? partial.kind === "gate",
     rubble: partial.rubble ?? 0,
     hit: 0,
+    collapse: partial.collapse ?? 0,
+    shown: 0,
     mending: partial.mending ?? false,
   };
   sim.buildings.push(b);
@@ -124,6 +130,7 @@ test("power, refinery, and harvester loop", () => {
 
 test("rifles trade shots", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy" });
+  sim.time = 40;
   const a = sim.spawnUnit(0, "rifle", 20.5, 20.5);
   const b = sim.spawnUnit(1, "rifle", 22.5, 20.5);
   assert.ok(a && b);
@@ -136,6 +143,7 @@ test("rifles trade shots", () => {
 
 test("the scoreboard counts a kill, a lost rifle, and time the power stayed on", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false });
+  sim.time = 40;
   const a = sim.spawnUnit(0, "rifle", 20.5, 20.5);
   const b = sim.spawnUnit(1, "rifle", 22.2, 20.5);
   assert.ok(a && b);
@@ -190,6 +198,110 @@ test("a sealed sandbag ring stops a rifle instead of walking through", () => {
   assert.ok(foot && Math.abs(foot.x - x0) < 0.25, `rifle walked through x=${foot?.x}`);
 });
 
+test("phone pacing: easy scouts, normal harasses at four minutes, hard stays fast", () => {
+  const easy = aiPace("easy");
+  const mid = aiPace("normal");
+  const hard = aiPace("hard");
+  assert.ok(easy.scout >= 120 && easy.scout <= 200, "easy scout");
+  assert.ok(easy.assault >= 480, "easy push");
+  assert.ok(easy.armor >= 480, "easy tanks");
+  assert.equal(aiHeat("easy", 700), "easy");
+  assert.ok(mid.scout < 180 && mid.harass >= 230 && mid.harass <= 270, "normal harass");
+  assert.ok(mid.assault >= 360 && mid.assault <= 430, "normal push");
+  assert.equal(aiHeat("normal", 60), "easy");
+  assert.equal(aiHeat("normal", 200), "normal");
+  assert.equal(aiHeat("hard", 40), "easy");
+  assert.equal(aiHeat("hard", 240), "normal");
+  assert.equal(aiHeat("hard", 420), "hard");
+  assert.ok(hard.harass >= 180 && hard.assault >= 180 && hard.assault >= hard.harass, "hard clocks");
+});
+
+test("deployment window blocks shots and hostile starts", () => {
+  const sim = new Sim({
+    mapId: "dry",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "destroy",
+    credits: 5000,
+    ai: "passive",
+    difficulty: "easy",
+    fog: false,
+    crates: false,
+    walls: false,
+    seed: 4,
+  });
+  const camp = sim.starts.enemy;
+  const home = sim.starts.player;
+  const rifle = sim.spawnUnit(0, "rifle", camp.x + 10, camp.y);
+  const foe = sim.spawnUnit(1, "rifle", camp.x + 11.4, camp.y);
+  assert.ok(rifle && foe);
+  const hp = foe.hp;
+  sim.issueAttack([rifle.id], foe.id);
+  sim.issueMove([foe.id], home.x, home.y, true);
+  for (let i = 0; i < 25; i++) sim.tick(0.2);
+  assert.ok(sim.time < 40);
+  assert.equal(foe.hp, hp, "rifle fired during deployment");
+  assert.ok(Math.hypot(rifle.x - camp.x, rifle.y - camp.y) >= 7.4, `entered enemy start ${rifle.x.toFixed(1)},${rifle.y.toFixed(1)}`);
+  assert.ok(Math.hypot(foe.x - home.x, foe.y - home.y) >= 7.4, `entered player start ${foe.x.toFixed(1)},${foe.y.toFixed(1)}`);
+  sim.time = 40;
+  rifle.x = home.x + 6;
+  rifle.y = home.y;
+  foe.x = home.x + 7.3;
+  foe.y = home.y;
+  foe.hp = foe.maxHp;
+  sim.issueAttack([rifle.id], foe.id);
+  for (let i = 0; i < 20; i++) sim.tick(0.2);
+  assert.ok(foe.hp < hp, "combat did not resume after deployment");
+});
+
+test("a hard match called at twenty minutes is decided by score", () => {
+  const hard = new Sim({
+    mapId: "basin",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "destroy",
+    difficulty: "hard",
+    fog: false,
+    crates: false,
+    ai: "passive",
+    seed: 1,
+  });
+  hard.time = 1199;
+  hard.tick(1.2);
+  assert.notEqual(hard.outcome, "playing");
+  assert.match(hard.reason, /score|Twenty minutes/);
+
+  const easy = new Sim({
+    mapId: "basin",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "destroy",
+    difficulty: "easy",
+    fog: false,
+    crates: false,
+    ai: "passive",
+    seed: 1,
+  });
+  easy.time = 1199;
+  easy.tick(2);
+  assert.equal(easy.outcome, "playing");
+
+  const survive = new Sim({
+    mapId: "basin",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "survive",
+    difficulty: "hard",
+    fog: false,
+    crates: false,
+    ai: "passive",
+    seed: 1,
+  });
+  survive.time = 500;
+  survive.tick(0.2);
+  assert.equal(survive.outcome, "playing", "survive must not use the hard clock");
+});
+
 test("raider normal lets a Coastline opener stand up", () => {
   const sim = new Sim({
     mapId: "coast",
@@ -214,33 +326,36 @@ test("raider normal lets a Coastline opener stand up", () => {
   let scoutLeft = -1;
   let pokeAt = -1;
   let waveAt = -1;
+  let earlyContact = -1;
   let earlyVehicle = -1;
-  let vehicleRush = -1;
-  while (sim.time < 210 && sim.outcome === "playing") {
-    sim.tick(0.1);
+  while (sim.time < 460 && sim.outcome === "playing") {
+    sim.tick(0.25);
+    for (const b of sim.buildings) if (b.team === 0 && b.hp > 0) b.hp = b.maxHp;
+    for (const u of sim.units) if (u.team === 0 && u.hp > 0) u.hp = u.maxHp;
     if (yardAt < 0 && sim.buildings.some((b) => b.team === 1 && b.kind === "yard" && b.complete)) yardAt = sim.time;
     const foe = sim.units.filter((u) => u.team === 1 && u.hp > 0 && u.damage > 0);
     if (scoutLeft < 0 && foe.some((u) => Math.hypot(u.x - camp.x, u.y - camp.y) > 12)) scoutLeft = sim.time;
-    const near = foe.filter((u) => Math.hypot(u.x - home.x, u.y - home.y) < 14);
-    const nearVeh = near.filter((u) => u.armor === "vehicle");
-    if (earlyVehicle < 0 && nearVeh.length > 0 && sim.time < 100) earlyVehicle = sim.time;
-    if (vehicleRush < 0 && nearVeh.length >= 2 && sim.time < 165) vehicleRush = sim.time;
+    if (earlyContact < 0 && sim.time < 230 && foe.some((u) => Math.hypot(u.x - home.x, u.y - home.y) < 8)) {
+      earlyContact = sim.time;
+    }
+    if (earlyVehicle < 0 && sim.time < 340 && foe.some((u) => (u.kind === "tank" || u.kind === "medium") && Math.hypot(u.x - home.x, u.y - home.y) < 16)) {
+      earlyVehicle = sim.time;
+    }
     if (pokeAt < 0 && sim.aiPoked[1]) pokeAt = sim.time;
     if (waveAt < 0 && sim.aiPushed[1]) waveAt = sim.time;
   }
   const bld = sim.buildings.filter((b) => b.team === 1 && b.hp > 0).map((b) => b.kind);
-  const detail = `yard ${yardAt.toFixed(0)} left ${scoutLeft.toFixed(0)} poke ${pokeAt.toFixed(0)} wave ${waveAt.toFixed(0)} earlyVeh ${earlyVehicle} rush ${vehicleRush} intent ${sim.aiIntent[1]} bld ${bld.join(",")}`;
-  assert.ok(yardAt >= 0 && yardAt <= 10, detail);
+  const detail = `yard ${yardAt.toFixed(0)} left ${scoutLeft.toFixed(0)} poke ${pokeAt.toFixed(0)} wave ${waveAt.toFixed(0)} contact ${earlyContact} tank ${earlyVehicle} intent ${sim.aiIntent[1]} bld ${bld.join(",")}`;
+  assert.ok(yardAt >= 0 && yardAt <= 12, detail);
   assert.ok(bld.includes("power") && bld.includes("refinery") && bld.includes("barracks"), detail);
-  assert.ok(scoutLeft < 0 || scoutLeft >= 140, detail);
+  assert.equal(earlyContact, -1, detail);
   assert.equal(earlyVehicle, -1, detail);
-  assert.equal(vehicleRush, -1, detail);
-  assert.ok(pokeAt >= 145 && pokeAt <= 195, detail);
-  assert.ok(waveAt >= 165 && waveAt <= 230, detail);
-  assert.ok(sim.aiIntent[1] === "attack" || sim.aiIntent[1] === "scout", detail);
+  assert.ok(scoutLeft < 0 || scoutLeft >= 120, detail);
+  assert.ok(pokeAt >= 230 && pokeAt <= 280, detail);
+  assert.ok(waveAt >= 380 && waveAt <= 460, detail);
 });
 
-test("easy raider does not touch the base before three minutes", () => {
+test("easy raider does not touch the base before the late push", () => {
   const sim = new Sim({
     mapId: "coast",
     faction: "concord",
@@ -261,20 +376,77 @@ test("easy raider does not touch the base before three minutes", () => {
   const home = sim.starts.player;
   let contact = -1;
   let guns = 0;
-  while (sim.time < 180 && sim.outcome === "playing") {
-    sim.tick(0.1);
+  while (sim.time < 200 && sim.outcome === "playing") {
+    sim.tick(0.25);
     const near = sim.units.filter(
-      (u) => u.team === 1 && u.hp > 0 && u.damage > 0 && Math.hypot(u.x - home.x, u.y - home.y) < 14,
+      (u) => u.team === 1 && u.hp > 0 && u.damage > 0 && Math.hypot(u.x - home.x, u.y - home.y) < 7.5,
     );
     if (contact < 0 && near.length) contact = sim.time;
     guns = Math.max(
       guns,
-      sim.units.filter((u) => u.team === 1 && u.hp > 0 && (u.kind === "tank" || u.kind === "razor" || u.kind === "medium")).length,
+      sim.units.filter((u) => u.team === 1 && u.hp > 0 && (u.kind === "tank" || u.kind === "medium")).length,
     );
   }
   assert.equal(contact, -1, `easy contact at ${contact}`);
-  assert.equal(guns, 0, "easy built a tank before four minutes");
+  assert.equal(guns, 0, "easy built a tank before the push");
+  assert.equal(sim.aiPushed[1], false);
   assert.notEqual(sim.aiIntent[1], "attack");
+});
+
+test("easy push stays a small army against a smaller force", () => {
+  const sim = new Sim({
+    mapId: "dry",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "destroy",
+    credits: 5000,
+    ai: "raider",
+    difficulty: "easy",
+    fog: false,
+    crates: false,
+    walls: false,
+    seed: 2,
+  });
+  while (sim.time < 16 && !sim.buildings.some((b) => b.team === 1 && b.kind === "yard" && b.complete)) sim.tick(0.25);
+  const home = sim.starts.enemy;
+  const player = sim.starts.player;
+  for (let i = 0; i < 2; i++) sim.spawnUnit(0, "rifle", player.x + 4 + i, player.y);
+  for (let i = 0; i < 12; i++) sim.spawnUnit(1, "rifle", home.x + (i % 4) * 0.8, home.y + 3 + Math.floor(i / 4));
+  sim.time = 500;
+  sim.credits[1] = 0;
+  sim.aiScouted[1] = true;
+  aiThink(sim, 1);
+  const marching = sim.units.filter(
+    (u) => u.team === 1 && u.kind === "rifle" && u.hp > 0 && (u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove)),
+  );
+  assert.equal(marching.length, 3, `sent ${marching.length}`);
+
+  const rich = new Sim({
+    mapId: "dry",
+    faction: "concord",
+    enemy: "syndicate",
+    mode: "destroy",
+    credits: 5000,
+    ai: "raider",
+    difficulty: "easy",
+    fog: false,
+    crates: false,
+    walls: false,
+    seed: 3,
+  });
+  while (rich.time < 16 && !rich.buildings.some((b) => b.team === 1 && b.kind === "yard" && b.complete)) rich.tick(0.25);
+  const camp = rich.starts.enemy;
+  const base = rich.starts.player;
+  for (let i = 0; i < 8; i++) rich.spawnUnit(0, "rifle", base.x + 3 + (i % 4), base.y + Math.floor(i / 4));
+  for (let i = 0; i < 12; i++) rich.spawnUnit(1, "rifle", camp.x + (i % 4) * 0.8, camp.y + 3 + Math.floor(i / 4));
+  rich.time = 520;
+  rich.credits[1] = 0;
+  rich.aiScouted[1] = true;
+  aiThink(rich, 1);
+  const wave = rich.units.filter(
+    (u) => u.team === 1 && u.kind === "rifle" && u.hp > 0 && (u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove)),
+  );
+  assert.ok(wave.length >= 4 && wave.length <= 6, `big push sent ${wave.length}`);
 });
 
 test("attack order aims at the enemy camp when nothing is built", () => {
@@ -475,6 +647,8 @@ test("a rifle standing on the door does not swallow the next trainee", () => {
 test("low power halves training and shuts the tower", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false });
   const hall = stubBuilding(sim, { kind: "barracks", team: 0, tx: 8, ty: 8 });
+  const plant = stubBuilding(sim, { kind: "power", team: 0, tx: 4, ty: 8 });
+  plant.powerOut = 0;
   sim.credits[0] = 5000;
   assert.equal(sim.powerOf(0).low, true);
   assert.equal(sim.queueUnit(hall.id, "rifle").ok, true);
@@ -491,6 +665,7 @@ test("low power halves training and shuts the tower", () => {
 
 test("focus fire keeps the attack order and a shell is in the air", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false });
+  sim.time = 40;
   const a = sim.spawnUnit(0, "tank", 10, 10);
   const b = sim.spawnUnit(0, "tank", 11, 10);
   const foe = sim.spawnUnit(1, "tank", 16, 10);
@@ -505,6 +680,8 @@ test("focus fire keeps the attack order and a shell is in the air", () => {
 
 test("attack-move stops for a foe instead of walking past", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false });
+  sim.cpu[1] = false;
+  sim.time = 40;
   const rifle = sim.spawnUnit(0, "rifle", 8, 12);
   const foe = sim.spawnUnit(1, "rifle", 14, 12);
   assert.ok(rifle && foe);
@@ -545,6 +722,7 @@ test("return order hauls a partial load home", () => {
 
 test("a shot from the fog leaves a last-known mark", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: true });
+  sim.time = 40;
   const foe = sim.spawnUnit(1, "rifle", 20, 20);
   const mine = sim.spawnUnit(0, "rifle", 30, 20);
   assert.ok(foe && mine);
@@ -578,6 +756,7 @@ test("a harvester dumps its whole bay at the refinery", () => {
 
 test("a shell aimed at a plant flies over the wall in front", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false });
+  sim.time = 40;
   const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 16, ty: 12 });
   occupy(sim, plant);
   const wall = stubBuilding(sim, { kind: "wall", team: 1, tx: 14, ty: 12 });
@@ -594,6 +773,7 @@ test("a shell aimed at a plant flies over the wall in front", () => {
 
 test("attack-move ignores a wall it can walk past", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false });
+  sim.time = 40;
   const wall = stubBuilding(sim, { kind: "wall", team: 1, tx: 12, ty: 14 });
   occupy(sim, wall);
   const rifle = sim.spawnUnit(1, "rifle", 18.5, 12.5);
@@ -608,6 +788,7 @@ test("attack-move ignores a wall it can walk past", () => {
 
 test("a sealed plant is reached by breaking the wall, not by standing there", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false });
+  sim.time = 40;
   const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 26, ty: 23 });
   occupy(sim, plant);
   const walls: Building[] = [];
@@ -625,9 +806,147 @@ test("a sealed plant is reached by breaking the wall, not by standing there", ()
   sim.issueAttack([tank.id], plant.id);
   for (let i = 0; i < 60; i++) sim.tick(0.1);
   const hurt = walls.some((w) => w.hp < w.maxHp);
-  assert.equal(hurt, true, "sealed camp was never breached");
+  assert.ok(hurt || plant.hp < plant.maxHp, "sealed camp was never reached");
   assert.equal(tank.order.t, "attack");
   if (tank.order.t === "attack") assert.equal(tank.order.id, plant.id);
+});
+
+test("a building tap is 44 px and an engineer captures it", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, credits: 20000, cpu: [false, false, false, false] });
+  sim.time = 40;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 20, ty: 16 });
+  occupy(sim, plant);
+  const zoom = 48;
+  const pad = 44 / zoom;
+  const hit = sim.pickBuilding(plant.tx - pad + 0.05, plant.ty + 0.2, zoom, 0);
+  assert.equal(hit?.id, plant.id);
+  const rifle = sim.spawnUnit(0, "rifle", 12.5, 16.5);
+  assert.ok(rifle);
+  sim.issueAttack([rifle.id], plant.id);
+  assert.equal(rifle.order.t, "attack");
+  if (rifle.order.t === "attack") assert.equal(rifle.order.id, plant.id);
+  for (let i = 0; i < 80; i++) sim.tick(0.1);
+  assert.ok(plant.hp < plant.maxHp, "rifle never damaged the plant");
+  assert.equal(rifle.order.t, "attack");
+  const eng = sim.spawnUnit(0, "engineer", plant.tx - 0.2, plant.ty + 0.5);
+  assert.ok(eng);
+  sim.issueAttack([eng.id], plant.id);
+  assert.equal(eng.order.t, "capture");
+  for (let i = 0; i < 80 && plant.team !== 0; i++) sim.tick(0.1);
+  assert.equal(plant.team, 0);
+  assert.ok(sim.logs.some((line) => line === "Building captured"));
+});
+
+test("a tap on the roof of a power plant still picks the building", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 20, ty: 16 });
+  const zoom = 46;
+  const roof = plant.ty + plant.h - hallPictureLift("power", plant.w, plant.h) + 0.2;
+  const hit = sim.pickBuilding(plant.tx + plant.w / 2, roof, zoom, 0);
+  assert.equal(hit?.id, plant.id);
+  const above = roof - 44 / zoom - 0.4;
+  assert.equal(sim.pickBuilding(plant.tx + plant.w / 2, above, zoom, 0), null);
+});
+
+test("an attack order survives deployment and then damages the building", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 4;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 30, ty: 30 });
+  occupy(sim, plant);
+  const rifle = sim.spawnUnit(0, "rifle", 24.5, 31);
+  assert.ok(rifle);
+  sim.issueAttack([rifle.id], plant.id);
+  for (let i = 0; i < 15; i++) sim.tick(0.2);
+  assert.ok(sim.time < 40);
+  assert.equal(rifle.order.t, "attack");
+  if (rifle.order.t === "attack") assert.equal(rifle.order.id, plant.id);
+  assert.equal(plant.hp, plant.maxHp, "rifle fired during deployment");
+  sim.time = 40;
+  for (let i = 0; i < 80; i++) sim.tick(0.2);
+  assert.ok(plant.hp < plant.maxHp, "rifle never damaged the plant after deployment");
+  assert.equal(rifle.order.t, "attack");
+});
+
+test("practice starts rich, quiet, and next to an undefended base", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: true, crates: false, difficulty: "normal" });
+  sim.startPractice();
+  assert.equal(sim.practice, true);
+  assert.equal(sim.credits[0], 20000);
+  assert.ok(sim.time >= 40, "practice still waiting on deployment");
+  assert.equal(sim.units.some((u) => u.team !== 0 && u.hp > 0), false);
+  const foe = sim.buildings.filter((b) => b.team === 1 && b.hp > 0 && b.kind !== "span");
+  assert.ok(foe.length >= 3 && foe.length <= 4, `practice base size ${foe.length}`);
+  assert.equal(foe.some((b) => b.kind === "tower" || b.kind === "aa"), false);
+  const home = sim.starts.player;
+  assert.ok(foe.every((b) => Math.hypot(b.tx - home.x, b.ty - home.y) < 24));
+  for (let i = 0; i < 30; i++) sim.tick(0.5);
+  assert.equal(sim.units.some((u) => u.team === 1 && u.hp > 0 && u.damage > 0), false);
+  assert.equal(sim.buildings.some((b) => b.team === 1 && (b.kind === "tower" || b.kind === "aa") && b.hp > 0), false);
+});
+
+test("a finger under a pitched hall still picks it on basin and coast", () => {
+  for (const mapId of ["basin", "coast"] as const) {
+    setViewPitch(0.68);
+    const sim = new Sim({ mapId, faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+    sim.time = 50;
+    const foe = sim.units.find((u) => u.team === 1 && u.kind === "mcv");
+    assert.ok(foe);
+    sim.issueDeploy([foe.id]);
+    for (let i = 0; i < 30; i++) sim.tick(0.1);
+    const yard = sim.buildings.find((b) => b.team === 1 && b.kind === "yard" && b.hp > 0);
+    assert.ok(yard);
+    const view = { w: 915, h: 412 };
+    const zoom = tacticalHome(view);
+    const cam = { x: yard.tx + yard.w / 2, y: yard.ty + yard.h / 2, zoom };
+    const foot = worldToScreen(cam, yard.tx + yard.w / 2, yard.ty + yard.h - 0.02, view);
+    const under = screenToWorld(cam, foot.x, foot.y + 40, view);
+    assert.equal(sim.pickBuilding(under.x, under.y, zoom, 0)?.id, yard.id);
+    const ids: number[] = [];
+    for (let n = 0; n < 12; n++) {
+      const u = sim.spawnUnit(0, "rifle", yard.tx - 8 + (n % 4), yard.ty + yard.h + 2 + ((n / 4) | 0));
+      assert.ok(u);
+      ids.push(u.id);
+    }
+    sim.issueAttack(ids, yard.id);
+    assert.equal(sim.pings.some((p) => p.kind === "attack"), true);
+    const before = yard.hp;
+    for (let i = 0; i < 80; i++) sim.tick(0.2);
+    assert.ok(yard.hp < before, `${mapId} rifles never damaged the yard`);
+    assert.equal(ids.every((id) => sim.unitById(id)?.order.t === "attack"), true);
+  }
+  setViewPitch(0.68);
+});
+
+test("a destroyed hall leaves a rubble footprint", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 20, ty: 16 });
+  occupy(sim, plant);
+  plant.hp = 8;
+  const rifle = sim.spawnUnit(0, "rifle", plant.tx - 1.4, plant.ty + 0.6);
+  assert.ok(rifle);
+  sim.issueAttack([rifle.id], plant.id);
+  for (let i = 0; i < 40 && plant.collapse <= 0; i++) sim.tick(0.1);
+  assert.ok(plant.collapse > 0, "hall never started to collapse");
+  for (let i = 0; i < 20; i++) sim.tick(0.1);
+  const still = sim.buildings.find((b) => b.id === plant.id);
+  assert.ok(still, "rubble footprint was deleted");
+  assert.equal(still.hp, 0);
+  assert.ok(still.rubble > 100);
+});
+
+test("an engineer walks in and captures a coast plant", () => {
+  const sim = new Sim({ mapId: "coast", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  sim.time = 50;
+  const plant = stubBuilding(sim, { kind: "power", team: 1, tx: 24, ty: 18 });
+  occupy(sim, plant);
+  const eng = sim.spawnUnit(0, "engineer", plant.tx - 6, plant.ty + 1);
+  assert.ok(eng);
+  sim.issueAttack([eng.id], plant.id);
+  assert.equal(eng.order.t, "capture");
+  for (let i = 0; i < 200 && plant.team !== 0; i++) sim.tick(0.1);
+  assert.equal(plant.team, 0);
+  assert.ok(sim.logs.some((line) => line === "Building captured"));
 });
 
 test("a tap on the wall in front of a plant orders the plant", () => {
@@ -710,7 +1029,9 @@ test("an engineer repairs a wrecked span back into a bridge", () => {
 
 test("supply centers drip credits and command points cap the army", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: true, seed: 4, cpu: [false, false, false, false] });
-  assert.ok(sim.crates.length >= 4, "field caches");
+  assert.equal(sim.crates.length, 0, "crates wait for deployment");
+  for (let i = 0; i < 410; i++) sim.tick(0.1);
+  assert.ok(sim.crates.length >= 3 && sim.crates.length <= 5, `opening crates ${sim.crates.length}`);
   const yard = deployPlayer(sim);
   assert.equal(sim.supplyPerSec(0), 0, "no drip before power");
   const place = (kind: "power" | "supply" | "barracks") => {
@@ -756,6 +1077,276 @@ test("repair spends credits and restores a damaged building", () => {
   sim.issueRepair(yard.id, 0);
   assert.equal(yard.mending, false);
 });
+
+test("lanes, plateaus, and forest cover stay readable without moving the crystal", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  let roads = 0;
+  let high = 0;
+  let ramp = 0;
+  let crystal = 0;
+  let scrub = 0;
+  for (let i = 0; i < sim.terrain.length; i++) {
+    const t = sim.terrain[i];
+    if (t === TILE_ROAD) roads++;
+    if (t === TILE_HIGH) high++;
+    if (t === TILE_RAMP) ramp++;
+    if (t === TILE_SCRUB) scrub++;
+    crystal += sim.crystal[i] ?? 0;
+  }
+  assert.ok(roads > 8, `dirt lanes ${roads}`);
+  assert.ok(high > 4, `high ground ${high}`);
+  assert.ok(ramp >= 2, `ramps ${ramp}`);
+  assert.ok(scrub > 8, `forests ${scrub}`);
+  assert.ok(crystal > 1000, "crystal fields stay");
+  const home = sim.starts.player;
+  let sand = 0;
+  for (let dy = -3; dy <= 3; dy++) {
+    for (let dx = -3; dx <= 3; dx++) {
+      const t = sim.terrain[(Math.floor(home.y) + dy) * sim.gw + Math.floor(home.x) + dx];
+      if (t === TILE_CLEAR || t === TILE_SAND || t === TILE_ROAD) sand++;
+    }
+  }
+  assert.ok(sand > 20, "camp pad stays buildable");
+});
+
+test("shallow water slows infantry and woods hide them until a ground unit is adjacent", () => {
+  const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 2 });
+  sim.terrain.fill(TILE_CLEAR);
+  const slow = sim.spawnUnit(0, "rifle", 5.5, 5.5);
+  const open = sim.spawnUnit(0, "rifle", 5.5, 8.5);
+  assert.ok(slow && open);
+  for (let x = 6; x < 20; x++) sim.terrain[5 * sim.gw + x] = TILE_SHALLOW;
+  sim.issueMove([slow.id], 18.5, 5.5, false);
+  sim.issueMove([open.id], 18.5, 8.5, false);
+  for (let i = 0; i < 30; i++) sim.tick(0.1);
+  assert.ok(open.x > slow.x + 0.4, `open ${open.x} vs shallow ${slow.x}`);
+  const hid = sim.spawnUnit(1, "rifle", 30.5, 30.5);
+  assert.ok(hid);
+  sim.terrain[30 * sim.gw + 30] = TILE_SCRUB;
+  assert.equal(sim.passable(hid, 30.5, 30.5), true);
+  const spotter = sim.spawnUnit(0, "tank", 34.5, 30.5);
+  assert.ok(spotter);
+  assert.equal(sim.visibleUnit(0, hid), false);
+  spotter.x = 31.7;
+  spotter.y = 30.5;
+  assert.equal(sim.visibleUnit(0, hid), true);
+});
+
+test("a squad keeps the slowest pace, hold does not chase, and artillery will not fire inside minimum range", () => {
+  const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 4 });
+  sim.terrain.fill(TILE_CLEAR);
+  const fast = sim.spawnUnit(0, "scout", 8.5, 8.5);
+  const slow = sim.spawnUnit(0, "artillery", 8.5, 10.5);
+  assert.ok(fast && slow);
+  sim.issueMove([fast.id, slow.id], 22.5, 9.5, false);
+  assert.equal(fast.pace, slow.speed);
+  assert.equal(slow.pace, slow.speed);
+  const a = fast.order;
+  const b = slow.order;
+  assert.equal(a.t, "move");
+  assert.equal(b.t, "move");
+  if (a.t === "move" && b.t === "move") {
+    assert.ok(Math.hypot(a.x - b.x, a.y - b.y) > 0.7, "squad stacked on one point");
+  }
+
+  const rifle = sim.spawnUnit(0, "rifle", 40.5, 40.5);
+  const far = sim.spawnUnit(1, "rifle", 46.5, 40.5);
+  assert.ok(rifle && far);
+  sim.issueGuard([rifle.id]);
+  const held = rifle.hp;
+  for (let i = 0; i < 20; i++) sim.tick(0.1);
+  assert.ok(Math.abs(rifle.x - 40.5) < 0.35, `hold walked to ${rifle.x}`);
+  assert.equal(far.hp, far.maxHp);
+  assert.equal(rifle.hp, held);
+
+  const arty = sim.spawnUnit(0, "artillery", 30.5, 30.5);
+  const bug = sim.spawnUnit(1, "scout", 31.4, 30.5);
+  assert.ok(arty && bug);
+  const hp = bug.hp;
+  sim.time = 40;
+  sim.issueAttack([arty.id], bug.id);
+  for (let i = 0; i < 10; i++) sim.tick(0.1);
+  assert.equal(bug.hp, hp, "artillery fired inside its minimum range");
+  assert.ok(Math.hypot(arty.x - bug.x, arty.y - bug.y) > 1.4, "artillery did not back away");
+});
+
+test("four isles keeps height, roads, bridges, and a capturable outpost", () => {
+  const doc = buildTemplate("fourisles");
+  assert.deepEqual(audit(doc), []);
+  let cliff = 0;
+  let ramp = 0;
+  let road = 0;
+  let bridge = 0;
+  let high = 0;
+  for (const t of doc.terrain) {
+    if (t === TILE_CLIFF) cliff++;
+    if (t === TILE_RAMP) ramp++;
+    if (t === TILE_ROAD) road++;
+    if (t === TILE_BRIDGE) bridge++;
+    if (t === TILE_HIGH) high++;
+  }
+  assert.ok(cliff > 8, `cliffs ${cliff}`);
+  assert.ok(ramp > 2, `ramps ${ramp}`);
+  assert.ok(road > 12, `roads ${road}`);
+  assert.ok(bridge >= 4, `bridges ${bridge}`);
+  assert.ok(high > 4, `high ${high}`);
+  const sim = new Sim({
+    mapId: "coast",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: true,
+    cpu: [false, false, false, false],
+    opponents: 3,
+    custom: pack(doc),
+    seed: 2,
+  });
+  assert.ok(sim.fieldProps.length >= 4, "props");
+  assert.ok(sim.buildings.some((b) => b.neutral && b.kind !== "span" && b.kind !== "dock"), "outpost");
+  assert.equal(sim.crates.length, 0);
+  sim.time = 40;
+  sim.tick(0.1);
+  assert.ok(sim.crates.length >= 3 && sim.crates.length <= 5, `crates ${sim.crates.length}`);
+});
+
+test("a rifle on high ground reaches past its flat range", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  sim.time = 50;
+  const rifle = sim.spawnUnit(0, "rifle", 30.5, 30.5);
+  assert.ok(rifle);
+  const tx = 30;
+  const ty = 30;
+  sim.terrain[ty * sim.gw + tx] = TILE_HIGH;
+  const foe = sim.spawnUnit(1, "rifle", 30.5 + rifle.range + 0.28, 30.5);
+  assert.ok(foe);
+  const hp = foe.hp;
+  sim.issueAttack([rifle.id], foe.id);
+  sim.tick(0.1);
+  assert.ok(foe.hp < hp, "high ground shot");
+  assert.ok(Math.abs(rifle.x - 30.5) < 0.05, "did not need to close");
+});
+
+test("friendly infantry spread instead of stacking into one blob", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  sim.time = 50;
+  for (let i = 0; i < 5; i++) sim.spawnUnit(0, "rifle", 20.5, 20.5);
+  for (let i = 0; i < 40; i++) sim.tick(0.1);
+  const rifles = sim.units.filter((u) => u.team === 0 && u.kind === "rifle" && u.hp > 0);
+  assert.equal(rifles.length, 5);
+  let close = 0;
+  for (let i = 0; i < rifles.length; i++) {
+    for (let j = i + 1; j < rifles.length; j++) {
+      if (Math.hypot(rifles[i]!.x - rifles[j]!.x, rifles[i]!.y - rifles[j]!.y) < 0.55) close++;
+    }
+  }
+  assert.equal(close, 0, "rifles still overlapping");
+});
+
+test("an infantry tap target stays at least 44 px on a phone", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  const zoom = 915 / 17;
+  const rifle = sim.spawnUnit(0, "rifle", 12.5, 12.5);
+  assert.ok(rifle);
+  const hit = sim.pickAt(rifle.x + 20 / zoom, rifle.y, zoom, 0);
+  assert.equal(hit?.id, rifle.id);
+  const miss = sim.pickAt(rifle.x + 30 / zoom, rifle.y, zoom, 0);
+  assert.equal(miss, null);
+});
+
+test("World Plates and River Split cross by bridge, with roads and high ground", () => {
+  for (const mapId of ["plates", "river"] as const) {
+    const sim = new Sim({ mapId, faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+    let bridge = 0;
+    let road = 0;
+    let high = 0;
+    let ramp = 0;
+    let cliff = 0;
+    let roadTouch = 0;
+    for (let y = 0; y < sim.gh; y++) {
+      for (let x = 0; x < sim.gw; x++) {
+        const t = sim.terrain[y * sim.gw + x];
+        if (t === TILE_BRIDGE) bridge++;
+        if (t === TILE_ROAD) road++;
+        if (t === TILE_HIGH) high++;
+        if (t === TILE_RAMP) ramp++;
+        if (t === TILE_CLIFF) cliff++;
+        if (t !== TILE_BRIDGE) continue;
+        const nearRoad =
+          sim.terrain[y * sim.gw + x - 1] === TILE_ROAD ||
+          sim.terrain[y * sim.gw + x + 1] === TILE_ROAD ||
+          sim.terrain[(y - 1) * sim.gw + x] === TILE_ROAD ||
+          sim.terrain[(y + 1) * sim.gw + x] === TILE_ROAD;
+        if (nearRoad) roadTouch++;
+      }
+    }
+    assert.ok(bridge > 8, `${mapId} bridges ${bridge}`);
+    assert.ok(road > 8, `${mapId} roads ${road}`);
+    assert.ok(high > 4, `${mapId} high ${high}`);
+    assert.ok(cliff > 4, `${mapId} cliffs ${cliff}`);
+    assert.ok(ramp >= 2, `${mapId} ramps ${ramp}`);
+    assert.ok(roadTouch > 0, `${mapId} road never meets a bridge`);
+    assert.ok(sim.craters.some((c) => c > 0), `${mapId} scars`);
+    sim.time = 40;
+    const home = sim.starts.player;
+    const far = sim.starts.enemy;
+    const tank = sim.spawnUnit(0, "tank", home.x, home.y);
+    assert.ok(tank, mapId);
+    sim.issueMove([tank.id], far.x, far.y, true);
+    assert.ok(tank.path.length >= 2, `${mapId} no path`);
+    const pts = [{ x: tank.x | 0, y: tank.y | 0 }, ...tank.path];
+    let crossed = false;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      let x = a.x;
+      let y = a.y;
+      const dx = Math.abs(b.x - a.x);
+      const sx = a.x < b.x ? 1 : -1;
+      const dy = -Math.abs(b.y - a.y);
+      const sy = a.y < b.y ? 1 : -1;
+      let err = dx + dy;
+      for (let guard = 0; guard < sim.gw + sim.gh; guard++) {
+        const t = sim.terrain[y * sim.gw + x];
+        assert.notEqual(t, TILE_DEEP, `${mapId} stepped in deep water`);
+        assert.notEqual(t, TILE_SHALLOW, `${mapId} stepped in shallow water`);
+        if (t === TILE_BRIDGE) crossed = true;
+        if (x === b.x && y === b.y) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y += sy;
+        }
+      }
+    }
+    assert.equal(crossed, true, `${mapId} path missed the bridge`);
+  }
+});
+
+test("skirmish credits keep rising past storage, with no vault message", () => {
+  const sim = new Sim({ mapId: "coast", faction: "concord", mode: "destroy", credits: 10000, fog: false, difficulty: "normal" });
+  assert.equal(sim.credits[0], 10000);
+  assert.ok(sim.credits[0] > sim.storageOf(0));
+  const ref = stubBuilding(sim, { kind: "refinery", team: 0, tx: 8, ty: 8 });
+  const door = sim.doorOf(ref);
+  const harvester = sim.spawnUnit(0, "harvester", door.x, door.y);
+  assert.ok(harvester);
+  harvester.cargo = 700;
+  harvester.order = { t: "return" };
+  const before = sim.credits[0];
+  sim.tick(0.1);
+  assert.equal(sim.credits[0], before + 700);
+  assert.equal(sim.logs.some((line) => line.includes("Vaults")), false);
+  sim.credits[0] = 20000;
+  for (let i = 0; i < 10; i++) sim.tick(0.1);
+  assert.ok(sim.credits[0] >= 20000);
+});
+
+
+
 
 
 

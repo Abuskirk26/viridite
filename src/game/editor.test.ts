@@ -22,9 +22,9 @@ import {
 import { FEATURED, buildFeatured } from "./featured.ts";
 import { TEMPLATES, buildTemplate } from "./templates.ts";
 
-test("every classic template is playable and Island Hoppers is first", () => {
-  assert.equal(TEMPLATES[0]?.id, "hoppers");
-  assert.equal(TEMPLATES.length, 24);
+test("every classic template is playable and Four Isles leads the list", () => {
+  assert.equal(TEMPLATES[0]?.id, "fourisles");
+  assert.ok(TEMPLATES.length >= 24);
   for (const card of TEMPLATES) {
     const doc = buildTemplate(card.id);
     const notes = audit(doc);

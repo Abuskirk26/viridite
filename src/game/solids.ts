@@ -35,22 +35,32 @@ const SNOW_TOP: Partial<Record<Mat, string>> = {
 
 function tones(mat: Mat, snow: boolean, trim: string): [string, string, string] {
   if (mat === "trim") {
-    const side = hexMul(trim, 0.62);
-    const front = hexMul(trim, 0.78);
+    const side = mixHex(trim, "#140e0a", 0.28);
+    const front = mixHex(trim, "#fff6e8", 0.18);
     return [trim, front, side];
   }
   const base = TONES[mat];
-  if (!snow || !SNOW_TOP[mat]) return base;
-  return [SNOW_TOP[mat]!, base[1], base[2]];
+  const wash = 0.42;
+  const tinted: [string, string, string] = [
+    wash ? mixHex(base[0], trim, wash) : base[0],
+    wash ? mixHex(base[1], trim, wash * 0.85) : base[1],
+    wash ? mixHex(base[2], trim, wash) : base[2],
+  ];
+  if (!snow || !SNOW_TOP[mat]) return tinted;
+  return [mixHex(SNOW_TOP[mat]!, trim, 0.5), tinted[1], tinted[2]];
 }
 
-function hexMul(hex: string, m: number): string {
-  const h = hex.replace("#", "");
-  const n = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
-  const r = Math.max(0, Math.min(255, Math.round(parseInt(n.slice(0, 2), 16) * m)));
-  const g = Math.max(0, Math.min(255, Math.round(parseInt(n.slice(2, 4), 16) * m)));
-  const b = Math.max(0, Math.min(255, Math.round(parseInt(n.slice(4, 6), 16) * m)));
-  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+function mixHex(hex: string, toward: string, t: number): string {
+  const parse = (h: string) => {
+    const raw = h.replace("#", "");
+    const n = parseInt(raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw, 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  };
+  const a = parse(hex);
+  const b = parse(toward);
+  const ch = (i: number) => Math.max(0, Math.min(255, Math.round(a[i]! * (1 - t) + b[i]! * t)));
+  const byte = (n: number) => n.toString(16).padStart(2, "0");
+  return `#${byte(ch(0))}${byte(ch(1))}${byte(ch(2))}`;
 }
 
 function face(ctx: CanvasRenderingContext2D, ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number, color: string) {

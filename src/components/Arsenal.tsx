@@ -11,6 +11,7 @@ import {
   UNIT_ORDER,
   canBuild,
   canTrain,
+  plateSpin,
   resolveBuilding,
   resolveUnit,
   type BuildingId,
@@ -91,11 +92,15 @@ function paintCard(ctx: CanvasRenderingContext2D, files: string[], color: string
       ctx.fillStyle = color;
       ctx.fillRect(w * 0.3, h * 0.26, w * 0.4, h * 0.38);
     } else {
+      const spin = plateSpin(color);
       sprites.forEach((img, i) => {
         const scale = i === 0 ? 0.7 : 0.38;
         const dw = Math.min(w, h) * scale;
         const dh = dw * (img.height / Math.max(1, img.width));
+        ctx.save();
+        ctx.filter = `hue-rotate(${spin.toFixed(0)}deg) saturate(1.55) contrast(1.08)`;
         ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2 - 10, dw, dh);
+        ctx.restore();
       });
     }
     paintMark(ctx, mark, color, w, h);
@@ -263,7 +268,7 @@ function buildingLine(b: ResolvedBuilding): string {
   if (b.id === "tower") return "A standing gun. Concord and Steel towers hit harder and see farther.";
   if (b.id === "refinery") return "Harvesters dump crystal here.";
   if (b.id === "supply") return "Drips war material every second while the base has power. Build two early.";
-  if (b.id === "silo") return "Raises how many credits you can hold.";
+  if (b.id === "silo") return "A small credit drip while the base has power. It does not cap storage.";
   if (b.id === "wall" || b.id === "gate" || b.id === "sandbag") return "A fence. Steel pours thicker concrete, gates, and sandbags.";
   return b.name;
 }

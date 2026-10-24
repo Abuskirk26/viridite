@@ -1,9 +1,14 @@
 /**
- * Skirmish brain. Same credits and build timers as a player — no free units.
- * Called once a second from the sim so a phone does not pathfind every frame.
+ * Skirmish brain. Same credits and build timers as a player — no free units,
+ * and Easy or Normal never get a hidden income or build-speed bonus.
  *
- * Every bot opens easy for 2:30 so a yard can stand. It then plays the skill
- * you set. Hard is the top: normal pressure until 5:00, full hard after that.
+ * Attack times are the in-game clock (sim.time). Speed does not move them,
+ * and no personality may attack before the difficulty mark:
+ * Easy scouts only before 6:00 and pushes after 8:00.
+ * Normal harasses from 4:00 and pushes at 6:30.
+ * Hard's first attack is 3:00.
+ *
+ * Bots still start easy and climb. The climb is spread across the first 8 minutes.
  * Easy never climbs. Builder techs before it walks. Passive only counterattacks.
  */
 
@@ -19,7 +24,17 @@ import {
   type Team,
   type UnitId,
 } from "./data.ts";
-import type { Building, Sim, Unit } from "./sim.ts";
+import {
+  EASY_PUSH_AT,
+  EASY_SCOUT_UNTIL,
+  HARD_PUSH_AT,
+  NORMAL_HARASS_AT,
+  NORMAL_PUSH_AT,
+  firstPushAt,
+  type Building,
+  type Sim,
+  type Unit,
+} from "./sim.ts";
 
 interface Pace {
   /** One light unit leaves home. It does not enter the enemy base. */
@@ -41,18 +56,57 @@ interface Pace {
 
 export function aiPace(diff: AiDifficulty): Pace {
   if (diff === "easy") {
-    return { scout: 999, harass: 999, assault: 178, armor: 240, wave: 150, jitter: 24, push: 420, group: 4, cap: 6 };
+    // Scouts only before 6:00. First real push after 8:00. No harass.
+    return {
+      scout: 150,
+      harass: EASY_PUSH_AT + 1,
+      assault: EASY_PUSH_AT,
+      armor: EASY_PUSH_AT,
+      wave: 150,
+      jitter: 20,
+      push: EASY_PUSH_AT,
+      group: 4,
+      cap: 6,
+    };
   }
   if (diff === "hard") {
-    return { scout: 42, harass: 88, assault: 125, armor: 118, wave: 75, jitter: 12, push: 220, group: 3, cap: 12 };
+    // First attack at 3:00. A scout may look before that, without shooting its way in.
+    return {
+      scout: 70,
+      harass: HARD_PUSH_AT,
+      assault: HARD_PUSH_AT,
+      armor: HARD_PUSH_AT,
+      wave: 75,
+      jitter: 12,
+      push: HARD_PUSH_AT,
+      group: 3,
+      cap: 12,
+    };
   }
-  return { scout: 52, harass: 112, assault: 172, armor: 168, wave: 105, jitter: 16, push: 290, group: 4, cap: 10 };
+  // Harass from 4:00. First push at 6:30. The wave after that still waits for 8:00.
+  return {
+    scout: 130,
+    harass: NORMAL_HARASS_AT,
+    assault: NORMAL_PUSH_AT,
+    armor: NORMAL_PUSH_AT - 30,
+    wave: 110,
+    jitter: 16,
+    push: NORMAL_PUSH_AT,
+    group: 5,
+    cap: 10,
+  };
 }
 
-/** What they fight like right now. The chosen skill is only the ceiling. */
+/**
+ * What they fight like right now. The chosen skill is only the ceiling.
+ * Easy stays easy. Normal and Hard climb from easy across the first 8 minutes.
+ */
 export function aiHeat(ceil: AiDifficulty, time: number): AiDifficulty {
-  if (ceil === "easy" || time < 150) return "easy";
-  if (ceil === "normal" || time < 300) return "normal";
+  if (ceil === "easy") return "easy";
+  const u = Math.max(0, Math.min(1, time / 480));
+  if (ceil === "normal") return u < 0.375 ? "easy" : "normal";
+  if (u < 0.34) return "easy";
+  if (u < 0.84) return "normal";
   return "hard";
 }
 
@@ -64,6 +118,10 @@ function heatOf(sim: Sim, team: Team): AiDifficulty {
 const LIGHT: ReadonlySet<UnitId> = new Set(["rifle", "rocket", "scout", "vanguard", "razor"]);
 
 export function aiThink(sim: Sim, team: Team = 1) {
+  if (sim.practice) {
+    sim.aiIntent[team] = "idle";
+    return;
+  }
   if (sim.eliminated[team]) {
     sim.aiIntent[team] = "idle";
     return;
@@ -87,7 +145,7 @@ export function aiThink(sim: Sim, team: Team = 1) {
   }
 
   const stance = sim.stanceOf(team);
-  const pace = aiPace(heatOf(sim, team));
+  const pace = aiPace(sim.difficultyOf(team));
   repair(sim, team, stance);
   // Train the rifle before the factory spends the last credits.
   train(sim, team, stance, pace, true);
@@ -99,7 +157,7 @@ export function aiThink(sim: Sim, team: Team = 1) {
 }
 
 function seekCaches(sim: Sim, team: Team) {
-  if (!sim.cratesOn || !sim.crates.length) return;
+  if (!sim.cratesOn || !sim.crates.length || sim.deploying()) return;
   const home = sim.starts.slots[team] ?? sim.starts.player;
   let best: { x: number; y: number } | null = null;
   let bestD = 14;
@@ -182,6 +240,16 @@ function nextBuild(
   if (count("supply") < 1) return "supply";
   if (forecast.supply < forecast.use + 12 && count("power") < 4) return "power";
   if (count("barracks") === 0) return "barracks";
+  if (
+    stance === "raider" &&
+    heatOf(sim, team) !== "hard" &&
+    done("barracks") &&
+    sim.time > 75 &&
+    count("tower") < 1 &&
+    (heatOf(sim, team) === "easy" || count("factory") > 0)
+  ) {
+    return "tower";
+  }
   if (count("factory") === 0) {
     if (forecast.supply < forecast.use + fac.powerUse && count("power") < 4) return "power";
     if (!done("refinery")) return null;
@@ -205,7 +273,6 @@ function nextBuild(
     if (shoreNear(sim, team) && sim.navy && count("dock") === 0 && sim.time > 150 && findAiSpot(sim, team, "dock")) {
       return "dock";
     }
-    if (count("silo") < 1 && credits > sim.storageOf(team) * 0.72) return "silo";
     return null;
   }
 
@@ -223,6 +290,7 @@ function nextBuild(
     if (forecast.supply >= forecast.use + need) return "supply";
   }
   if (forecast.supply < forecast.use + 10 && count("power") < 3) return "power";
+  if (heatOf(sim, team) === "easy" && count("tower") < 2 && done("barracks") && sim.time > 110) return "tower";
   if (sim.time > 200 && count("tower") < 1 && done("barracks")) return "tower";
   if (sim.aiPushed[team] && sim.time > 200 && count("helipad") === 0 && done("barracks") && findAiSpot(sim, team, "helipad")) {
     return "helipad";
@@ -277,7 +345,8 @@ function train(sim: Sim, team: Team, stance: AiProfile, pace: Pace, coreOnly: bo
     return;
   }
 
-  if (combat + queued >= pace.cap && stance !== "builder") {
+  const uncapped = stance === "builder" && sim.difficultyOf(team) === "hard";
+  if (!uncapped && combat + queued >= paceCap(sim, team, pace)) {
     trainSupport(sim, team, stance, have, credits, faction);
     return;
   }
@@ -327,6 +396,25 @@ function train(sim: Sim, team: Team, stance: AiProfile, pace: Pace, coreOnly: bo
     return;
   }
   if (stance === "passive" && combat >= 3) {
+    trainSupport(sim, team, stance, have, credits, faction);
+    return;
+  }
+  // Easy and Normal hold tanks until the push. One scout buggy may leave earlier.
+  if (stance === "raider" && sim.difficultyOf(team) !== "hard" && sim.time < pace.armor) {
+    const scoutId: UnitId = book === "syndicate" ? "razor" : "scout";
+    const scoutReady =
+      sim.units.some((u) => u.team === team && u.hp > 0 && (u.kind === "scout" || u.kind === "razor")) ||
+      factory.queue.includes("scout") ||
+      factory.queue.includes("razor");
+    if (
+      !scoutReady &&
+      sim.time >= Math.max(45, pace.scout - 12) &&
+      sim.time < 360 &&
+      factory.queue.length < 1 &&
+      credits >= resolveUnit(scoutId, faction).cost
+    ) {
+      sim.queueUnit(factory.id, scoutId);
+    }
     trainSupport(sim, team, stance, have, credits, faction);
     return;
   }
@@ -439,8 +527,8 @@ function fortify(sim: Sim, team: Team) {
 /** Boats sail the water. Gunships fly the camp. A bridge in the channel gets shot until it falls. */
 function flank(sim: Sim, team: Team, stance: AiProfile) {
   if (stance === "passive") return;
+  if (sim.time < firstPushAt(sim.difficultyOf(team))) return;
   if (stance === "raider" && !sim.aiPushed[team]) return;
-  if (stance === "builder" && sim.time < 200) return;
   const dest = strikePoint(sim, team);
   const boats = sim.units.filter(
     (u) => u.team === team && u.hp > 0 && u.loco === "sea" && u.damage > 0 && !u.aboard && idleish(u),
@@ -535,21 +623,127 @@ function nearbyThreat(sim: Sim, team: Team): { x: number; y: number } | null {
   return best;
 }
 
+function paceCap(sim: Sim, team: Team, pace: Pace): number {
+  const ceil = sim.difficultyOf(team);
+  let cap = pace.cap;
+  if (ceil === "normal") {
+    // Smooth step from Easy's handful to a Normal army across the first 8 minutes.
+    const u = Math.max(0, Math.min(1, sim.time / 480));
+    const s = u * u * (3 - 2 * u);
+    cap = Math.round(6 + (pace.cap - 6) * s);
+  }
+  if (sim.time < 900) return cap;
+  return cap + (ceil === "easy" ? 2 : 4);
+}
+
+/** Normal's wave size grows with the same 8-minute climb. Hard stays at its own number. */
+function liveGroup(sim: Sim, team: Team, pace: Pace): number {
+  if (sim.difficultyOf(team) !== "normal") return pace.group;
+  const u = Math.max(0, Math.min(1, sim.time / 480));
+  const s = u * u * (3 - 2 * u);
+  return Math.max(3, Math.round(3 + (pace.group - 3) * s));
+}
+
+function unitCost(sim: Sim, u: Unit): number {
+  return resolveUnit(u.kind, sim.factionOf(u.team)).cost;
+}
+
+/** Combat units only. Harvesters and the MCV are the economy, not the army. */
+function opposingValue(sim: Sim, team: Team): number {
+  let n = 0;
+  for (const u of sim.units) {
+    if (u.hp <= 0 || u.aboard || u.damage <= 0 || sim.allied(team, u.team)) continue;
+    if (u.kind === "harvester" || u.kind === "mcv") continue;
+    n += unitCost(sim, u) * (u.hp / Math.max(1, u.maxHp));
+  }
+  return n;
+}
+
+/**
+ * Easy never walks in with more than about 1.5× the enemy army, and the first
+ * push stays a handful of units. Normal's first push is the small group; the
+ * wave after 8:00 can be larger. Hard is uncapped.
+ */
+function capParty(sim: Sim, team: Team, ready: Unit[], pace: Pace): Unit[] {
+  const ceil = sim.difficultyOf(team);
+  if (ceil === "hard") return ready;
+  if (ceil === "normal") {
+    const group = liveGroup(sim, team, pace);
+    const n = sim.time >= 480 ? Math.min(ready.length, Math.max(pace.group + 3, 8)) : Math.min(ready.length, group);
+    return ready.slice(0, n);
+  }
+  const rifle = resolveUnit("rifle", sim.factionOf(team)).cost;
+  const enemy = opposingValue(sim, team);
+  // Never more than about 1.5× the player's army. One cheap trooper is the floor
+  // so an empty field still gets a scout, not a free base wipe.
+  const maxValue = Math.max(rifle, enemy * 1.5);
+  const maxN = sim.time < 480 ? 2 : sim.time < 600 ? 6 : 10;
+  const ranked = [...ready].sort((a, b) => unitCost(sim, a) - unitCost(sim, b));
+  const out: Unit[] = [];
+  let v = 0;
+  for (const u of ranked) {
+    if (out.length >= maxN) break;
+    const c = unitCost(sim, u);
+    if (c > maxValue) continue;
+    if (out.length >= 1 && v + c > maxValue + rifle * 0.05) break;
+    out.push(u);
+    v += c;
+  }
+  return out;
+}
+
+function retreating(u: Unit, home: { x: number; y: number }): boolean {
+  if (u.hp >= u.maxHp * 0.62) return false;
+  if (u.order.t !== "move" || u.order.attackMove) return false;
+  return Math.hypot(u.order.x - home.x, u.order.y - home.y) < 7;
+}
+
+/** Damaged troops walk home. Hard only pulls the ones that are about to die. */
+function pullDamaged(sim: Sim, team: Team, army: Unit[]) {
+  const ceil = sim.difficultyOf(team);
+  const line = ceil === "hard" ? 0.22 : 0.55;
+  const home = sim.starts.slots[team] ?? sim.starts.enemy;
+  const hurt = army.filter((u) => {
+    if (u.hp >= u.maxHp * line) return false;
+    if (Math.hypot(u.x - home.x, u.y - home.y) < 7) return false;
+    if (retreating(u, home)) return false;
+    return true;
+  });
+  if (!hurt.length) return;
+  sim.issueMove(
+    hurt.map((u) => u.id),
+    home.x,
+    home.y,
+    false,
+  );
+}
+
 function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
+  if (sim.deploying()) {
+    sim.aiIntent[team] = "expand";
+    return;
+  }
   flank(sim, team, stance);
   const army = combatUnits(sim, team);
+  pullDamaged(sim, team, army);
   const home = sim.starts.slots[team] ?? sim.starts.enemy;
+  if (recallBroken(sim, team, army, home)) {
+    sim.aiAt[team] = Math.max(sim.aiAt[team] || 0, sim.time + 24);
+    sim.aiIntent[team] = "defend";
+    return;
+  }
   const away = army.some(
     (u) => u.order.t === "move" && u.order.attackMove && Math.hypot(u.x - home.x, u.y - home.y) > 10,
   );
 
   if (stance === "passive") {
     const alert = sim.aiAlert[team];
-    const ready = army.filter(idleish);
-    if (sim.aiHurt[team] && alert && sim.time <= alert.until && sim.time >= sim.aiAt[team] && ready.length >= 1) {
-      launch(sim, team, ready, { x: alert.x, y: alert.y }, pace, false);
-      sim.aiIntent[team] = "attack";
-      return;
+    const ready = army.filter((u) => idleish(u) && u.hp >= u.maxHp * 0.55);
+    if (sim.aiHurt[team] && alert && sim.time <= alert.until && ready.length >= 1) {
+      if (launch(sim, team, ready, { x: alert.x, y: alert.y }, pace, false, null, true, true)) {
+        sim.aiIntent[team] = "attack";
+        return;
+      }
     }
     sim.aiIntent[team] = "defend";
     return;
@@ -559,31 +753,64 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
 
   const threat = nearbyThreat(sim, team);
   const answer = heatOf(sim, team) !== "easy" || sim.time > 100;
+  const floor = firstPushAt(sim.difficultyOf(team));
   if (threat && answer) {
-    const home = sim.starts.slots[team] ?? sim.starts.enemy;
     const hard = heatOf(sim, team) === "hard";
+    const early = sim.time < floor;
+    const leash = early ? 8 : hard ? 18 : 12;
     const ready = army.filter((u) => {
+      if (u.hp < u.maxHp * 0.55) return false;
+      if (Math.hypot(u.x - home.x, u.y - home.y) > leash + 6) return false;
       if (u.order.t === "attack") return false;
       if (idleish(u)) return true;
-      return hard && Math.hypot(u.x - home.x, u.y - home.y) < 22;
+      return !early && hard && Math.hypot(u.x - home.x, u.y - home.y) < 22;
     });
     if (ready.length >= 1) {
-      launch(sim, team, ready, threat, pace, false);
-      sim.aiIntent[team] = "defend";
-      return;
+      const dest = early
+        ? {
+            x: clamp(home.x + Math.max(-4, Math.min(4, threat.x - home.x)), 2, sim.gw - 2),
+            y: clamp(home.y + Math.max(-4, Math.min(4, threat.y - home.y)), 2, sim.gh - 2),
+          }
+        : threat;
+      if (launch(sim, team, ready, dest, pace, false, null, !early, true)) {
+        sim.aiIntent[team] = "defend";
+        return;
+      }
+    }
+  }
+
+  // Before the scheduled push, a wanderer comes home instead of living on their yard.
+  if (sim.difficultyOf(team) !== "hard" && !sim.aiPushed[team] && sim.time < pace.assault) {
+    const camp = enemyCamp(sim, team);
+    const deep = army.filter((u) => {
+      if (retreating(u, home)) return false;
+      if (Math.hypot(u.x - camp.x, u.y - camp.y) >= 9.5) return false;
+      if (Math.hypot(u.x - home.x, u.y - home.y) <= 8) return false;
+      return u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove);
+    });
+    if (deep.length) {
+      sim.issueMove(
+        deep.map((u) => u.id),
+        home.x,
+        home.y,
+        false,
+      );
     }
   }
 
   if (stance === "builder") {
-    if (sim.time >= pace.push && army.filter(idleish).length >= Math.max(3, pace.group)) {
-      const ready = army.filter((u) => idleish(u) || (u.order.t === "move" && !u.order.attackMove));
+    if (sim.time >= pace.push && army.filter((u) => idleish(u) && !retreating(u, home) && u.hp >= u.maxHp * 0.55).length >= Math.max(3, Math.min(4, liveGroup(sim, team, pace)))) {
+      let ready = army.filter((u) => (idleish(u) || (u.order.t === "move" && !u.order.attackMove)) && !retreating(u, home) && u.hp >= u.maxHp * 0.55);
+      ready = capParty(sim, team, ready, pace);
       if (ready.length >= 3) {
-        launch(sim, team, ready, strikePoint(sim, team), pace, true);
-        sim.aiIntent[team] = "attack";
-        return;
+        if (launch(sim, team, ready, strikePoint(sim, team), pace, true)) {
+          sim.aiPushed[team] = true;
+          sim.aiIntent[team] = "attack";
+          return;
+        }
       }
     }
-    if (away) {
+    if (away && sim.aiPushed[team]) {
       nudge(sim, team, army);
       sim.aiIntent[team] = "attack";
       return;
@@ -592,60 +819,110 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
     return;
   }
 
-  // Raider. Scout, then a harvester poke, then a wave that actually pathfinds out of the base.
-  if (!sim.aiScouted[team] && sim.time >= pace.scout && sim.time < pace.harass) {
-    const idle = army.filter((u) => LIGHT.has(u.kind) && idleish(u) && !isArmor(u));
+  // Raider. Scout, then a short harass that does not camp their yard, then a real wave.
+  const scoutClose = sim.difficultyOf(team) === "easy" ? Math.min(pace.harass, EASY_SCOUT_UNTIL) : pace.harass;
+  if (!sim.aiScouted[team] && sim.time >= pace.scout && sim.time < scoutClose) {
+    const idle = army.filter((u) => LIGHT.has(u.kind) && idleish(u) && !isArmor(u) && u.hp >= u.maxHp * 0.55);
     const light = idle.find((u) => u.armor === "infantry") ?? idle.find((u) => u.kind === "scout" || u.kind === "razor");
     if (light) {
-      launch(sim, team, [light], reconPoint(sim, team), pace, false, null, false);
-      sim.aiScouted[team] = true;
+      if (launch(sim, team, [light], standoff(sim, team), pace, false, null, false)) {
+        sim.aiScouted[team] = true;
+        sim.aiIntent[team] = "scout";
+        return;
+      }
+    }
+  }
+
+  const pokeDue =
+    sim.difficultyOf(team) !== "easy" &&
+    sim.time >= pace.harass &&
+    sim.time + 1 < pace.assault &&
+    !sim.aiPoked[team];
+  const assaultDue = sim.time >= pace.assault && !sim.aiPushed[team];
+  const waveDue = sim.aiPushed[team] && sim.time >= (sim.aiAt[team] || 0);
+  if (pokeDue) {
+    const foot = army.filter((u) => idleish(u) && !retreating(u, home) && u.armor === "infantry" && u.hp >= u.maxHp * 0.55).slice(0, 2);
+    const buggy = army.filter((u) => idleish(u) && !retreating(u, home) && (u.kind === "scout" || u.kind === "razor") && u.hp >= u.maxHp * 0.55).slice(0, 1);
+    const party = [...foot, ...buggy];
+    if (party.length >= 1) {
+      const prey = openHarvester(sim, team);
+      if (launch(sim, team, party, prey ?? standoff(sim, team), pace, false, null, !!prey)) {
+        sim.aiPoked[team] = true;
+        sim.aiIntent[team] = "attack";
+        return;
+      }
+    }
+  }
+  if (sim.aiPoked[team] && !sim.aiPushed[team] && sim.time >= pace.harass + 26 && sim.time < pace.assault) {
+    const camp = enemyCamp(sim, team);
+    const lingering = army.filter((u) => {
+      if (Math.hypot(u.x - home.x, u.y - home.y) <= 8) return false;
+      if (Math.hypot(u.x - camp.x, u.y - camp.y) >= 12) return false;
+      return u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove);
+    });
+    if (lingering.length) {
+      sim.issueMove(
+        lingering.map((u) => u.id),
+        home.x,
+        home.y,
+        false,
+      );
       sim.aiIntent[team] = "scout";
       return;
     }
   }
-
-  const pokeDue = sim.time >= pace.harass && !sim.aiPoked[team] && sim.time < pace.assault + 20;
-  const assaultDue = sim.time >= pace.assault && !sim.aiPushed[team];
-  const waveDue = sim.aiPushed[team] && sim.time >= (sim.aiAt[team] || 0);
-  if (pokeDue) {
-    const foot = army.filter((u) => idleish(u) && u.armor === "infantry").slice(0, 2);
-    const buggy = army.filter((u) => idleish(u) && (u.kind === "scout" || u.kind === "razor")).slice(0, 1);
-    const party = [...foot, ...buggy];
-    if (party.length >= 1) {
-      const prey = visibleHarvester(sim, team);
-      launch(sim, team, party, prey ?? approachPoint(sim, team, 12), pace, false);
-      sim.aiPoked[team] = true;
-      sim.aiIntent[team] = "attack";
-      return;
-    }
-  }
   if (assaultDue || waveDue) {
-    let ready = army.filter(idleish);
+    let ready = army.filter((u) => idleish(u) && !retreating(u, home) && u.hp >= u.maxHp * 0.55);
     if (sim.time < pace.armor) {
       const guns = ready.filter(isArmor);
       const rest = ready.filter((u) => !isArmor(u));
-      const allow = heatOf(sim, team) === "easy" ? 0 : 1;
+      const allow = sim.difficultyOf(team) === "hard" ? 1 : 0;
       ready = [...rest, ...guns.slice(0, allow)];
     }
-    const need = waveDue ? pace.group : Math.max(3, pace.group - 1);
+    ready = capParty(sim, team, ready, pace);
+    const group = liveGroup(sim, team, pace);
+    const need = waveDue ? group : Math.max(3, group - 1);
     const late = sim.time > (assaultDue ? pace.assault + 30 : (sim.aiAt[team] || 0) + 25);
-    if (ready.length >= need || (late && ready.length >= 2) || (heatOf(sim, team) === "hard" && ready.length >= 2 && assaultDue)) {
-      const dest = strikePoint(sim, team);
-      const focus = heatOf(sim, team) === "hard" ? priorityId(sim, team) : null;
-      launch(sim, team, ready, dest, pace, true, focus);
-      sim.aiPushed[team] = true;
-      sim.aiPoked[team] = true;
-      sim.aiIntent[team] = "attack";
-      warnArriving(sim, team);
-      return;
+    const easy = sim.difficultyOf(team) === "easy";
+    const easyGo = easy && ready.length >= 3 && sim.time >= pace.assault;
+    const normalGo =
+      !easy &&
+      (ready.length >= need || (late && ready.length >= 2) || (sim.difficultyOf(team) === "hard" && ready.length >= 2 && assaultDue));
+    if (easyGo || normalGo) {
+      const striking = !easy || ready.length >= 3;
+      const dest = striking ? strikePoint(sim, team) : standoff(sim, team);
+      const focus = sim.difficultyOf(team) === "hard" ? priorityId(sim, team) : null;
+      if (launch(sim, team, ready, dest, pace, true, focus, striking)) {
+        sim.aiPushed[team] = true;
+        sim.aiPoked[team] = true;
+        sim.aiIntent[team] = "attack";
+        warnArriving(sim, team);
+        return;
+      }
     }
   }
 
   warnArriving(sim, team);
-  if (away || sim.aiScouted[team]) nudge(sim, team, army);
+  if (sim.aiPushed[team] && away) nudge(sim, team, army);
   if (sim.aiPushed[team] || sim.aiPoked[team]) sim.aiIntent[team] = "attack";
   else if (sim.time >= pace.scout && pace.scout < 900) sim.aiIntent[team] = "scout";
   else sim.aiIntent[team] = "expand";
+}
+
+/** Half the squad is hurt. Easy and Normal walk home instead of dying on the yard. */
+function recallBroken(sim: Sim, team: Team, army: Unit[], home: { x: number; y: number }): boolean {
+  if (sim.difficultyOf(team) === "hard") return false;
+  const away = army.filter((u) => Math.hypot(u.x - home.x, u.y - home.y) > 9);
+  if (away.length < 3) return false;
+  const hurt = away.filter((u) => u.hp < u.maxHp * 0.55).length;
+  if (hurt < Math.ceil(away.length * 0.5)) return false;
+  sim.issueMove(
+    away.map((u) => u.id),
+    home.x,
+    home.y,
+    false,
+  );
+  return true;
 }
 
 /** Keep a marching group from parking in the fog when a hop ends. Fresh troops wait for the next wave. */
@@ -680,10 +957,15 @@ function launch(
   waveClock: boolean,
   focus: number | null = null,
   attackMove = true,
-) {
-  if (!units.length) return;
+  defense = false,
+): boolean {
+  if (!units.length) return false;
+  const diff = sim.difficultyOf(team);
+  // Personality can wait. It cannot attack before the difficulty mark.
+  if (!defense && attackMove && sim.time < firstPushAt(diff)) return false;
+  if (!defense && !attackMove && diff === "easy" && sim.time >= EASY_SCOUT_UNTIL) return false;
   sim.aiGoal[team] = dest;
-  if (focus) {
+  if (focus && (defense || sim.time >= firstPushAt(diff))) {
     sim.issueAttack(
       units.map((u) => u.id),
       focus,
@@ -694,35 +976,49 @@ function launch(
       units.map((u) => u.id),
       step.x,
       step.y,
-      attackMove,
+      attackMove && (defense || sim.time >= firstPushAt(diff)),
     );
   }
   if (waveClock) {
     const gap = pace.wave + sim.roll(pace.jitter + 1);
-    sim.aiAt[team] = sim.time + gap;
+    let at = sim.time + gap;
+    // Normal's first walk is the small push. The main wave waits until 8:00.
+    if (diff === "normal" && sim.time < 480) at = Math.max(at, 480);
+    if (at < firstPushAt(diff)) at = firstPushAt(diff);
+    sim.aiAt[team] = at;
     if (team === 1) sim.aiNext = sim.aiAt[team]!;
   }
+  return true;
 }
 
 function isArmor(u: Unit): boolean {
   return u.kind === "tank" || u.kind === "razor" || u.kind === "medium" || u.kind === "artillery";
 }
 
-/** Short of the enemy camp so a scout reveals the approach and does not shoot the yard. */
-function reconPoint(sim: Sim, team: Team): { x: number; y: number } {
-  return approachPoint(sim, team, 18);
-}
-
-function approachPoint(sim: Sim, team: Team, hold: number): { x: number; y: number } {
+/** Short of both camps. A scout reveals the gap and does not walk onto the yard. */
+function standoff(sim: Sim, team: Team): { x: number; y: number } {
   const home = sim.starts.slots[team] ?? sim.starts.enemy;
   const camp = enemyCamp(sim, team);
   const dx = home.x - camp.x;
   const dy = home.y - camp.y;
   const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  // Tight maps cannot be 10 tiles off both yards. Hold on our half of the gap.
+  const gap = len < 20 ? Math.min(len - 8.6, Math.max(8.2, len * 0.5)) : Math.min(18, Math.max(11, len * 0.42));
   return {
-    x: clamp(camp.x + (dx / len) * hold, 3, sim.gw - 3),
-    y: clamp(camp.y + (dy / len) * hold, 3, sim.gh - 3),
+    x: clamp(camp.x + ux * gap, 3, sim.gw - 3),
+    y: clamp(camp.y + uy * gap, 3, sim.gh - 3),
   };
+}
+
+/** A harvester out in the ore, not one parked on their Construction Yard. */
+function openHarvester(sim: Sim, team: Team): { x: number; y: number } | null {
+  const prey = visibleHarvester(sim, team);
+  if (!prey) return null;
+  const camp = enemyCamp(sim, team);
+  if (Math.hypot(prey.x - camp.x, prey.y - camp.y) < 12) return null;
+  return prey;
 }
 
 function visibleHarvester(sim: Sim, team: Team): { x: number; y: number } | null {

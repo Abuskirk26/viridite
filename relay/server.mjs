@@ -267,7 +267,8 @@ function readFrames(buf, onFrame) {
 const launched = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (launched) {
   const port = Number(process.env.PORT || 8091);
-  startRelay(port).then((srv) => {
+  const host = process.env.HOST || "127.0.0.1";
+  startRelay(port, host).then((srv) => {
     process.stdout.write(`VIRIDITE relay on ${srv.url}\n`);
   });
 }

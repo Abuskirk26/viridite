@@ -13,6 +13,7 @@ import {
   TILE_CRYSTAL,
   TILE_DEEP,
   TILE_FORD,
+  TILE_HIGH,
   TILE_HUT,
   TILE_PUMP,
   TILE_RAMP,
@@ -63,7 +64,7 @@ export function allows(
 ): boolean {
   if (who === "air") return true;
   if (tile === TILE_FORD) return true;
-  if (tile === TILE_SCRUB) return who === "vehicle" || who === "amphib";
+  if (tile === TILE_SCRUB) return who === "infantry" || who === "vehicle" || who === "amphib";
   if (tile === TILE_ROCK || tile === TILE_CLIFF) return false;
   if (isShell(tile) && shellMark < 2) return false;
   const g = groundOf(tile);
@@ -146,7 +147,7 @@ function at(terrain: ArrayLike<number>, x: number, y: number, gw: number, gh: nu
 
 const HEIGHT = new Float32Array([
   0.42, 1.28, 0.56, 0.56, 0.56, 0.09, 0.0, 1.72, 0.26, 0.09,
-  0.56, 0.98, 0.09, 0.56, 0.98, 0.82, 0.56, 0.56, 0.56, 0.56, 0.0,
+  0.56, 0.98, 0.09, 0.56, 0.98, 0.82, 0.56, 0.56, 0.56, 0.56, 0.0, 1.58,
 ]);
 
 function rawH(tile: number): number {
@@ -311,6 +312,85 @@ export function softenField(
   terrain.set(next);
 }
 
+const LAND_ROUND = new Set<number>([
+  TILE_SAND,
+  TILE_CLEAR,
+  TILE_ROUGH,
+  TILE_SHORE,
+  TILE_SCRUB,
+  TILE_HIGH,
+  TILE_ROAD,
+  TILE_STUMP,
+  TILE_SPENT,
+]);
+
+function wetTile(t: number): boolean {
+  return t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
+}
+
+/**
+ * Chamfer stair-step coasts and swallow one-tile water squares.
+ * Starts and crystal stay put so a camp does not fall into the sea.
+ */
+export function roundCoast(
+  terrain: Uint8Array,
+  w: number,
+  h: number,
+  pads: { x: number; y: number }[],
+) {
+  const guard = new Uint8Array(w * h);
+  const mark = (x: number, y: number, r: number) => {
+    for (let y2 = y - r; y2 <= y + r; y2++) {
+      for (let x2 = x - r; x2 <= x + r; x2++) {
+        if (x2 < 0 || y2 < 0 || x2 >= w || y2 >= h) continue;
+        guard[y2 * w + x2] = 1;
+      }
+    }
+  };
+  for (const p of pads) mark(Math.floor(p.x), Math.floor(p.y), 4);
+  for (let i = 0; i < terrain.length; i++) {
+    if ((terrain[i] ?? 0) !== TILE_CRYSTAL) continue;
+    mark(i % w, (i / w) | 0, 1);
+  }
+  const atT = (x: number, y: number, src: Uint8Array) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return TILE_DEEP;
+    return src[y * w + x] ?? TILE_DEEP;
+  };
+  for (let pass = 0; pass < 2; pass++) {
+    const next = new Uint8Array(terrain);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        if (guard[i]) continue;
+        const t = terrain[i] ?? 0;
+        if (t === TILE_BRIDGE || t === TILE_CRYSTAL || t === TILE_CLIFF || t === TILE_ROCK || t === TILE_RAMP) continue;
+        const N = wetTile(atT(x, y - 1, terrain));
+        const S = wetTile(atT(x, y + 1, terrain));
+        const W = wetTile(atT(x - 1, y, terrain));
+        const E = wetTile(atT(x + 1, y, terrain));
+        const wetN = (N ? 1 : 0) + (S ? 1 : 0) + (W ? 1 : 0) + (E ? 1 : 0);
+        const corner = (N && E) || (N && W) || (S && E) || (S && W);
+        if (LAND_ROUND.has(t) && corner && wetN === 2) {
+          next[i] = TILE_SHALLOW;
+          continue;
+        }
+        const nL = !wetTile(atT(x, y - 1, terrain));
+        const sL = !wetTile(atT(x, y + 1, terrain));
+        const wL = !wetTile(atT(x - 1, y, terrain));
+        const eL = !wetTile(atT(x + 1, y, terrain));
+        const landN = (nL ? 1 : 0) + (sL ? 1 : 0) + (wL ? 1 : 0) + (eL ? 1 : 0);
+        const landCorner = (nL && eL && wetTile(atT(x + 1, y - 1, terrain))) || (nL && wL && wetTile(atT(x - 1, y - 1, terrain))) || (sL && eL && wetTile(atT(x + 1, y + 1, terrain))) || (sL && wL && wetTile(atT(x - 1, y + 1, terrain)));
+        if ((t === TILE_DEEP || t === TILE_SHALLOW) && landN >= 3) {
+          next[i] = landN >= 4 ? TILE_SHORE : TILE_SHALLOW;
+          continue;
+        }
+        if (t === TILE_DEEP && landCorner && landN === 2) next[i] = TILE_SHALLOW;
+      }
+    }
+    terrain.set(next);
+  }
+}
+
 const lit = [0, 0, 0];
 
 /** Northwest sun on the slope. Steep ground becomes a lit or shadowed face. */
@@ -391,29 +471,7 @@ function dress(
   const tile = terrain[iy * gw + ix] ?? 0;
   const fx = wx - ix;
   const fy = wy - iy;
-  if (tile === TILE_BRIDGE) {
-    const horiz = at(terrain, ix - 1, iy, gw, gh) === TILE_BRIDGE || at(terrain, ix + 1, iy, gw, gh) === TILE_BRIDGE;
-    const vert = at(terrain, ix, iy - 1, gw, gh) === TILE_BRIDGE || at(terrain, ix, iy + 1, gw, gh) === TILE_BRIDGE;
-    const alongX = horiz || !vert;
-    const across = alongX ? fy : fx;
-    if (across > 0.16 && across < 0.84) {
-      const stripe = Math.sin((alongX ? wy : wx) * 9 * Math.PI);
-      const plank = 0.78 + stripe * 0.12;
-      const south = alongX ? fy > 0.68 : fx > 0.68;
-      const shade = south ? 0.62 : 1;
-      return [186 * plank * shade, 142 * plank * shade, 86 * plank * shade];
-    }
-    return [r * 0.72, g * 0.78, b * 0.82];
-  }
-  if (tile === TILE_ROAD) {
-    const ns = at(terrain, ix, iy - 1, gw, gh) === TILE_ROAD || at(terrain, ix, iy + 1, gw, gh) === TILE_ROAD;
-    const ew = at(terrain, ix - 1, iy, gw, gh) === TILE_ROAD || at(terrain, ix + 1, iy, gw, gh) === TILE_ROAD;
-    const d = ns || !ew ? Math.abs(fx - 0.5) : Math.abs(fy - 0.5);
-    if (d < 0.34) {
-      const k = (1 - d / 0.34) * 0.9;
-      return [r * (1 - k) + 112 * k, g * (1 - k) + 82 * k, b * (1 - k) + 52 * k];
-    }
-  }
+  if (tile === TILE_BRIDGE || tile === TILE_ROAD) return [r, g, b];
   if (tile === TILE_FORD && fy > 0.22 && fy < 0.78) {
     const k = 0.75;
     return [r * (1 - k) + sand[0] * k, g * (1 - k) + sand[1] * k, b * (1 - k) + sand[2] * k];
@@ -738,38 +796,52 @@ export function paintWaterSheen(
   }
 }
 
-export function paintOre(ctx: CanvasRenderingContext2D, x: number, y: number, amount: number, spent: boolean, time: number) {
+export function paintOre(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  amount: number,
+  spent: boolean,
+  time: number,
+  spark = false,
+) {
   if (spent || amount <= 0) {
     if (!spent) return;
     ctx.fillStyle = "#3a2c1c";
     ctx.fillRect(x + 0.28, y + 0.62, 0.12, 0.08);
     ctx.fillRect(x + 0.55, y + 0.7, 0.14, 0.07);
-    ctx.strokeStyle = "#1a120c";
-    ctx.lineWidth = 0.03;
-    ctx.strokeRect(x + 0.26, y + 0.6, 0.16, 0.12);
-    ctx.strokeRect(x + 0.52, y + 0.68, 0.18, 0.1);
     return;
   }
-  const rich = amount >= 1100;
-  const gem = amount >= 2000;
-  const n = gem ? 2 : rich ? 5 : 3;
-  const bob = Math.sin(time * 2 + x + y) * 0.02;
+  const fill = Math.max(0.18, Math.min(1, amount / 1400));
+  const n = 2 + ((hash(x + 3, y + 1) * 3) | 0);
+  const bob = Math.sin(time * 2 + x + y) * 0.015;
   for (let i = 0; i < n; i++) {
-    const hx = hash(x + i * 4, y + 2);
-    const hy = hash(x + 1, y + i * 5);
-    const px = x + 0.22 + hx * 0.5;
-    const py = y + 0.28 + hy * 0.4 + bob;
-    const s = gem ? 0.22 : rich ? 0.12 : 0.09;
-    ctx.fillStyle = gem ? "#b8ffd0" : rich ? "#3dcc6e" : "#1e8a48";
+    const hx = hash(x * 5 + i * 13, y * 3 + 4);
+    const hy = hash(x + i * 7, y * 9 + 2);
+    if (hx < 0.18) continue;
+    const px = x + 0.18 + hx * 0.64;
+    const py = y + 0.22 + hy * 0.52 + bob;
+    const s = (0.07 + fill * 0.13) * (0.65 + hy * 0.7);
+    const rot = hash(x + i, y + 11) * Math.PI;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(rot);
+    ctx.fillStyle = fill > 0.7 ? "#b7f0c4" : fill > 0.4 ? "#2f9a52" : "#1c6b38";
     ctx.beginPath();
-    ctx.moveTo(px, py - s);
-    ctx.lineTo(px + s * 0.7, py);
-    ctx.lineTo(px, py + s);
-    ctx.lineTo(px - s * 0.7, py);
+    ctx.moveTo(0, -s * 1.35);
+    ctx.lineTo(s * 0.42, -s * 0.15);
+    ctx.lineTo(s * 0.22, s);
+    ctx.lineTo(-s * 0.38, s * 0.45);
     ctx.closePath();
     ctx.fill();
-    ctx.fillStyle = "#eafff2";
-    ctx.fillRect(px - 0.02, py - s * 0.45, 0.035, s * 0.4);
+    ctx.fillStyle = "rgba(230, 255, 236, 0.55)";
+    ctx.fillRect(-s * 0.08, -s * 0.7, s * 0.12, s * 0.28);
+    ctx.restore();
+  }
+  if (spark) {
+    const glint = (Math.sin(time * 9 + x * 2 + y) + 1) * 0.5;
+    ctx.fillStyle = `rgba(255, 255, 240, ${0.35 + glint * 0.55})`;
+    ctx.fillRect(x + 0.32 + glint * 0.2, y + 0.28, 0.05, 0.05);
   }
 }
 

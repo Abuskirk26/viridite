@@ -167,6 +167,11 @@ export function applyOrder(sim: Sim, cmd: Cmd): void {
   }
   if (cmd.kind === "cancel") {
     if (typeof p.id !== "number") return;
+    if (p.unit) {
+      const unit = unitId(p.unit);
+      if (unit) sim.cancelQueued(p.id, seat, unit);
+      return;
+    }
     sim.cancelTrain(p.id, seat);
     return;
   }

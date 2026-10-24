@@ -269,7 +269,7 @@ function featherEdges(src: HTMLCanvasElement): HTMLCanvasElement {
   if (!ctx) return src;
   ctx.drawImage(src, 0, 0);
   ctx.globalCompositeOperation = "destination-in";
-  const f = Math.max(24, Math.round(Math.min(src.width, src.height) * 0.16));
+  const f = Math.max(48, Math.round(Math.min(src.width, src.height) * 0.28));
   const fade = (grd: CanvasGradient, x: number, y: number, w: number, h: number) => {
     ctx.fillStyle = grd;
     ctx.fillRect(x, y, w, h);

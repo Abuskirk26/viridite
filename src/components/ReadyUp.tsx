@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Dices, Swords } from "lucide-react";
-import { FACTION_COLOR, FACTION_NAME, type AiDifficulty, type FactionId } from "@/game/data";
-import { MAP_LIST } from "@/game/maps";
+import { FACTION_COLOR, FACTION_NAME, MAP_H, MAP_W, theaterOf, type AiDifficulty, type FactionId, type MapId, type Theater } from "@/game/data";
+import { generateMap, MAP_LIST, plantCorners, waterKind } from "@/game/maps";
+import { paintDocThumb } from "@/game/render";
 import {
   CREDIT_CHOICES,
   DIFFICULTY_CHOICES,
@@ -12,6 +13,10 @@ import {
   chooseOpponents,
   listMyMaps,
   lobbyBlock,
+  orderCorners,
+  resolveMyMap,
+  withNewBotSkill,
+  normalBotDefaults,
   type MyMapRow,
   type OpponentCount,
   type SkirmishSetup,
@@ -26,6 +31,7 @@ export function ReadyUp({
   onChange,
   onBack,
   onStart,
+  onPractice,
   onRandomize,
   onFriends,
 }: {
@@ -33,6 +39,7 @@ export function ReadyUp({
   onChange: (partial: Partial<SkirmishSetup>) => void;
   onBack: () => void;
   onStart: () => void;
+  onPractice: () => void;
   onRandomize: () => void;
   onFriends: () => void;
 }) {
@@ -51,11 +58,15 @@ export function ReadyUp({
   const setBot = (index: 0 | 1 | 2, id: FactionId) => {
     const bots = setup.bots.slice() as SkirmishSetup["bots"];
     bots[index] = id;
-    onChange(index === 0 ? { enemy: id, bots } : { bots });
+    onChange(index === 0 ? { enemy: id, bots, ...normalBotDefaults() } : { bots, ...normalBotDefaults() });
   };
   const addBot = () => {
     if (n >= 3) return;
-    onChange(chooseOpponents({ ...setup, teams: "ffa" }, (n + 1) as OpponentCount));
+    const next = (n + 1) as OpponentCount;
+    onChange({
+      ...chooseOpponents({ ...setup, teams: "ffa" }, next),
+      ...withNewBotSkill(setup, next),
+    });
   };
   const dropAt = (index: 0 | 1 | 2) => {
     if (n <= 1) return;
@@ -85,8 +96,7 @@ export function ReadyUp({
       customId: row.id,
       mapId: row.deep ? "coast" : "dry",
       size: row.size,
-      opponents: row.starts >= 4 ? 3 : 1,
-      teams: "ffa",
+      ...normalBotDefaults(),
     });
   };
 
@@ -97,243 +107,449 @@ export function ReadyUp({
     { key: "b3", label: "Bot", faction: setup.bots[2] },
   ].slice(0, n + 1);
 
+  if (rules) {
+    return (
+      <OptionsScreen
+        setup={setup}
+        onChange={onChange}
+        onClose={() => setRules(false)}
+      />
+    );
+  }
+
   return (
-    <div className="flex h-dvh flex-col bg-field" data-testid="ready-up">
-      <header className="flex items-center gap-3 px-3 pt-3">
-        <button type="button" className="h-11 px-2 font-display text-xs uppercase text-brass" onClick={onBack}>
-          Settings
+    <div className="relative flex h-full min-h-0 flex-col bg-[#0e100e] text-ink" data-testid="ready-up">
+      <header className="steel flex h-11 shrink-0 items-stretch border-b border-black">
+        <button type="button" className="h-11 min-w-11 px-3 font-display text-xs uppercase text-brass" onClick={onBack}>
+          Back
         </button>
-        <h1 className="font-display text-2xl tracking-[0.14em] text-crystal">SKIRMISH</h1>
+        <div className="flex h-11 items-center border-b-2 border-crystal bg-[#16301f] px-4 font-display text-xs uppercase tracking-[0.16em] text-crystal">
+          Skirmish
+        </div>
+        <div className="ml-auto flex items-center gap-1 pr-2">
+          <Chip on={!coOp} testId="teams-ffa" label="Versus. Each commander fights alone." onClick={() => onChange({ teams: "ffa" })}>
+            Versus
+          </Chip>
+          <Chip on={coOp} testId="teams-tvt" label="Co-op. You and an ally against two enemies." onClick={() => onChange({ ...chooseOpponents({ ...setup, teams: "tvt" }, 2), ...withNewBotSkill(setup, 2) })}>
+            Co-op
+          </Chip>
+        </div>
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-lg flex-col gap-4 px-3 py-3">
-          <section>
-            <p className="font-display text-[10px] uppercase tracking-widest text-brass">Map</p>
-            <p className="mt-1 font-display text-sm uppercase text-ink">{mapName}</p>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              <Chip on={setup.customId === "tpl:fourisles"} testId="map-fourisles" label="Four Isles" onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", opponents: 3, teams: "ffa" })}>
-                Isles
-              </Chip>
-              {LOBBY_MAPS.map((m) => (
-                <Chip
-                  key={m.id}
-                  on={!setup.customId && setup.mapId === m.id}
-                  testId={`map-${m.id}`}
-                  label={MAP_LIST.find((meta) => meta.id === m.id)?.name ?? m.short}
-                  onClick={() =>
-                    onChange(
-                      m.id === "michigan"
-                        ? { mapId: m.id, customId: "", size: "continent", opponents: 3, teams: "ffa" }
-                        : { mapId: m.id, customId: "" },
-                    )
-                  }
-                >
-                  {m.short}
-                </Chip>
-              ))}
-            </div>
-            <button type="button" className="mt-2 font-display text-xs uppercase text-brass" onClick={() => setMore((v) => !v)}>
-              {more ? "Hide maps" : "More maps"}
-            </button>
-            {more && (
-              <div className="mt-2 flex flex-col">
-                {maps
-                  .filter((row) => row.id !== "tpl:fourisles")
-                  .map((row) => (
-                    <button
-                      key={row.id}
-                      type="button"
-                      className={`flex h-11 items-center justify-between border-b border-brass-dim text-left ${setup.customId === row.id ? "text-gold" : "text-ink"}`}
-                      onClick={() => pick(row)}
-                    >
-                      <span className="font-display text-sm uppercase">{row.name}</span>
-                      <span className="text-xs text-muted">{row.w}×{row.h}</span>
-                    </button>
-                  ))}
-              </div>
-            )}
-          </section>
 
-          <section>
-            <p className="font-display text-[10px] uppercase tracking-widest text-brass">Team</p>
-            <div className="mt-2 grid grid-cols-2 gap-1.5">
-              <Chip on={!coOp} testId="teams-ffa" label="Versus. Each commander fights alone." onClick={() => onChange({ teams: "ffa" })}>
-                Versus
-              </Chip>
-              <Chip on={coOp} testId="teams-tvt" label="Co-op. You and an ally against two enemies." onClick={() => onChange(chooseOpponents({ ...setup, teams: "tvt" }, 2))}>
-                Co-op
-              </Chip>
-            </div>
-          </section>
-
-          <section data-testid="ready-seats">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-widest text-brass">Seats</p>
-              <button
-                type="button"
-                data-testid="add-bot"
-                disabled={n >= 3}
-                className="h-11 px-2 font-display text-xs uppercase text-crystal disabled:text-brass-dim"
-                onClick={addBot}
+      <div className="grid min-h-0 flex-1 grid-cols-2 gap-2 overflow-hidden px-2 py-1">
+        <section data-testid="ready-seats" className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+          <p className="font-display text-xs uppercase tracking-wide text-muted">You</p>
+          <FactionPick label="You" faction={setup.player} onPick={(id) => onChange({ player: id, ...normalBotDefaults() })} />
+          <p className="truncate font-display text-xs uppercase tracking-wide text-gold">{mapName}</p>
+          <div className="flex gap-1 overflow-x-auto">
+            <Chip on={setup.customId === "tpl:fourisles"} testId="map-fourisles" label="Four Isles" onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", ...normalBotDefaults() })}>
+              Isles
+            </Chip>
+            {LOBBY_MAPS.map((m) => (
+              <Chip
+                key={m.id}
+                on={!setup.customId && setup.mapId === m.id}
+                testId={`map-${m.id}`}
+                label={MAP_LIST.find((meta) => meta.id === m.id)?.name ?? m.short}
+                onClick={() =>
+                  onChange(
+                    m.id === "michigan"
+                      ? { mapId: m.id, customId: "", size: "continent", ...normalBotDefaults() }
+                      : { mapId: m.id, customId: "", ...normalBotDefaults() },
+                  )
+                }
               >
-                {n >= 3 ? "Full" : "Add bot"}
-              </button>
-            </div>
-            <p className="text-xs text-pretty text-muted">Bots hold these seats. Play with friends uses this same map and lets a friend take one.</p>
-            <div className="mt-1 flex flex-col gap-2">
-              {seats.map((seat, index) => (
-                <div key={seat.key} className="flex flex-col gap-1">
-                  <div className="flex items-center gap-2">
-                    <span className="w-12 shrink-0 font-display text-xs uppercase text-ink">{seat.label}</span>
-                    <div className="grid flex-1 grid-cols-4 gap-1">
-                      {IDS.map((id) => (
-                        <button
-                          key={id}
-                          type="button"
-                          data-testid={`seat-${seat.label}-${id}`}
-                          aria-pressed={seat.faction === id}
-                          aria-label={`${seat.label} ${FACTION_NAME[id]}`}
-                          className={`h-11 font-display text-[10px] uppercase ${seat.faction === id ? "outline outline-2 outline-ink" : ""}`}
-                          style={{ background: FACTION_COLOR[id], color: "#14110e" }}
-                          onClick={() => (index === 0 ? onChange({ player: id }) : setBot((index - 1) as 0 | 1 | 2, id))}
-                        >
-                          {FACTION_NAME[id].slice(0, 3)}
-                        </button>
-                      ))}
-                    </div>
-                    {index > 0 && n > 1 ? (
-                      <button
-                        type="button"
-                        data-testid="drop-bot"
-                        className="h-11 w-12 shrink-0 font-display text-[10px] uppercase text-danger"
-                        onClick={() => dropAt((index - 1) as 0 | 1 | 2)}
-                      >
-                        Drop
-                      </button>
-                    ) : (
-                      <span className="w-12 shrink-0" />
-                    )}
-                  </div>
-                  {index > 0 && (
-                    <div className="flex gap-1 pl-14">
-                      {DIFFICULTY_CHOICES.map((id) => (
-                        <button
-                          key={id}
-                          type="button"
-                          data-testid={`skill-${index - 1}-${id}`}
-                          aria-pressed={setup.skills[index - 1] === id}
-                          className={`h-9 flex-1 font-display text-[10px] uppercase ${setup.skills[index - 1] === id ? "steel-inset text-gold" : "border border-brass-dim text-ink"}`}
-                          onClick={() => setSkill((index - 1) as 0 | 1 | 2, id)}
-                        >
-                          {DIFF[id]}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section>
-            <p className="font-display text-[10px] uppercase tracking-widest text-brass">Settings</p>
-            <p className="mt-1 text-xs text-muted">Each bot starts easy and climbs to the skill you set. Hard is the top.</p>
-            <Line label="Credits">
-              {CREDIT_CHOICES.map((c) => (
-                <Chip key={c} on={setup.credits === c} testId={`credits-${c}`} label={`${c} credits`} onClick={() => onChange({ credits: c })}>
-                  {c === 10000 ? "10k" : c === 5000 ? "5k" : "2k"}
-                </Chip>
-              ))}
-            </Line>
-            <Line label="Start">
-              {START_CHOICES.map((id) => (
-                <Chip key={id} on={setup.start === id} testId={`start-${id}`} label={START_LABEL[id]} onClick={() => onChange({ start: id })}>
-                  {START_LABEL[id]}
-                </Chip>
-              ))}
-            </Line>
-            <Line label="Fog">
-              <Chip on={setup.fog} testId="fog-on" label="Fog on" onClick={() => onChange({ fog: true })}>
-                On
+                {m.short}
               </Chip>
-              <Chip on={!setup.fog} testId="fog-off" label="Fog off" onClick={() => onChange({ fog: false })}>
-                Off
-              </Chip>
-            </Line>
-            <button type="button" data-testid="advanced-rules" className="mt-3 h-11 font-display text-xs uppercase text-brass" onClick={() => setRules((v) => !v)}>
-              {rules ? "Hide rules" : "Advanced rules"}
+            ))}
+            <button type="button" className="h-11 min-w-11 shrink-0 px-2 font-display text-xs uppercase text-brass" onClick={() => setMore(true)}>
+              Maps
             </button>
-            {rules && (
-              <>
-                <Line label="Win">
-                  <Chip on={setup.mode === "destroy"} testId="mode-destroy" label="Destroy the enemy base" onClick={() => onChange({ mode: "destroy" })}>
-                    Destroy
-                  </Chip>
-                  <Chip on={setup.mode === "survive"} testId="mode-survive" label="Survive the clock" onClick={() => onChange({ mode: "survive" })}>
-                    Survive
-                  </Chip>
-                </Line>
-                <Line label="Crates">
-                  <Chip on={setup.crates} testId="crates-on" label="Crates on" onClick={() => onChange({ crates: true })}>
-                    On
-                  </Chip>
-                  <Chip on={!setup.crates} testId="crates-off" label="Crates off" onClick={() => onChange({ crates: false })}>
-                    Off
-                  </Chip>
-                </Line>
-                <Line label="Walls">
-                  <Chip on={setup.walls} testId="walls-on" label="Walls on" onClick={() => onChange({ walls: true })}>
-                    On
-                  </Chip>
-                  <Chip on={!setup.walls} testId="walls-off" label="Walls off" onClick={() => onChange({ walls: false })}>
-                    Off
-                  </Chip>
-                </Line>
-                <Line label="Speed">
-                  {([0.75, 1, 1.5, 2] as const).map((s) => (
-                    <Chip key={s} on={setup.speed === s} testId={`speed-${s}`} label={`${s}x`} onClick={() => onChange({ speed: s })}>
-                      {s === 0.75 ? "Slow" : s === 1 ? "1x" : s === 1.5 ? "Fast" : "2x"}
-                    </Chip>
-                  ))}
-                </Line>
-              </>
-            )}
-          </section>
-        </div>
+          </div>
+          <MapPreview setup={setup} name={mapName} />
+        </section>
+
+        <section className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+          <div className="flex h-11 items-center justify-between">
+            <p className="font-display text-xs uppercase tracking-wide text-muted">{coOp ? "Enemy" : n === 1 ? "One bot" : "Bots"}</p>
+            <button
+              type="button"
+              data-testid="add-bot"
+              disabled={n >= 3}
+              className="h-11 min-w-11 px-2 font-display text-xs uppercase text-crystal disabled:text-brass-dim"
+              onClick={addBot}
+            >
+              {n >= 3 ? "Full" : "Add bot"}
+            </button>
+          </div>
+          {seats.slice(1).map((seat, index) => (
+            <div key={seat.key} className="flex flex-col gap-1">
+              <FactionPick label={seat.label} faction={seat.faction} onPick={(id) => setBot(index as 0 | 1 | 2, id)} />
+              <div className="flex gap-1">
+                {DIFFICULTY_CHOICES.map((id) => (
+                  <button
+                    key={id}
+                    type="button"
+                    data-testid={`skill-${index}-${id}`}
+                    aria-pressed={setup.skills[index] === id}
+                    className={`h-11 min-w-11 flex-1 font-display text-xs uppercase ${setup.skills[index] === id ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+                    onClick={() => setSkill(index as 0 | 1 | 2, id)}
+                  >
+                    {DIFF[id]}
+                  </button>
+                ))}
+                {n > 1 && (
+                  <button type="button" data-testid="drop-bot" className="h-11 w-11 font-display text-xs uppercase text-danger" onClick={() => dropAt(index as 0 | 1 | 2)}>
+                    X
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+          <div className="mt-1 grid grid-cols-3 gap-1">
+            {CREDIT_CHOICES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                data-testid={`credits-${c}`}
+                aria-pressed={setup.credits === c}
+                className={`h-11 font-display text-xs uppercase ${setup.credits === c ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+                onClick={() => onChange({ credits: c })}
+              >
+                {c === 10000 ? "10k" : c === 5000 ? "5k" : "2k"}
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              data-testid="mode-destroy"
+              aria-pressed={setup.mode === "destroy"}
+              className={`h-11 font-display text-xs uppercase ${setup.mode === "destroy" ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+              onClick={() => onChange({ mode: "destroy" })}
+            >
+              Destroy
+            </button>
+            <button
+              type="button"
+              data-testid="mode-survive"
+              aria-pressed={setup.mode === "survive"}
+              className={`h-11 font-display text-xs uppercase ${setup.mode === "survive" ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+              onClick={() => onChange({ mode: "survive" })}
+            >
+              Survive
+            </button>
+          </div>
+        </section>
       </div>
-      <footer className="border-t border-brass-dim bg-field px-3 py-2">
-        <p className={`mx-auto mb-2 max-w-lg text-sm text-pretty ${block ? "text-danger" : "text-muted"}`}>
-          {block ?? `${mapName}. ${coOp ? "You and a friend against bots." : "Versus."} ${n} ${n === 1 ? "seat" : "seats"} besides you.`}
-        </p>
-        <div className="mx-auto flex w-full max-w-lg flex-col gap-2">
-          <button
-            type="button"
-            data-testid="start-skirmish"
-            disabled={!!block}
-            onClick={onStart}
-            className={`flex h-14 items-center justify-center gap-2 font-display text-sm uppercase ${block ? "bg-brass-dim text-muted" : "bg-crystal text-crystal-ink"}`}
-          >
-            <Swords className="size-5" />
-            Start Battle
-          </button>
-          <button type="button" data-testid="friends" onClick={onFriends} className="bevel-btn flex h-14 items-center justify-center font-display text-sm uppercase">
-            Play with friends
-          </button>
-          <button type="button" data-testid="randomize" onClick={onRandomize} className="flex h-11 items-center justify-center gap-2 font-display text-xs uppercase text-brass">
-            <Dices className="size-4" />
-            Randomize
-          </button>
+
+      {more && (
+        <div className="absolute inset-x-0 bottom-12 top-11 z-20 flex flex-col bg-[#0e100e] px-3 py-2">
+          <div className="mb-1 flex h-11 items-center justify-between">
+            <p className="font-display text-xs uppercase tracking-wide text-gold">Maps</p>
+            <button type="button" className="h-11 min-w-11 font-display text-xs uppercase text-brass" onClick={() => setMore(false)}>
+              Done
+            </button>
+          </div>
+          <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-1 overflow-y-auto">
+            {maps
+              .filter((row) => row.id !== "tpl:fourisles")
+              .map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  className={`flex h-11 items-center justify-between border px-2 text-left ${setup.customId === row.id ? "border-gold text-gold" : "border-[#2a3330] text-ink"}`}
+                  onClick={() => {
+                    pick(row);
+                    setMore(false);
+                  }}
+                >
+                  <span className="truncate font-display text-xs uppercase">{row.name}</span>
+                  <span className="shrink-0 text-xs text-muted">{row.w}×{row.h}</span>
+                </button>
+              ))}
+          </div>
         </div>
+      )}
+
+      {block && <p className="px-3 text-center text-xs text-danger">{block}</p>}
+
+      <footer className="steel relative z-30 flex h-12 shrink-0 items-center gap-2 overflow-x-auto border-t border-black px-2">
+        <button type="button" data-testid="randomize" onClick={onRandomize} className="flex h-11 min-w-11 items-center gap-1 px-2 font-display text-xs uppercase text-brass">
+          <Dices className="size-4" />
+          Random
+        </button>
+        <button type="button" data-testid="advanced-rules" className="h-11 min-w-11 px-2 font-display text-xs uppercase text-brass" onClick={() => setRules(true)}>
+          Options
+        </button>
+        <button
+          type="button"
+          data-testid="practice"
+          onClick={onPractice}
+          className="flex h-11 min-w-24 shrink-0 items-center justify-center border border-crystal font-display text-xs uppercase text-crystal"
+        >
+          Practice
+        </button>
+        <button
+          type="button"
+          data-testid="start-skirmish"
+          disabled={!!block}
+          onClick={onStart}
+          className={`mx-auto flex h-11 min-w-40 items-center justify-center gap-2 border-2 font-display text-sm uppercase tracking-[0.22em] ${
+            block ? "border-brass-dim text-muted" : "border-gold bg-[#14110c] text-gold"
+          }`}
+        >
+          <Swords className="size-4" />
+          Battle
+        </button>
+        <button type="button" data-testid="friends" onClick={onFriends} className="h-11 min-w-11 px-2 font-display text-xs uppercase text-brass">
+          Friends
+        </button>
       </footer>
     </div>
   );
 }
 
-function Line({ label, children }: { label: string; children: ReactNode }) {
+function OptionsScreen({
+  setup,
+  onChange,
+  onClose,
+}: {
+  setup: SkirmishSetup;
+  onChange: (partial: Partial<SkirmishSetup>) => void;
+  onClose: () => void;
+}) {
   return (
-    <div className="mt-2 flex items-start gap-2">
-      <span className="w-16 shrink-0 pt-3 font-display text-[10px] uppercase text-brass">{label}</span>
-      <div className="flex flex-1 flex-wrap gap-1.5">{children}</div>
+    <div className="flex h-full min-h-0 flex-col bg-[#0e100e] text-ink" data-testid="ready-options">
+      <header className="steel flex h-11 shrink-0 items-stretch border-b border-black">
+        <button type="button" data-testid="advanced-rules" className="h-11 min-w-11 px-3 font-display text-xs uppercase text-brass" onClick={onClose}>
+          Back
+        </button>
+        <div className="flex h-11 items-center border-b-2 border-crystal bg-[#16301f] px-4 font-display text-xs uppercase tracking-[0.16em] text-crystal">
+          Options
+        </div>
+      </header>
+      <div className="grid min-h-0 flex-1 grid-cols-2 gap-3 px-3 py-1">
+        <div className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+          <Section title="Credits">
+            {CREDIT_CHOICES.map((c) => (
+              <Wide key={c} on={setup.credits === c} testId={`credits-${c}`} label={`${c} credits`} onClick={() => onChange({ credits: c })}>
+                {c === 10000 ? "10k" : c === 5000 ? "5k" : "2k"}
+              </Wide>
+            ))}
+          </Section>
+          <Section title="Win">
+            <Wide on={setup.mode === "destroy"} testId="mode-destroy" label="Destroy the enemy base" onClick={() => onChange({ mode: "destroy" })}>Destroy</Wide>
+            <Wide on={setup.mode === "survive"} testId="mode-survive" label="Survive the clock" onClick={() => onChange({ mode: "survive" })}>Survive</Wide>
+          </Section>
+          <Section title="Speed">
+            {([0.75, 1, 1.5, 2] as const).map((s) => (
+              <Wide key={s} on={setup.speed === s} testId={`speed-${s}`} label={`${s}x`} onClick={() => onChange({ speed: s })}>
+                {s === 0.75 ? "Slow" : s === 1 ? "1x" : s === 1.5 ? "Fast" : "2x"}
+              </Wide>
+            ))}
+          </Section>
+        </div>
+        <div className="flex min-h-0 flex-col gap-1 overflow-y-auto">
+          <Section title="Fog">
+            <Wide on={setup.fog} testId="fog-on" label="Fog on" onClick={() => onChange({ fog: true })}>On</Wide>
+            <Wide on={!setup.fog} testId="fog-off" label="Fog off" onClick={() => onChange({ fog: false })}>Off</Wide>
+          </Section>
+          <Section title="Walls">
+            <Wide on={setup.walls} testId="walls-on" label="Walls on" onClick={() => onChange({ walls: true })}>On</Wide>
+            <Wide on={!setup.walls} testId="walls-off" label="Walls off" onClick={() => onChange({ walls: false })}>Off</Wide>
+          </Section>
+          <Section title="Crates">
+            <Wide on={setup.crates} testId="crates-on" label="Crates on" onClick={() => onChange({ crates: true })}>On</Wide>
+            <Wide on={!setup.crates} testId="crates-off" label="Crates off" onClick={() => onChange({ crates: false })}>Off</Wide>
+          </Section>
+          <Section title="Start" cols={3}>
+            {START_CHOICES.map((id) => (
+              <Wide key={id} on={setup.start === id} testId={`start-${id}`} label={START_LABEL[id]} onClick={() => onChange({ start: id })}>
+                {START_LABEL[id]}
+              </Wide>
+            ))}
+          </Section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Section({ title, children, cols = 2 }: { title: string; children: ReactNode; cols?: 2 | 3 }) {
+  return (
+    <section>
+      <h2 className="mb-1 font-display text-xs uppercase tracking-[0.18em] text-ink">{title}</h2>
+      <div className={`grid gap-1 ${cols === 3 ? "grid-cols-3" : "grid-cols-2"}`}>{children}</div>
+    </section>
+  );
+}
+
+function Wide({
+  on,
+  testId,
+  label,
+  onClick,
+  children,
+}: {
+  on: boolean;
+  testId: string;
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      aria-pressed={on}
+      aria-label={label}
+      className={`h-11 font-display text-xs uppercase tracking-wide ${on ? "border border-crystal bg-[#16301f] text-crystal" : "bevel-btn"}`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+type Thumb = {
+  w: number;
+  h: number;
+  theater: Theater;
+  terrain: Uint8Array;
+  crystal: Uint16Array;
+  corners: { x: number; y: number }[];
+};
+
+const thumbs = new Map<string, Thumb>();
+
+function builtinThumb(mapId: MapId): Thumb {
+  const hit = thumbs.get(mapId);
+  if (hit) return hit;
+  const map = generateMap(mapId);
+  const terrain = map.terrain.slice();
+  const crystal = map.crystal.slice();
+  const corners = plantCorners(terrain, crystal, MAP_W, waterKind(mapId));
+  const next: Thumb = { w: MAP_W, h: MAP_H, theater: theaterOf(mapId), terrain, crystal, corners };
+  thumbs.set(mapId, next);
+  return next;
+}
+
+function seatMarks(setup: SkirmishSetup, corners: { x: number; y: number }[], customStarts: { x: number; y: number }[] | null) {
+  const seats = aiCount(setup) + 1;
+  const starts = customStarts
+    ? customStarts.slice(0, seats)
+    : orderCorners(corners, setup.start, seats, () => 0);
+  const factions: FactionId[] = [setup.player, setup.bots[0], setup.bots[1], setup.bots[2]];
+  const coOp = setup.teams === "tvt";
+  const labels = ["You", coOp ? "Enemy" : "Bot", coOp ? "Ally" : "Bot", "Bot"];
+  return starts.map((at, i) => ({
+    x: at.x,
+    y: at.y,
+    color: FACTION_COLOR[factions[i] ?? setup.enemy],
+    label: labels[i] ?? "Bot",
+    you: i === 0,
+  }));
+}
+
+/** Small field thumb, centered between the teams. */
+function MapPreview({ setup, name }: { setup: SkirmishSetup; name: string }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    let cancel = false;
+    const timer = window.setTimeout(() => {
+      if (cancel) return;
+      const custom = setup.customId ? resolveMyMap(setup.customId) : null;
+      const thumb = custom
+        ? { w: custom.w, h: custom.h, theater: custom.theater, terrain: custom.terrain, crystal: custom.crystal, corners: custom.starts }
+        : builtinThumb(setup.mapId);
+      const painted = seatMarks(setup, thumb.corners, custom ? custom.starts : null);
+      paintDocThumb(canvas, { ...thumb, starts: painted });
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const r = Math.max(1.6, thumb.w / 26);
+        for (const mark of painted) {
+          ctx.beginPath();
+          ctx.arc(mark.x, mark.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = mark.color;
+          ctx.fill();
+          ctx.lineWidth = mark.you ? 0.7 : 0.35;
+          ctx.strokeStyle = mark.you ? "#f4f0e6" : "#14110e";
+          ctx.stroke();
+        }
+      }
+    }, 0);
+    return () => {
+      cancel = true;
+      window.clearTimeout(timer);
+    };
+  }, [setup]);
+
+  return (
+    <div data-testid="map-preview" className="size-16 shrink-0 border border-[#3a4640] bg-[#0c0e0c] p-px">
+      <canvas
+        ref={ref}
+        aria-label={`${name} map preview`}
+        className="size-full"
+        style={{ imageRendering: "pixelated" }}
+      />
+    </div>
+  );
+}
+
+function SeatCard({
+  title,
+  seat,
+  you,
+}: {
+  title: string;
+  seat: { label: string; faction: FactionId };
+  you?: boolean;
+}) {
+  return (
+    <div className="border border-[#2c3834] bg-[#1a1e1b]">
+      <p className="px-2 pt-1 font-display text-[10px] uppercase tracking-widest text-muted">{title}</p>
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <span className="grid size-10 place-items-center font-display text-[10px] uppercase text-[#14110e]" style={{ background: FACTION_COLOR[seat.faction] }}>
+          {FACTION_NAME[seat.faction].slice(0, 3)}
+        </span>
+        <div className="min-w-0">
+          <p className="truncate font-display text-xs uppercase text-ink">{you ? "You" : FACTION_NAME[seat.faction]}</p>
+          <p className="text-[10px] uppercase text-muted">{you ? "Leader" : "Bot"}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FactionPick({
+  label,
+  faction,
+  onPick,
+}: {
+  label: string;
+  faction: FactionId;
+  onPick: (id: FactionId) => void;
+}) {
+  return (
+    <div className="grid grid-cols-4 gap-1">
+      {IDS.map((id) => (
+        <button
+          key={id}
+          type="button"
+          data-testid={`seat-${label}-${id}`}
+          aria-pressed={faction === id}
+          aria-label={`${label} ${FACTION_NAME[id]}`}
+          className={`h-11 font-display text-xs uppercase ${faction === id ? "outline outline-2 outline-ink" : ""}`}
+          style={{ background: FACTION_COLOR[id], color: "#14110e" }}
+          onClick={() => onPick(id)}
+        >
+          {FACTION_NAME[id].slice(0, 3)}
+        </button>
+      ))}
     </div>
   );
 }
@@ -357,7 +573,7 @@ function Chip({
       data-testid={testId}
       aria-pressed={on}
       aria-label={label}
-      className={`h-11 px-3 font-display text-xs uppercase ${on ? "steel-inset text-gold" : "border border-brass-dim bg-steel-top text-ink"}`}
+      className={`h-11 shrink-0 px-3 font-display text-xs uppercase ${on ? "steel-inset text-gold" : "border border-brass-dim bg-steel-top text-ink"}`}
       onClick={onClick}
     >
       {children}

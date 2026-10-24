@@ -45,7 +45,7 @@ export type ScoreId = "menu" | "combatA" | "combatB" | "victory" | "defeat";
 export type BusName = "music" | "voice" | "sfx";
 
 export type Cue =
-  | { t: "sfx"; id: SfxName }
+  | { t: "sfx"; id: SfxName; x?: number; y?: number }
   | { t: "voice"; id: EvaId }
   | { t: "bark"; cls: BarkClass; act: BarkAct }
   | { t: "bed"; id: BedId; on: boolean };
@@ -379,14 +379,35 @@ export function previewVoice() {
   sayText("Advisor online.", 0);
 }
 
-export function sfx(name: SfxName) {
+let hearX = 0;
+let hearY = 0;
+
+/** Camera center in tiles. Weapon sounds pan and fade against this. */
+export function hearAt(x: number, y: number) {
+  hearX = x;
+  hearY = y;
+}
+
+function placed(x?: number, y?: number): { pan: number; gain: number } {
+  if (x == null || y == null || !Number.isFinite(x) || !Number.isFinite(y)) return { pan: 0, gain: 1 };
+  const dx = x - hearX;
+  const dy = y - hearY;
+  const dist = Math.hypot(dx, dy);
+  return {
+    pan: Math.max(-0.85, Math.min(0.85, dx / 14)),
+    gain: Math.max(0.2, Math.min(1, 1.05 - dist / 26)),
+  };
+}
+
+export function sfx(name: SfxName, x?: number, y?: number) {
   if (muted || mix.sfx <= 0) return;
+  const place = placed(x, y);
   if (!ctx || ctx.state !== "running") {
     queuedSfx = name;
     if (heardGesture) unlockAudio();
     return;
   }
-  playSfx(name);
+  playSfx(name, place.pan, place.gain);
 }
 
 function flushSfx() {
@@ -396,9 +417,18 @@ function flushSfx() {
   playSfx(name);
 }
 
-function playSfx(name: SfxName) {
+function playSfx(name: SfxName, pan = 0, gain = 1) {
   if (!ctx || !sfxGain) return;
-  const dest = sfxGain;
+  let dest: AudioNode = sfxGain;
+  if (Math.abs(pan) > 0.02 || gain < 0.98) {
+    const g = ctx.createGain();
+    g.gain.value = gain;
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = pan;
+    g.connect(panner);
+    panner.connect(sfxGain);
+    dest = g;
+  }
   const now = ctx.currentTime;
   switch (name) {
     case "select":
@@ -499,7 +529,7 @@ export function audioSnapshot() {
 }
 
 export function handleCue(c: Cue) {
-  if (c.t === "sfx") sfx(c.id);
+  if (c.t === "sfx") sfx(c.id, c.x, c.y);
   else if (c.t === "voice") eva(c.id);
   else if (c.t === "bark") bark(c.cls, c.act);
   else bed(c.id, c.on);

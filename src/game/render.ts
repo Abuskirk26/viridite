@@ -1,4 +1,5 @@
 import { stepParticles, drawParticles } from "./combat-fx.ts";
+import { hearAt } from "./audio.ts";
 import {
   BUILD_GAP,
   BUILDINGS,
@@ -9,9 +10,11 @@ import {
   TILE_VALLEY,
   type Theater,
   TILE_BRIDGE,
+  TILE_CLEAR,
   TILE_CLIFF,
   TILE_CRYSTAL,
   TILE_DEEP,
+  TILE_HIGH,
   TILE_RAMP,
   TILE_ROCK,
   TILE_ROUGH,
@@ -32,7 +35,7 @@ import {
 import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
-import { minimapRect, viewPitch, worldToScreen, type Camera, type View } from "./view.ts";
+import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { art, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, type IsoBank } from "./iso.ts";
@@ -58,6 +61,8 @@ export interface DrawUi {
   buildingId: number | null;
   placing: BuildingId | null;
   hover: { tx: number; ty: number } | null;
+  /** Lifted ghost while a finger is dragging. The drop tile stays in hover. */
+  ghost?: { tx: number; ty: number } | null;
   wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null;
   box: { x0: number; y0: number; x1: number; y1: number } | null;
   shake: number;
@@ -95,6 +100,8 @@ export function tileColor(terrain: number, x: number, y: number, theater: Theate
   if (terrain === TILE_SHORE) return theater === "snow" ? "#d5dde6" : h > 0.5 ? "#e2c48a" : "#c9a56c";
   if (terrain === TILE_BRIDGE) return h > 0.5 ? "#a07848" : "#7a5a38";
   if (terrain === TILE_ROAD) return h > 0.5 ? "#8d6a42" : "#6e5232";
+  if (terrain === TILE_HIGH) return theater === "snow" ? "#e7eef4" : "#d2c09a";
+  if (terrain === TILE_RAMP) return "#b08a58";
   if (terrain === TILE_CLIFF || terrain === TILE_ROCK) return h > 0.5 ? "#6e5e4c" : "#514638";
   if (terrain === TILE_CRYSTAL) return h > 0.55 ? "#6a8a48" : "#7d9a56";
   if (terrain === TILE_SPENT) return h > 0.5 ? "#8a6a44" : "#6e5434";
@@ -199,6 +206,136 @@ export function paintPreview(
   ctx.fillRect(map.enemy.x * s - 2, map.enemy.y * s - 2, 5, 5);
 }
 
+let fogCanvas: HTMLCanvasElement | null = null;
+let fogSrc: Float32Array | null = null;
+let fogTmp: Float32Array | null = null;
+
+function fogAlpha(state: number): number {
+  if (state === 2) return 0;
+  if (state === 1) return 58;
+  return 168;
+}
+
+function sampleFog(fog: Uint8Array, wx: number, wy: number, gw: number, gh: number): number {
+  if (wx < 0 || wy < 0 || wx > gw - 1 || wy > gh - 1) return 196;
+  const x0 = wx | 0;
+  const y0 = wy | 0;
+  const x1 = Math.min(gw - 1, x0 + 1);
+  const y1 = Math.min(gh - 1, y0 + 1);
+  const fx = wx - x0;
+  const fy = wy - y0;
+  const a00 = fogAlpha(fog[y0 * gw + x0] ?? 0);
+  const a10 = fogAlpha(fog[y0 * gw + x1] ?? 0);
+  const a01 = fogAlpha(fog[y1 * gw + x0] ?? 0);
+  const a11 = fogAlpha(fog[y1 * gw + x1] ?? 0);
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  return (a00 * (1 - sx) + a10 * sx) * (1 - sy) + (a01 * (1 - sx) + a11 * sx) * sy;
+}
+
+function blurBox(src: Float32Array, dst: Float32Array, w: number, h: number, horiz: boolean, r: number) {
+  const span = r * 2 + 1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      for (let k = -r; k <= r; k++) {
+        const xx = horiz ? Math.max(0, Math.min(w - 1, x + k)) : x;
+        const yy = horiz ? y : Math.max(0, Math.min(h - 1, y + k));
+        s += src[yy * w + xx] ?? 0;
+      }
+      dst[y * w + x] = s / span;
+    }
+  }
+}
+
+/**
+ * Fog in screen pixels, not one square per tile.
+ * Visible ground stays clear. Explored ground is a dim veil. The edge is a gradient.
+ */
+function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefined, cam: Camera, view: View, gw: number, gh: number) {
+  if (!fog || fog.length < gw * gh || view.w < 8 || view.h < 8) return;
+  const pitch = viewPitch();
+  const maxSide = 200;
+  const aspect = view.w / view.h;
+  const bw = Math.max(72, aspect >= 1 ? maxSide : Math.round(maxSide * aspect));
+  const bh = Math.max(72, aspect >= 1 ? Math.round(maxSide / aspect) : maxSide);
+  const n = bw * bh;
+  if (!fogSrc || fogSrc.length < n) {
+    fogSrc = new Float32Array(n);
+    fogTmp = new Float32Array(n);
+  }
+  const src = fogSrc;
+  const tmp = fogTmp!;
+  const halfW = view.w / (2 * cam.zoom);
+  const halfH = view.h / (2 * cam.zoom * pitch);
+  const x0 = cam.x - halfW;
+  const y0 = cam.y - halfH;
+  let peak = 0;
+  for (let y = 0; y < bh; y++) {
+    const wy = y0 + ((y + 0.5) / bh) * halfH * 2;
+    for (let x = 0; x < bw; x++) {
+      const wx = x0 + ((x + 0.5) / bw) * halfW * 2;
+      const a = sampleFog(fog, wx, wy, gw, gh);
+      src[y * bw + x] = a;
+      if (a > peak) peak = a;
+    }
+  }
+  if (peak < 1) return;
+  blurBox(src, tmp, bw, bh, true, 5);
+  blurBox(tmp, src, bw, bh, false, 5);
+  blurBox(src, tmp, bw, bh, true, 3);
+  blurBox(tmp, src, bw, bh, false, 3);
+  if (!fogCanvas) fogCanvas = document.createElement("canvas");
+  if (fogCanvas.width !== bw) fogCanvas.width = bw;
+  if (fogCanvas.height !== bh) fogCanvas.height = bh;
+  const fx = fogCanvas.getContext("2d");
+  if (!fx) return;
+  const img = fx.createImageData(bw, bh);
+  const data = img.data;
+  for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    const a = src[i] ?? 0;
+    data[o] = 10;
+    data[o + 1] = 16;
+    data[o + 2] = 22;
+    data[o + 3] = a < 1 ? 0 : a > 210 ? 210 : a;
+  }
+  fx.putImageData(img, 0, 0);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(fogCanvas, 0, 0, view.w, view.h);
+  ctx.restore();
+}
+
+function paintMapRim(ctx: CanvasRenderingContext2D, gw: number, gh: number) {
+  const band = 2.4;
+  const edge = (grad: CanvasGradient, x: number, y: number, w: number, h: number) => {
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, w, h);
+  };
+  ctx.save();
+  const sea = "rgba(10, 42, 62, 0.28)";
+  const fade = "rgba(10, 42, 62, 0)";
+  const north = ctx.createLinearGradient(0, 0, 0, band);
+  north.addColorStop(0, sea);
+  north.addColorStop(1, fade);
+  edge(north, 0, 0, gw, band);
+  const south = ctx.createLinearGradient(0, gh, 0, gh - band);
+  south.addColorStop(0, sea);
+  south.addColorStop(1, fade);
+  edge(south, 0, gh - band, gw, band);
+  const west = ctx.createLinearGradient(0, 0, band, 0);
+  west.addColorStop(0, sea);
+  west.addColorStop(1, fade);
+  edge(west, 0, 0, band, gh);
+  const east = ctx.createLinearGradient(gw, 0, gw - band, 0);
+  east.addColorStop(0, sea);
+  east.addColorStop(1, fade);
+  edge(east, gw - band, 0, band, gh);
+  ctx.restore();
+}
+
 export function drawGame(
   ctx: CanvasRenderingContext2D,
   sim: Sim,
@@ -211,8 +348,8 @@ export function drawGame(
   sheet?: { image: CanvasImageSource; tw: number; th: number } | null,
   relief?: CanvasImageSource | null,
 ) {
-  const shake = ui.shake;
   VIEWER = ui.viewer === 1 || ui.viewer === 2 || ui.viewer === 3 ? ui.viewer : 0;
+  hearAt(cam.x, cam.y);
   GW = sim.gw;
   GH = sim.gh;
   THEATER = sim.theater;
@@ -225,9 +362,6 @@ export function drawGame(
   ctx.fillRect(0, 0, view.w, view.h);
 
   ctx.save();
-  if (shake > 0.02) {
-    ctx.translate((hash(sim.time * 10, 1) - 0.5) * shake * 10, (hash(sim.time * 10, 2) - 0.5) * shake * 8);
-  }
   ctx.translate(view.w / 2, view.h / 2);
   ctx.scale(cam.zoom, cam.zoom * viewPitch());
   ctx.translate(-cam.x, -cam.y);
@@ -264,40 +398,29 @@ export function drawGame(
 
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
-      const i = y * GW + x;
-      const f = fog[i];
       if (ground) {
         if (sim.mapId === "michigan") blendMichigan(ctx, sim, x, y);
       } else if (!baked) {
         paintCell(ctx, sim.terrain, x, y, GW, GH, sim.theater, 0);
       }
-      if (f < 2) {
-        let edge = 0;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const ni = (y + dy) * GW + (x + dx);
-            if (ni >= 0 && ni < fog.length && fog[ni] === 2) edge++;
-          }
-        }
-        const feather = Math.min(1, edge / 4);
-        if (f === 0) {
-          ctx.fillStyle = `rgba(4, 6, 5, ${0.72 - feather * 0.22})`;
-          ctx.fillRect(x, y, 1, 1);
-        } else {
-          ctx.fillStyle = `rgba(22, 26, 18, ${0.36 - feather * 0.1})`;
-          ctx.fillRect(x, y, 1, 1);
-        }
-      }
     }
+  }
+  paintMapRim(ctx, GW, GH);
+  let trees = 0;
+  let shells = 0;
+  const spark = new Set<number>();
+  for (const u of sim.units) {
+    if (u.hp > 0 && u.gather > 0 && u.harvestTx >= 0) spark.add(u.harvestTy * GW + u.harvestTx);
   }
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       if (fog[y * GW + x] !== 2) continue;
-      if (sim.mapId === "palm") continue;
-      paintFieldProps(ctx, sim, x, y);
+      const drew = paintFieldProps(ctx, sim, x, y, baked, spark, trees < 150, shells < 40);
+      if (drew === "tree") trees++;
+      else if (drew === "shell") shells++;
     }
   }
+  paintCrossings(ctx, sim.terrain, GW, GH, x0, y0, x1, y1);
 
   // Every map shares one scale with the ground. A rifle is about half a tile,
   // a tank about one, a hall sits on its footprint. The camera is the only zoom.
@@ -318,16 +441,24 @@ export function drawGame(
 
   const depth: { y: number; draw: () => void }[] = [];
   for (const b of sim.buildings) {
-    if (b.hp <= 0) continue;
+    if (b.hp <= 0 && b.rubble > 100) {
+      if (b.team === VIEWER || rubbleSeen(sim, b)) {
+        depth.push({ y: b.ty + b.h, draw: () => paintRubble(ctx, b) });
+      }
+      continue;
+    }
+    if (b.hp <= 0 && b.collapse <= 0) continue;
     if (!sim.buildingVisible(VIEWER, b)) continue;
     const low = sim.powerOf(b.team).low;
     const paint = () => {
       drawBuilding(ctx, b, seatPaint(sim, b.team), ui.buildingId === b.id, sim.time, low, sim);
       if (b.hit > 0) {
-        ctx.globalAlpha = Math.min(0.5, b.hit);
-        ctx.fillStyle = "#e23b2f";
-        ctx.fillRect(b.tx, b.ty, b.w, b.h);
-        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.globalAlpha = Math.min(0.9, b.hit * 2.2);
+        ctx.strokeStyle = "#fff6e8";
+        ctx.lineWidth = 0.14;
+        ctx.strokeRect(b.tx - 0.08, b.ty - 0.08, b.w + 0.16, b.h + 0.16);
+        ctx.restore();
       }
     };
     depth.push({
@@ -347,12 +478,21 @@ export function drawGame(
   const halfW = view.w / (2 * cam.zoom) + 2.6;
   const halfH = view.h / (2 * cam.zoom * viewPitch()) + 2.6;
   const onScreen = (x: number, y: number) => !cullFar || (Math.abs(x - cam.x) <= halfW && Math.abs(y - cam.y) <= halfH);
+  let propN = 0;
+  for (const p of sim.fieldProps) {
+    if (propN >= 40) break;
+    if (!onScreen(p.x, p.y)) continue;
+    const ti = (p.y | 0) * GW + (p.x | 0);
+    if (ti < 0 || ti >= fog.length || fog[ti] !== 2) continue;
+    propN++;
+    depth.push({ y: p.y, draw: () => paintFieldProp(ctx, p.x, p.y, p.kind, sim.time) });
+  }
   for (const u of sim.units) {
     if (u.loco !== "air" || !sim.visibleUnit(VIEWER, u)) continue;
     const x = u.px + (u.x - u.px) * a;
     const y = u.py + (u.y - u.py) * a;
     if (!onScreen(x, y)) continue;
-    around(x, y, ts, () => drawAirShadow(ctx, u, x, y));
+    around(x, y, ts, () => drawAirShadow(ctx, u, x, y, seatPaint(sim, u.team)));
   }
   const paintUnit = (u: Unit) => {
     const x = u.px + (u.x - u.px) * a;
@@ -362,15 +502,28 @@ export function drawGame(
     const px = x + o.x;
     const py = y + o.y;
     around(px, py, ts, () => {
-      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), ui.selected.includes(u.id), sim.time, aimOf(sim, u));
+      const tx = u.x | 0;
+      const ty = u.y | 0;
+      const leaf =
+        u.armor === "infantry" &&
+        u.team === VIEWER &&
+        tx >= 0 &&
+        ty >= 0 &&
+        tx < GW &&
+        ty < GH &&
+        sim.terrain[ty * GW + tx] === TILE_SCRUB;
+      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), ui.selected.includes(u.id), sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
       if (u.hit > 0) {
         ctx.save();
         ctx.globalAlpha = Math.min(0.7, u.hit * 2.2);
-        ctx.fillStyle = "#ff3a2a";
+        ctx.fillStyle = "#ffffff";
         ctx.beginPath();
         ctx.arc(px, py, u.radius + 0.18, 0, Math.PI * 2);
         ctx.fill();
         ctx.restore();
+      }
+      if (u.kind === "engineer" && u.order.t === "capture" && u.capture > 0) {
+        paintCaptureRing(ctx, px, py, Math.min(1, u.capture / 3));
       }
       if (u.blocked > 0) {
         ctx.save();
@@ -403,9 +556,13 @@ export function drawGame(
 
   for (const s of sim.shots) {
     const x = s.px + (s.x - s.px) * a;
-    const y = s.py + (s.y - s.py) * a;
+    const baseY = s.py + (s.y - s.py) * a;
+    const span = Math.max(0.05, s.age + s.ttl);
+    const t = Math.max(0, Math.min(1, s.age / span));
+    const lift = (s.arc || 0) * Math.sin(t * Math.PI) * (s.arc > 0.6 ? 2.6 : 1.15);
+    const y = baseY - lift;
     const v = Math.hypot(s.vx, s.vy) || 1;
-    const len = s.kind === "rocket" ? 0.9 : s.kind === "shell" ? 0.58 : 0.36;
+    const len = s.kind === "rocket" ? 0.9 : s.arc > 0.6 ? 0.28 : s.kind === "shell" ? 0.58 : 0.36;
     if (s.kind === "rocket") {
       ctx.strokeStyle = "rgba(255, 120, 30, 0.9)";
       ctx.lineWidth = 0.46;
@@ -414,15 +571,21 @@ export function drawGame(
       ctx.lineTo(x, y);
       ctx.stroke();
     }
-    ctx.strokeStyle = s.kind === "rocket" ? "#ffb25a" : "#fff6d0";
-    ctx.lineWidth = s.kind === "rocket" ? 0.16 : 0.1;
+    if (s.arc > 0.6) {
+      ctx.fillStyle = "rgba(255, 244, 210, 0.35)";
+      ctx.beginPath();
+      ctx.arc(x, baseY, 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.strokeStyle = s.kind === "rocket" ? "#ffb25a" : s.arc > 0.6 ? "#ffe08a" : "#fff6d0";
+    ctx.lineWidth = s.kind === "rocket" ? 0.16 : s.arc > 0.6 ? 0.14 : 0.1;
     ctx.beginPath();
-    ctx.moveTo(x - (s.vx / v) * len, y - (s.vy / v) * len);
+    ctx.moveTo(x - (s.vx / v) * len, y - (s.vy / v) * len * 0.4);
     ctx.lineTo(x, y);
     ctx.stroke();
     ctx.fillStyle = s.kind === "rocket" ? "#ffe7b0" : "#fffdf2";
     ctx.beginPath();
-    ctx.arc(x, y, s.kind === "rocket" ? 0.24 : 0.16, 0, Math.PI * 2);
+    ctx.arc(x, y, s.kind === "rocket" ? 0.24 : s.arc > 0.6 ? 0.2 : 0.16, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -441,6 +604,85 @@ export function drawGame(
     ctx.lineWidth = 0.05;
     ctx.setLineDash([0.08, 0.06]);
     ctx.strokeRect(g.x - 0.28, g.y - 0.28, 0.56, 0.56);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  const marked = new Set<number>();
+  for (const u of sim.units) {
+    if (u.hp <= 0 || u.team !== VIEWER || u.order.t !== "attack") continue;
+    const b = sim.buildingById(u.order.id);
+    if (!b || b.hp <= 0 || marked.has(b.id)) continue;
+    marked.add(b.id);
+    const pulse = 0.55 + 0.45 * Math.sin(sim.time * 6);
+    ctx.save();
+    ctx.strokeStyle = "#ff3b30";
+    ctx.globalAlpha = 0.75 + 0.25 * pulse;
+    ctx.lineWidth = 0.1;
+    ctx.strokeRect(b.tx - 0.12, b.ty - 0.12, b.w + 0.24, b.h + 0.24);
+    ctx.beginPath();
+    ctx.arc(b.tx + b.w / 2, b.ty + b.h / 2, Math.max(b.w, b.h) * 0.55 + 0.15 * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "#ffe0d6";
+    ctx.lineWidth = 0.05;
+    const cx = b.tx + b.w / 2;
+    const cy = b.ty + b.h / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx - 0.28, cy);
+    ctx.lineTo(cx + 0.28, cy);
+    ctx.moveTo(cx, cy - 0.28);
+    ctx.lineTo(cx, cy + 0.28);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  for (const p of sim.pings) {
+    const k = Math.max(0, Math.min(1, p.life / 1.2));
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.65 * k;
+    ctx.translate(p.x, p.y);
+    ctx.strokeStyle = p.kind === "attack" ? "#ff4d3a" : p.kind === "amove" ? "#ffb25a" : "#7dff9a";
+    ctx.fillStyle = p.kind === "attack" ? "rgba(255, 70, 48, 0.28)" : p.kind === "amove" ? "rgba(255, 160, 60, 0.22)" : "rgba(90, 220, 120, 0.22)";
+    ctx.lineWidth = 0.08;
+    ctx.beginPath();
+    ctx.arc(0, 0, 0.42 + (1 - k) * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (p.kind === "attack") {
+      ctx.beginPath();
+      ctx.arc(0, 0, 0.28, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (p.kind === "amove") {
+      ctx.beginPath();
+      ctx.moveTo(-0.18, 0);
+      ctx.lineTo(0.18, 0);
+      ctx.moveTo(0, -0.18);
+      ctx.lineTo(0, 0.18);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(0, -0.28);
+      ctx.lineTo(0.16, 0.12);
+      ctx.lineTo(-0.16, 0.12);
+      ctx.closePath();
+      ctx.fillStyle = "#d8ffe6";
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  for (const p of sim.pings) {
+    if (p.kind !== "amove" || p.fx === undefined || p.fy === undefined) continue;
+    const k = Math.max(0, Math.min(1, p.life / 1.8));
+    ctx.save();
+    ctx.globalAlpha = 0.25 + 0.55 * k;
+    ctx.strokeStyle = "#ffb25a";
+    ctx.lineWidth = 0.05;
+    ctx.setLineDash([0.18, 0.14]);
+    ctx.beginPath();
+    ctx.moveTo(p.fx, p.fy);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
   }
@@ -472,12 +714,31 @@ export function drawGame(
       ctx.lineTo(f.x2, f.y2);
       ctx.stroke();
       ctx.globalAlpha = 1;
-    } else if (bank && bank.boom.length === 6) {
-      const frame = Math.min(5, Math.floor(k * 6));
-      const size = Math.max(0.9, f.r * 2.6);
-      ctx.globalAlpha = k > 0.85 ? 1 - (k - 0.85) / 0.15 : 1;
-      ctx.drawImage(bank.boom[frame]!, f.x - size / 2, f.y - size / 2, size, size);
-      ctx.globalAlpha = 1;
+    } else if (f.kind === "boom") {
+      const frames = art()?.boom;
+      if (frames && frames.length >= 6) {
+        const frame = Math.min(5, Math.floor(k * 6));
+        const size = Math.max(0.9, f.r * 2.6);
+        ctx.globalAlpha = k > 0.85 ? 1 - (k - 0.85) / 0.15 : 1;
+        ctx.drawImage(frames[frame]!, f.x - size / 2, f.y - size / 2, size, size);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.globalAlpha = 1 - k;
+        ctx.fillStyle = k < 0.35 ? "#fff1c4" : "#e25822";
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, Math.max(0.2, f.r * (0.35 + k * 0.9)), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#ffd27a";
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, Math.max(0.08, f.r * (0.18 + k * 0.25)), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = (1 - k) * 0.55;
+        ctx.fillStyle = "rgba(28, 26, 24, 0.85)";
+        ctx.beginPath();
+        ctx.arc(f.x, f.y - f.r * 0.35, Math.max(0.15, f.r * (0.45 + k * 0.4)), 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
     } else if (f.kind === "debris") {
       const travel = 1 - f.ttl / f.max;
       ctx.globalAlpha = 1 - travel;
@@ -496,22 +757,46 @@ export function drawGame(
 
   stepParticles(0.016);
   drawParticles(ctx, sim.time);
+  if (typeof localStorage !== "undefined" && localStorage.getItem("viridite-dmg-numbers") === "1") {
+    for (const b of sim.buildings) {
+      if (b.hit <= 0 || b.hp <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, b.hit * 2);
+      ctx.fillStyle = "#fff";
+      ctx.font = "0.4px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("-", b.tx + b.w / 2, b.ty - 0.3);
+      ctx.restore();
+    }
+  }
 
   if (ui.buildingId) {
     const b = sim.buildingById(ui.buildingId);
     if (b && b.hp > 0 && b.kind !== "span") {
       ctx.save();
-      ctx.strokeStyle = "rgba(244, 241, 228, 0.95)";
-      ctx.lineWidth = 0.09;
-      ctx.setLineDash([0.18, 0.1]);
-      ctx.strokeRect(b.tx + 0.05, b.ty + 0.05, Math.max(0.2, b.w - 0.1), Math.max(0.2, b.h - 0.1));
-      ctx.setLineDash([]);
       ctx.strokeStyle = "#e7c56a";
       ctx.lineWidth = 0.07;
       ctx.beginPath();
       ctx.ellipse(b.tx + b.w / 2, b.ty + b.h / 2, Math.max(0.55, b.w * 0.68), Math.max(0.4, b.h * 0.62), 0, 0, Math.PI * 2);
       ctx.stroke();
       if (!isFence(b.kind)) drawDoorArrow(ctx, sim, b);
+      ctx.restore();
+    }
+    if (b && !sim.allied(VIEWER, b.team) && !b.neutral && ui.selected.length) {
+      ctx.save();
+      ctx.strokeStyle = "#e5483b";
+      ctx.lineWidth = 0.08;
+      ctx.beginPath();
+      ctx.ellipse(b.tx + b.w / 2, b.ty + b.h / 2, b.w * 0.55, b.h * 0.4, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = "#ffd0c8";
+      ctx.lineWidth = 0.04;
+      const cx = b.tx + b.w / 2;
+      const cy = b.ty + b.h * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(cx - 0.25, cy); ctx.lineTo(cx + 0.25, cy);
+      ctx.moveTo(cx, cy - 0.25); ctx.lineTo(cx, cy + 0.25);
+      ctx.stroke();
       ctx.restore();
     }
     if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
@@ -554,10 +839,18 @@ export function drawGame(
     }
   }
 
-  if (ui.placing) {
-    drawPlaceGrid(ctx, x0, y0, x1, y1);
-    drawBuildHalo(ctx, sim);
+  if (ui.placing && ui.hover) {
+    const span = 5;
+    const spot = ui.ghost ?? ui.hover;
+    drawPlaceGrid(
+      ctx,
+      Math.max(x0, spot.tx - span),
+      Math.max(y0, spot.ty - span),
+      Math.min(x1, spot.tx + footprintSize(ui.placing).w + span),
+      Math.min(y1, spot.ty + footprintSize(ui.placing).h + span),
+    );
   }
+  if (ui.placing) drawBuildHalo(ctx, sim);
 
   if (ui.wallRun && ui.wallRun.length) {
     ctx.lineWidth = 0.07;
@@ -585,10 +878,12 @@ export function drawGame(
       }
     }
   } else if (ui.placing && ui.hover) {
-    const origin = ui.hover;
-    const bdef = sim.canPlace(VIEWER, ui.placing, origin.tx, origin.ty);
+    const drop = ui.hover;
+    const origin = ui.ghost ?? ui.hover;
+    const bdef = sim.canPlace(VIEWER, ui.placing, drop.tx, drop.ty);
     const w = footprintSize(ui.placing).w;
     const h = footprintSize(ui.placing).h;
+    const lifted = origin.tx !== drop.tx || origin.ty !== drop.ty;
     ctx.globalAlpha = 0.45;
     ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
     ctx.fillRect(origin.tx, origin.ty, w, h);
@@ -596,19 +891,17 @@ export function drawGame(
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
     ctx.lineWidth = 0.12;
     ctx.strokeRect(origin.tx + 0.03, origin.ty + 0.03, w - 0.06, h - 0.06);
-    // Grid lines so the blocked cells are obvious at close zoom
-    ctx.lineWidth = 0.04;
-    ctx.globalAlpha = 0.6;
-    for (let gx = 1; gx < w; gx++) {
+    if (lifted) {
+      ctx.strokeStyle = "#f4f0e6";
+      ctx.lineWidth = 0.08;
+      ctx.strokeRect(drop.tx + 0.18, drop.ty + 0.18, Math.max(0.2, w - 0.36), Math.max(0.2, h - 0.36));
+      const mx = drop.tx + w / 2;
+      const my = drop.ty + h / 2;
       ctx.beginPath();
-      ctx.moveTo(origin.tx + gx, origin.ty + 0.05);
-      ctx.lineTo(origin.tx + gx, origin.ty + h - 0.05);
-      ctx.stroke();
-    }
-    for (let gy = 1; gy < h; gy++) {
-      ctx.beginPath();
-      ctx.moveTo(origin.tx + 0.05, origin.ty + gy);
-      ctx.lineTo(origin.tx + w - 0.05, origin.ty + gy);
+      ctx.moveTo(mx - 0.28, my);
+      ctx.lineTo(mx + 0.28, my);
+      ctx.moveTo(mx, my - 0.28);
+      ctx.lineTo(mx, my + 0.28);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
@@ -627,6 +920,8 @@ export function drawGame(
 
   ctx.restore();
 
+  paintScreenFog(ctx, sim.fog[VIEWER], cam, view, GW, GH);
+
   drawJobsScreen(ctx, sim, cam, view);
   drawPlaceLabel(ctx, sim, cam, view, ui);
 
@@ -637,50 +932,63 @@ export function drawGame(
     const y = u.py + (u.y - u.py) * a;
     const o = airPictureOffset(u);
     const selected = ui.selected.includes(u.id);
-    const damaged = u.hp < u.maxHp * 0.98;
-    if (!selected && !damaged) continue;
+    const damaged = u.maxHp > 0 && u.hp < u.maxHp - 0.5;
+    const cargo = selected && u.kind === "harvester" && u.cargoMax > 0;
+    if (!damaged && !cargo) continue;
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
-    const lift = 1;
-    const barY = s.y - Math.max(18, u.radius * cam.zoom * lift + 10);
-    const tone = shade(seatPaint(sim, u.team), 1.15);
-    bar(ctx, s.x, barY, u.hp / Math.max(1, u.maxHp), selected, tone);
-    if (selected) {
-      ctx.fillStyle = "#e7f6ea";
-      ctx.font = "12px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      ctx.fillText(u.name, s.x, barY - 4);
+    if (damaged) {
+      const pct = u.hp / u.maxHp;
+      bar(ctx, s.x, s.y - 18, pct, "troop", seatPaint(sim, u.team), selected ? `${Math.ceil(pct * 100)}%` : undefined);
     }
-    if (selected && u.kind === "harvester" && u.cargoMax > 0) {
-      const cargoY = s.y - Math.max(8, u.radius * cam.zoom * lift);
-      bar(ctx, s.x, cargoY, u.cargo / u.cargoMax, false, "#3dcc6e");
-      ctx.fillStyle = "#d8ffe6";
+    if (cargo) bar(ctx, s.x, s.y - (damaged ? 4 : 18), u.cargo / u.cargoMax, "troop", "#3dcc6e");
+  }
+  for (const b of sim.buildings) {
+    if (b.hp <= 0 || b.maxHp <= 0 || isFence(b.kind) || b.kind === "span" || b.rubble > 0) continue;
+    if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
+    const picked = ui.buildingId === b.id;
+    const damaged = b.maxHp > 0 && b.hp < b.maxHp - 0.5;
+    if (!damaged && !picked) continue;
+    const s = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
+    if (damaged || picked) {
+      const pct = b.hp / b.maxHp;
+      const tag = b.mending ? `Repair ${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}` : `${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}`;
+      bar(ctx, s.x, s.y - 16, pct, "hall", seatPaint(sim, b.team), tag);
+    }
+    if (picked) {
+      ctx.fillStyle = "#e7f6ea";
       ctx.font = "11px sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
-      ctx.fillText(`${Math.min(100, Math.round((u.cargo / u.cargoMax) * 100))}%`, s.x, cargoY - 1);
-    }
-    const stars = u.kills >= 16 ? 3 : u.kills >= 8 ? 2 : u.kills >= 3 ? 1 : 0;
-    if (stars > 0 && (selected || u.hp < u.maxHp)) {
-      ctx.fillStyle = "#e2b15a";
-      const base = s.y - Math.max(30, u.radius * cam.zoom * lift + 22);
-      for (let i = 0; i < stars; i++) star(ctx, s.x - 10 + i * 12, base, 5);
+      ctx.fillText(b.name, s.x, s.y - 10);
     }
   }
-  for (const b of sim.buildings) {
-    if (b.team !== VIEWER || b.hp <= 0 || b.maxHp <= 0 || isFence(b.kind) || b.kind === "span") continue;
-    const picked = ui.buildingId === b.id;
-    if (!picked && b.hp >= b.maxHp) continue;
-    const s = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
-    const crown = 0;
-    bar(ctx, s.x, s.y - 8 - crown, b.hp / b.maxHp, picked, "#3dcc6e");
-    if (picked) {
-      ctx.fillStyle = "#e7f6ea";
-      ctx.font = "12px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      ctx.fillText(b.name, s.x, s.y - 16 - crown);
-    }
+
+  const aimed = new Set<number>();
+  for (const u of sim.units) {
+    if (u.hp <= 0 || u.team !== VIEWER || u.order.t !== "attack") continue;
+    const b = sim.buildingById(u.order.id);
+    if (!b || b.hp <= 0 || b.rubble > 0 || aimed.has(b.id)) continue;
+    if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
+    aimed.add(b.id);
+    const lift = hallPictureLift(b.kind, b.w, b.h);
+    const s = worldToScreen(cam, b.tx + b.w / 2, b.ty + b.h - lift * 0.42, view);
+    const pulse = 0.65 + 0.35 * Math.sin(sim.time * 6);
+    ctx.save();
+    ctx.strokeStyle = "#ff3b30";
+    ctx.globalAlpha = 0.95;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, 18 + 8 * pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "#ffe0d6";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(s.x - 11, s.y);
+    ctx.lineTo(s.x + 11, s.y);
+    ctx.moveTo(s.x, s.y - 11);
+    ctx.lineTo(s.x, s.y + 11);
+    ctx.stroke();
+    ctx.restore();
   }
 
   if (ui.box) {
@@ -716,20 +1024,17 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
 }
 
 export function placeChrome(
-  cam: Camera,
+  _cam: Camera,
   view: View,
-  tx: number,
-  ty: number,
-  w: number,
+  _tx: number,
+  _ty: number,
+  _w: number,
 ): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
-  const s = worldToScreen(cam, tx + w, ty, view);
-  let x = Math.round(s.x + 12);
-  let y = Math.round(s.y - 8);
-  const bw = 88;
-  const bh = 34;
-  if (x + bw > view.w - 4) x = Math.round(s.x - bw - 12);
-  if (y < 4) y = 4;
-  if (y + bh * 2 + 6 > view.h - 4) y = Math.max(4, view.h - (bh * 2 + 10));
+  const bw = 96;
+  const bh = 44;
+  const padW = 52;
+  const x = Math.max(4, Math.round(view.w - bw - padW - 8));
+  const y = Math.max(4, Math.round(view.h - (bh * 2 + 6) - 8));
   return {
     confirm: { x, y, w: bw, h: bh },
     cancel: { x, y: y + bh + 6, w: bw, h: bh },
@@ -747,7 +1052,7 @@ function paintPlaceChrome(
     ctx.lineWidth = 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
     ctx.fillStyle = "#14110e";
-    ctx.font = "bold 13px sans-serif";
+    ctx.font = "bold 14px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
@@ -758,27 +1063,20 @@ function paintPlaceChrome(
 
 /** Cells a finished structure can build from. Same Chebyshev gap as placement. */
 function drawBuildHalo(ctx: CanvasRenderingContext2D, sim: Sim) {
-  const seen = new Uint8Array(sim.gw * sim.gh);
-  const pad = BUILD_GAP;
+  ctx.save();
+  ctx.fillStyle = "rgba(120, 210, 150, 0.12)";
+  ctx.strokeStyle = "rgba(210, 255, 220, 0.28)";
+  ctx.lineWidth = 0.05;
   for (const b of sim.buildings) {
     if (b.team !== VIEWER || b.neutral || !b.complete || b.hp <= 0 || b.rubble > 0 || isFence(b.kind)) continue;
-    const x0 = Math.max(0, b.tx - pad - 1);
-    const y0 = Math.max(0, b.ty - pad - 1);
-    const x1 = Math.min(sim.gw - 1, b.tx + b.w + pad);
-    const y1 = Math.min(sim.gh - 1, b.ty + b.h + pad);
-    ctx.fillStyle = "rgba(190, 230, 200, 0.2)";
-    for (let y = y0; y <= y1; y++) {
-      for (let x = x0; x <= x1; x++) {
-        const i = y * sim.gw + x;
-        if (seen[i]) continue;
-        seen[i] = 1;
-        ctx.fillRect(x, y, 1, 1);
-      }
-    }
-    ctx.strokeStyle = "rgba(216, 255, 230, 0.85)";
-    ctx.lineWidth = 0.07;
-    ctx.strokeRect(x0 + 0.04, y0 + 0.04, x1 - x0 + 0.92, y1 - y0 + 0.92);
+    const cx = b.tx + b.w / 2;
+    const cy = b.ty + b.h / 2;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, b.w / 2 + BUILD_GAP + 0.2, b.h / 2 + BUILD_GAP + 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
   }
+  ctx.restore();
 }
 
 function drawDoorArrow(ctx: CanvasRenderingContext2D, sim: Sim, b: Building) {
@@ -844,17 +1142,19 @@ function drawPlaceLabel(
     text = fail ? shortPlaceReason(fail.reason || "Blocked") : ok > 1 ? `${ok} tiles` : "Place";
     bad = !!fail;
   } else if (ui.hover) {
-    const check = sim.canPlace(VIEWER, ui.placing, ui.hover.tx, ui.hover.ty);
+    const drop = ui.hover;
+    const visual = ui.ghost ?? ui.hover;
+    const check = sim.canPlace(VIEWER, ui.placing, drop.tx, drop.ty);
     const def = resolveBuilding(ui.placing, sim.factionOf(VIEWER));
-    tx = ui.hover.tx;
-    ty = ui.hover.ty;
+    tx = visual.tx;
+    ty = visual.ty;
     const power = def.powerUse > 0 ? `Power −${def.powerUse}` : def.powerOut > 0 ? `Power +${def.powerOut}` : "No power draw";
     text = check.ok ? `${def.cost} credits` : ghostPlaceReason(check.reason);
     bad = !check.ok;
     const s = worldToScreen(cam, tx + def.w / 2, ty, view);
     const lines = check.ok ? [text, power] : [text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
-    if (ui.touchPlace) paintPlaceChrome(ctx, placeChrome(cam, view, tx, ty, def.w));
+    if (ui.touchPlace) paintPlaceChrome(ctx, placeChrome(cam, view, visual.tx, visual.ty, def.w));
     return;
   } else return;
   const s = worldToScreen(cam, tx + 0.5, ty, view);
@@ -956,16 +1256,17 @@ function miniTone(t: number, crystal: number, fog: number): string {
 
 function miniRgb(t: number, crystal: number, fog: number, x = 0, y = 0): [number, number, number] {
   const seen = fog === 2;
-  if (t === TILE_DEEP || t === TILE_WRECK) return seen ? [16, 64, 98] : [6, 20, 34];
-  if (t === TILE_SHALLOW || t === TILE_FORD) return seen ? [62, 176, 214] : [26, 88, 120];
-  if (t === TILE_BRIDGE || t === TILE_ROAD) return seen ? [210, 180, 138] : [106, 83, 64];
-  if (t === TILE_SHORE) return seen ? [230, 201, 138] : [122, 104, 72];
-  if (t === TILE_ROCK || t === TILE_CLIFF) return seen ? [106, 96, 88] : [42, 38, 34];
-  if (t === TILE_RAMP) return seen ? [150, 126, 90] : [70, 58, 42];
-  if (crystal > 0) return seen ? [61, 204, 110] : [29, 90, 52];
+  if (t === TILE_DEEP || t === TILE_WRECK) return [32, 112, 156];
+  if (t === TILE_SHALLOW || t === TILE_FORD) return [64, 176, 196];
+  if (t === TILE_BRIDGE || t === TILE_ROAD) return [196, 154, 96];
+  if (t === TILE_SHORE) return seen ? [230, 201, 138] : [186, 164, 120];
+  if (t === TILE_ROCK || t === TILE_CLIFF) return [120, 108, 96];
+  if (t === TILE_RAMP) return [168, 136, 88];
+  if (t === TILE_HIGH) return THEATER === "snow" ? [214, 224, 232] : [150, 132, 96];
+  if (crystal > 0) return [61, 204, 110];
   if (t === TILE_SCRUB || t === TILE_STUMP) return seen ? [22, 82, 34] : [12, 40, 18];
   if (t === TILE_ROUGH || t === TILE_VALLEY) return seen ? [62, 92, 48] : [28, 46, 24];
-  if (THEATER === "snow") return seen ? [228, 236, 244] : [110, 118, 128];
+  if (THEATER === "snow") return [228, 236, 244];
   if (THEATER === "temperate") {
     if (t === TILE_SCRUB || groveAt(x, y)) return seen ? [22, 82, 34] : [12, 40, 18];
     if (t === TILE_VALLEY) return seen ? [48, 78, 40] : [24, 40, 20];
@@ -1150,11 +1451,6 @@ export function paintRelief(
     ctx.fillRect(x, y + 1 - face, 1, face);
     ctx.fillStyle = "rgba(255,236,210,0.32)";
     ctx.fillRect(x, y + 1 - face, 1, 0.05);
-    if (t === TILE_CLIFF) {
-      ctx.fillStyle = "rgba(0,0,0,0.4)";
-      ctx.fillRect(x + 0.3, y + 1 - face + 0.06, 0.055, face - 0.08);
-      ctx.fillRect(x + 0.64, y + 1 - face + 0.1, 0.045, face - 0.14);
-    }
     return;
   }
   if (t === TILE_VALLEY) {
@@ -1186,45 +1482,55 @@ export function paintRelief(
     }
     return;
   }
-  if (t === TILE_ROAD || t === TILE_BRIDGE) {
-    ctx.fillStyle = "rgba(0,0,0,0.3)";
-    ctx.fillRect(x, y + 0.22, 1, 0.07);
-    ctx.fillStyle = "rgba(255,224,176,0.2)";
-    ctx.fillRect(x, y + 0.66, 1, 0.05);
-    return;
-  }
   if (t === TILE_SHORE) {
     ctx.fillStyle = "rgba(70,44,18,0.2)";
     ctx.fillRect(x, y + 0.7, 1, 0.3);
   }
 }
 
-function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "cash" | "squad" | "haul", time: number) {
+function drawCrate(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "cash" | "squad" | "haul" | "mend", time: number) {
   const haul = kind === "haul";
-  const bob = Math.sin(time * 3 + x) * 0.04;
-  const w = haul ? 0.62 : 0.36;
-  const h = haul ? 0.48 : 0.32;
+  const bob = Math.sin(time * 3 + x) * 0.05;
+  const w = haul ? 0.72 : 0.46;
+  const h = haul ? 0.54 : 0.38;
+  const pulse = 0.35 + 0.25 * Math.sin(time * 4 + y);
+  ctx.fillStyle = `rgba(226, 194, 90, ${pulse})`;
+  ctx.beginPath();
+  ctx.arc(x, y - 0.15 + bob, haul ? 0.55 : 0.42, 0, Math.PI * 2);
+  ctx.fill();
   ctx.fillStyle = "rgba(0,0,0,0.35)";
-  ctx.fillRect(x - w / 2, y + 0.12, w, 0.08);
-  ctx.fillStyle = haul ? "#d07a1a" : kind === "cash" ? "#1e8a48" : "#c6a56a";
-  ctx.fillRect(x - w / 2, y - h + 0.1 + bob, w, h);
-  ctx.strokeStyle = haul ? "#fff1c2" : "#0c0a08";
-  ctx.lineWidth = haul ? 0.06 : 0.04;
-  ctx.strokeRect(x - w / 2, y - h + 0.1 + bob, w, h);
-  ctx.fillStyle = haul ? "#fff6d8" : kind === "cash" ? "#d8ffe6" : "#f3ead7";
-  ctx.fillRect(x - 0.05, y - h * 0.45 + bob, haul ? 0.16 : 0.1, haul ? 0.16 : 0.12);
+  ctx.beginPath();
+  ctx.ellipse(x, y + 0.18, w * 0.55, 0.08, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = haul ? "#d07a1a" : kind === "cash" ? "#1e8a48" : kind === "mend" ? "#2f8f6a" : "#c6a56a";
+  ctx.fillRect(x - w / 2, y - h + 0.08 + bob, w, h);
+  ctx.strokeStyle = "#f4ecd4";
+  ctx.lineWidth = 0.05;
+  ctx.strokeRect(x - w / 2, y - h + 0.08 + bob, w, h);
+  ctx.fillStyle = "#f6f1e4";
+  ctx.font = `${haul ? 0.28 : 0.22}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const mark = kind === "cash" ? "$" : kind === "squad" ? "+" : kind === "mend" ? "+" : "!";
+  ctx.fillText(mark, x, y - h * 0.45 + bob);
 }
 
-function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, wide = false, fill?: string) {
-  const w = wide ? 36 : 28;
-  const h = wide ? 4 : 3;
+function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, size: "troop" | "hall" = "troop", fill?: string, label?: string) {
+  const w = size === "hall" ? 44 : 28;
+  const h = size === "hall" ? 6 : 5;
+  const p = Math.max(0, Math.min(1, pct));
+  ctx.fillStyle = "rgba(8, 6, 4, 0.9)";
+  ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
+  ctx.fillStyle = fill ?? "#2F7DF6";
+  ctx.fillRect(x - w / 2, y, Math.max(2, w * p), h);
+  if (!label) return;
+  ctx.font = "bold 12px sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
   ctx.fillStyle = "#14110e";
-  ctx.fillRect(x - w / 2, y, w, h);
-  ctx.fillStyle = fill ?? (pct > 0.5 ? "#7dce6a" : pct > 0.25 ? "#e2b15a" : "#e15b48");
-  ctx.fillRect(x - w / 2, y, Math.max(0, w * Math.max(0, Math.min(1, pct))), h);
-  ctx.strokeStyle = "#0c0a08";
-  ctx.lineWidth = 0.5;
-  ctx.strokeRect(x - w / 2, y, w, h);
+  ctx.fillText(label, x + w / 2 + 5, y + h / 2 + 1);
+  ctx.fillStyle = "#f6efd2";
+  ctx.fillText(label, x + w / 2 + 4, y + h / 2);
 }
 
 function drawRock(ctx: CanvasRenderingContext2D, x: number, y: number, photo: boolean) {
@@ -1280,86 +1586,6 @@ function drawBush(ctx: CanvasRenderingContext2D, x: number, y: number) {
   ctx.arc(x + 0.35, y + 0.6, 0.16, 0, Math.PI * 2);
   ctx.arc(x + 0.55, y + 0.55, 0.18, 0, Math.PI * 2);
   ctx.fill();
-}
-
-function paintSpanBridge(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-  const alongY = h >= w;
-  ctx.fillStyle = "rgba(4, 10, 16, 0.45)";
-  ctx.beginPath();
-  ctx.ellipse(x + w * 0.52, y + h * 0.72, w * 0.46, Math.max(0.12, h * 0.16), 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#6e777f";
-  ctx.strokeStyle = "#f4f7fa";
-  ctx.lineWidth = 0.04;
-  if (!alongY) {
-    const deckY = y + h * 0.22;
-    const deckH = Math.max(0.22, h * 0.56);
-    ctx.fillRect(x, deckY, w, deckH);
-    ctx.fillStyle = "#d5dbe2";
-    ctx.fillRect(x, deckY, w, Math.max(0.08, deckH * 0.28));
-    ctx.strokeRect(x + 0.05, deckY + deckH * 0.2, Math.max(0.1, w - 0.1), Math.max(0.06, deckH * 0.62));
-    ctx.fillStyle = "#eef2f5";
-    for (const t of [0.3, 0.7]) {
-      const tx = x + w * t;
-      ctx.fillRect(tx - 0.1, y + 0.06, 0.08, Math.max(0.2, h - 0.12));
-      ctx.fillRect(tx + 0.04, y + 0.06, 0.08, Math.max(0.2, h - 0.12));
-    }
-    ctx.beginPath();
-    ctx.moveTo(x + 0.12, deckY + deckH * 0.5);
-    ctx.quadraticCurveTo(x + w * 0.5, y + h * 0.92, x + w - 0.12, deckY + deckH * 0.5);
-    ctx.stroke();
-    return;
-  }
-  const deckX = x + w * 0.22;
-  const deckW = Math.max(0.22, w * 0.56);
-  ctx.fillRect(deckX, y, deckW, h);
-  ctx.fillStyle = "#d5dbe2";
-  ctx.fillRect(deckX, y, Math.max(0.08, deckW * 0.28), h);
-  ctx.strokeRect(deckX + deckW * 0.2, y + 0.05, Math.max(0.06, deckW * 0.62), Math.max(0.1, h - 0.1));
-  ctx.fillStyle = "#eef2f5";
-  for (const t of [0.3, 0.7]) {
-    const ty = y + h * t;
-    ctx.fillRect(x + 0.06, ty - 0.1, Math.max(0.2, w - 0.12), 0.08);
-    ctx.fillRect(x + 0.06, ty + 0.04, Math.max(0.2, w - 0.12), 0.08);
-  }
-  ctx.beginPath();
-  ctx.moveTo(deckX + deckW * 0.5, y + 0.12);
-  ctx.quadraticCurveTo(x + w * 0.92, y + h * 0.5, deckX + deckW * 0.5, y + h - 0.12);
-  ctx.stroke();
-}
-
-function bridgeFoot(sim: Sim, b: { tx: number; ty: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
-  let x0 = b.tx;
-  let y0 = b.ty;
-  let x1 = b.tx + b.w - 1;
-  let y1 = b.ty + b.h - 1;
-  const gw = sim.gw;
-  const seen = new Set<number>();
-  const stack: number[] = [];
-  const seed = (x: number, y: number) => {
-    if (x < 0 || y < 0 || x >= gw || y >= sim.gh) return;
-    const i = y * gw + x;
-    if (seen.has(i) || sim.terrain[i] !== TILE_BRIDGE) return;
-    seen.add(i);
-    stack.push(i);
-  };
-  for (let y = b.ty - 1; y <= b.ty + b.h; y++) {
-    for (let x = b.tx - 1; x <= b.tx + b.w; x++) seed(x, y);
-  }
-  while (stack.length) {
-    const i = stack.pop() as number;
-    const x = i % gw;
-    const y = (i / gw) | 0;
-    if (x < x0) x0 = x;
-    if (y < y0) y0 = y;
-    if (x > x1) x1 = x;
-    if (y > y1) y1 = y;
-    seed(x + 1, y);
-    seed(x - 1, y);
-    seed(x, y + 1);
-    seed(x, y - 1);
-  }
-  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
 function wetNeighbor(terrain: Uint8Array, x: number, y: number, dx: number, dy: number): boolean {
@@ -1430,23 +1656,105 @@ function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
   }
 }
 
-/** Ore, trees, shells, craters, and the moving water line. Never baked into the sheet. */
-function paintFieldProps(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
+/** Ore, trees, shells, craters, and the shoreline. Boring tiles return immediately. */
+function paintFieldProps(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  x: number,
+  y: number,
+  baked: boolean,
+  spark: Set<number>,
+  treeBudget: boolean,
+  shellBudget: boolean,
+): "tree" | "shell" | "" {
   const i = y * sim.gw + x;
   const t = sim.terrain[i] ?? 0;
   const mark = sim.craters[i] ?? 0;
-  paintWaterSheen(ctx, t, x, y, sim.time);
-  paintShoreLip(ctx, sim, x, y);
-  paintBridgeDeck(ctx, sim, x, y);
-  if (mark > 0 && !isShell(t)) paintCrater(ctx, x, y, mark);
-  if (t === TILE_SCRUB || t === TILE_STUMP) {
-    if (!paintGrove(ctx, x, y, t === TILE_STUMP)) paintTree(ctx, x, y, t === TILE_STUMP);
-  }
-  if (t === TILE_ROAD) paintTrack(ctx, sim, x, y);
-  paintVolume(ctx, sim, x, y);
-  if (isShell(t)) paintShell(ctx, t, x, y, mark);
   const ore = sim.crystal[i] ?? 0;
-  if (ore > 0 || t === TILE_SPENT) paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time);
+  const wet = t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
+  const tree = t === TILE_SCRUB || t === TILE_STUMP;
+  const shell = isShell(t);
+  const raised = t === TILE_CLIFF || t === TILE_ROCK || t === TILE_RAMP || t === TILE_HIGH;
+  if (!wet && !tree && !shell && !raised && t !== TILE_ROAD && t !== TILE_BRIDGE && ore <= 0 && t !== TILE_SPENT && mark <= 0) return "";
+  if (wet && !baked) {
+    paintWaterSheen(ctx, t, x, y, sim.time);
+    paintShoreLip(ctx, sim, x, y);
+  }
+  if (t === TILE_ROAD) return "";
+  if (t === TILE_BRIDGE) return "";
+  if (mark > 0 && !shell) paintCrater(ctx, x, y, mark);
+  if (tree) {
+    const lonely =
+      !scrubAt(sim, x - 1, y) && !scrubAt(sim, x + 1, y) && !scrubAt(sim, x, y - 1) && !scrubAt(sim, x, y + 1);
+    const rep = ((x ^ y) & 1) === 0;
+    if (treeBudget && (lonely || rep)) {
+      if (!paintGrove(ctx, x, y, t === TILE_STUMP)) paintTree(ctx, x, y, t === TILE_STUMP);
+      if (raised) paintVolume(ctx, sim, x, y);
+      return "tree";
+    }
+  }
+  if (raised) paintVolume(ctx, sim, x, y);
+  if (shell && shellBudget) {
+    paintShell(ctx, t, x, y, mark);
+    return "shell";
+  }
+  if (ore > 0 || t === TILE_SPENT) paintOre(ctx, x, y, ore, t === TILE_SPENT, sim.time, spark.has(i));
+  return "";
+}
+
+function scrubAt(sim: Sim, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return false;
+  return (sim.terrain[y * sim.gw + x] ?? 0) === TILE_SCRUB;
+}
+
+function paintFieldProp(ctx: CanvasRenderingContext2D, x: number, y: number, kind: "wreck" | "fence" | "crate", time: number) {
+  ctx.save();
+  ctx.fillStyle = "rgba(12, 14, 10, 0.32)";
+  ctx.beginPath();
+  ctx.ellipse(x + 0.18, y + 0.22, kind === "fence" ? 0.55 : 0.32, 0.12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  if (kind === "wreck") {
+    ctx.fillStyle = "#3a342c";
+    ctx.beginPath();
+    ctx.ellipse(x, y, 0.42, 0.2, 0.3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#5c5146";
+    ctx.fillRect(x - 0.22, y - 0.16, 0.38, 0.16);
+    ctx.fillStyle = "#1c1814";
+    ctx.beginPath();
+    ctx.arc(x - 0.16, y + 0.08, 0.07, 0, Math.PI * 2);
+    ctx.arc(x + 0.16, y + 0.05, 0.07, 0, Math.PI * 2);
+    ctx.fill();
+    const puff = 0.35 + 0.25 * Math.sin(time * 3 + x * 4);
+    ctx.fillStyle = `rgba(90, 90, 86, ${0.25 + puff * 0.2})`;
+    ctx.beginPath();
+    ctx.arc(x + 0.05, y - 0.22 - puff * 0.08, 0.08 + puff * 0.04, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(232, 120, 40, ${0.45 + puff * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(x + 0.02, y - 0.08, 0.05, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (kind === "fence") {
+    ctx.strokeStyle = "#8a7352";
+    ctx.lineWidth = 0.05;
+    ctx.beginPath();
+    ctx.moveTo(x - 0.45, y);
+    ctx.lineTo(x + 0.55, y - 0.08);
+    ctx.moveTo(x - 0.45, y - 0.16);
+    ctx.lineTo(x + 0.55, y - 0.24);
+    ctx.stroke();
+    ctx.fillStyle = "#6a5438";
+    ctx.fillRect(x - 0.48, y - 0.28, 0.06, 0.32);
+    ctx.fillRect(x + 0.5, y - 0.36, 0.06, 0.32);
+  } else {
+    const bob = Math.sin(time * 2 + x) * 0.02;
+    ctx.fillStyle = "#8a5a32";
+    ctx.fillRect(x - 0.14, y - 0.22 + bob, 0.28, 0.22);
+    ctx.strokeStyle = "#c4a06a";
+    ctx.lineWidth = 0.03;
+    ctx.strokeRect(x - 0.14, y - 0.22 + bob, 0.28, 0.22);
+  }
+  ctx.restore();
 }
 
 function drawCrystal(ctx: CanvasRenderingContext2D, x: number, y: number, time: number, bright: boolean) {
@@ -1589,7 +1897,7 @@ float hAt(vec2 w) {
   vec2 p = w - 0.5;
   vec2 c = floor(p);
   vec2 f = fract(p);
-  vec2 k = smoothstep(0.22, 0.78, f);
+  vec2 k = smoothstep(0.02, 0.98, f);
   return mix(mix(tapH(c), tapH(c + vec2(1.0, 0.0)), k.x), mix(tapH(c + vec2(0.0, 1.0)), tapH(c + vec2(1.0, 1.0)), k.x), k.y);
 }
 vec3 slotTex(float slot, vec2 uv) {
@@ -1651,8 +1959,8 @@ float inlandSand(vec2 cell) {
 }
 void main() {
   vec2 world = vUv * uSize;
-  vec2 bend = vec2(n2(world * 0.37), n2(world * 0.37 + vec2(9.0, 3.0))) - 0.5;
-  vec2 p = world + bend * 1.55;
+  vec2 bend = vec2(n2(world * 0.47), n2(world * 0.47 + vec2(5.2, 1.3))) - 0.5;
+  vec2 p = world + bend * 1.85;
   vec2 q = p - 0.5;
   vec2 c0 = floor(q);
   vec2 f = fract(q);
@@ -1704,8 +2012,9 @@ void main() {
   vec3 sand = matTex(2.0, p);
   vec3 snow = matTex(3.0, p);
   vec3 rock = matTex(4.0, p);
-  vec3 shall = mix(matTex(2.0, p * 0.7), matTex(5.0, p), 0.78);
-  vec3 deepc = matTex(6.0, p);
+  float rip = n2(p * 0.15);
+  vec3 shall = mix(vec3(0.16, 0.58, 0.68), vec3(0.30, 0.76, 0.80), rip);
+  vec3 deepc = mix(vec3(0.05, 0.24, 0.44), vec3(0.09, 0.36, 0.56), n2(p * 0.08));
   vec3 albedo = grass * dry.x;
   albedo += dirt * dry.y;
   albedo += sand * dry.z;
@@ -1726,38 +2035,47 @@ void main() {
   vec3 nrm = normalize(vec3(-dhdx * 1.25, -dhdy * 1.25, 0.78));
   float ndotl = clamp(dot(nrm, normalize(vec3(-0.38, -0.58, 0.72))), 0.0, 1.0);
   float avg = (hL + hR + hU + hD) * 0.25;
-  float light = 0.84 + 0.26 * ndotl + clamp((h - avg) * 0.42, -0.07, 0.07);
+  float light = 0.66 + 0.5 * ndotl + clamp((h - avg) * 0.7, -0.14, 0.16);
   vec3 col = albedo * light;
-  col += vec3(0.11, 0.09, 0.07) * wet.x * ndotl * smoothstep(0.30, 0.90, slope);
-  float foam = smoothstep(0.04, 0.14, h) * (1.0 - smoothstep(0.14, 0.34, h));
-  foam *= wet.y + wet.z * 0.55;
-  foam *= 0.65 + 0.35 * n2(p * 1.6);
-  col = mix(col, vec3(0.93, 0.97, 0.95), foam * 0.72);
+  col += vec3(0.16, 0.13, 0.1) * wet.x * ndotl * smoothstep(0.18, 0.72, slope);
+  float foam = smoothstep(0.02, 0.1, h) * (1.0 - smoothstep(0.16, 0.46, h));
+  foam *= wet.y + wet.z * 0.7;
+  foam *= 0.5 + 0.5 * n2(p * 2.4);
+  col = mix(col, vec3(0.94, 0.98, 0.97), foam * 0.88);
+  float wetAmt = wet.y + wet.z;
+  float dryEdge = dry.x + dry.y + dry.z + dry.w;
+  float coast = smoothstep(0.02, 0.38, wetAmt) * smoothstep(0.02, 0.46, dryEdge);
+  float lace = 0.32 + 0.68 * n2(vec2(p.x * 3.2 + n2(p * 0.7) * 2.4, p.y * 2.6));
+  col = mix(col, vec3(0.96, 0.99, 0.97), coast * lace * 0.92);
   float id = idOf(floor(world));
   vec2 fr = fract(world);
-  if (abs(id - 9.0) < 0.45) {
-    float deck = smoothstep(0.08, 0.22, fr.y) * (1.0 - smoothstep(0.78, 0.92, fr.y));
-    float plank = 0.86 + 0.1 * sin(world.y * 9.0);
-    col = mix(col, vec3(0.72, 0.52, 0.28) * plank, deck * 0.9);
-  } else if (abs(id - 10.0) < 0.45) {
-    float d = abs(fr.x - 0.5);
-    col = mix(col, vec3(0.80, 0.66, 0.40), smoothstep(0.42, 0.12, d) * 0.82);
-  } else if (abs(id - 12.0) < 0.45) {
+  if (abs(id - 12.0) < 0.45) {
     col = mix(col, vec3(0.78, 0.70, 0.46), smoothstep(0.12, 0.28, fr.y) * (1.0 - smoothstep(0.72, 0.88, fr.y)) * 0.7);
+  } else if (abs(id - 15.0) < 0.45) {
+    col = mix(col, vec3(0.62, 0.50, 0.32), 0.2);
+  } else if (abs(id - 21.0) < 0.45) {
+    col = mix(col, vec3(0.9, 0.93, 0.96), 0.22);
+    col *= 1.06;
   } else if (abs(id - 3.0) < 0.45 || abs(id - 16.0) < 0.45) {
     col = mix(col, vec3(0.22, 0.42, 0.16), 0.16);
   }
   float walk = 0.0;
-  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45 || abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45 || abs(id - 15.0) < 0.45) walk = 1.0;
+  if (abs(id - 13.0) < 0.45 || abs(id - 10.0) < 0.45 || abs(id - 11.0) < 0.45 || abs(id - 14.0) < 0.45 || abs(id - 0.0) < 0.45 || abs(id - 8.0) < 0.45 || abs(id - 4.0) < 0.45 || abs(id - 2.0) < 0.45 || abs(id - 15.0) < 0.45 || abs(id - 21.0) < 0.45) walk = 1.0;
   col += vec3(0.04, 0.05, 0.012) * walk;
+  float hCast = hAt(p - vec2(1.35, 1.7));
+  float dropSh = smoothstep(0.18, 0.85, hCast - h);
+  dropSh *= 1.0 - clamp(wet.y + wet.z, 0.0, 1.0);
+  col *= 1.0 - dropSh * 0.55;
+  if (uTheater < 0.5) col *= vec3(1.05, 0.99, 0.92);
+  else if (uTheater > 1.5) col *= vec3(0.93, 0.98, 1.05);
   float luma = dot(col, vec3(0.30, 0.50, 0.20));
   col = mix(vec3(luma), col, 1.14);
-  col *= 1.04 + (hash(floor(p * 14.0)) - 0.5) * 0.035;
+  col *= 1.02 + (n2(p * 1.7) - 0.5) * 0.04;
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;
 
 let terrainProg: { gl: WebGLRenderingContext; prog: WebGLProgram; buf: WebGLBuffer; id: number } | null = null;
-const SHADER_ID = 23;
+const SHADER_ID = 28;
 
 function terrainProgram(gl: WebGLRenderingContext) {
   if (terrainProg && terrainProg.gl === gl && terrainProg.id === SHADER_ID) return terrainProg;
@@ -2159,11 +2477,12 @@ function paintGrove(ctx: CanvasRenderingContext2D, x: number, y: number, stump: 
 }
 
 function tileElev(t: number): number {
-  if (t === TILE_CLIFF) return 1.15;
-  if (t === TILE_ROCK) return 0.72;
-  if (t === TILE_BRIDGE) return 0.4;
-  if (t === TILE_RAMP) return 0.24;
-  if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK) return -0.2;
+  if (t === TILE_CLIFF) return 1.7;
+  if (t === TILE_HIGH) return 1.22;
+  if (t === TILE_ROCK) return 0.96;
+  if (t === TILE_BRIDGE) return 0.58;
+  if (t === TILE_RAMP) return 0.64;
+  if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK) return -0.08;
   return 0;
 }
 
@@ -2216,30 +2535,239 @@ function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: numb
     const xb = x + 1;
     volumeQuad(ctx, xb, y, xb, y + 1, xb + shear, y + 1 - rise, xb + shear, y - rise, t === TILE_CLIFF ? "#241e1a" : "#2e2924");
   });
+  if (t === TILE_CLIFF && h - at(x, y + 1) > 0.4) {
+    ctx.fillStyle = "rgba(10, 12, 10, 0.28)";
+    ctx.beginPath();
+    ctx.ellipse(x + 0.7, y + 1.28, 0.72, 0.2, 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
-function paintBridgeDeck(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
-  if ((sim.terrain[y * sim.gw + x] ?? 0) !== TILE_BRIDGE) return;
-  const z = 0.4;
-  const shear = z * SOLID_SHEAR;
-  const lift = z * SOLID_LIFT;
-  const snow = THEATER === "snow";
-  volumeQuad(ctx, x + 0.08, y + 1.08, x + 0.92, y + 1.08, x + 0.92 + shear, y + 1.08 - lift, x + 0.08 + shear, y + 1.08 - lift, "rgba(6,10,14,0.45)");
-  volumeQuad(
-    ctx,
-    x + shear,
-    y - lift,
-    x + 1 + shear,
-    y - lift,
-    x + 1 + shear,
-    y + 1 - lift,
-    x + shear,
-    y + 1 - lift,
-    snow ? "#d5dee6" : "#8a8478",
+function bridgeTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
+  return (terrain[y * gw + x] ?? 0) === TILE_BRIDGE;
+}
+
+function groundTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): number {
+  if (x < 0 || y < 0 || x >= gw || y >= gh) return TILE_ROCK;
+  return terrain[y * gw + x] ?? 0;
+}
+
+function waterTile(t: number): boolean {
+  return t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
+}
+
+function bankTile(t: number): boolean {
+  return (
+    t === TILE_SAND ||
+    t === TILE_CLEAR ||
+    t === TILE_ROUGH ||
+    t === TILE_SHORE ||
+    t === TILE_ROAD ||
+    t === TILE_HIGH ||
+    t === TILE_RAMP ||
+    t === TILE_STUMP ||
+    t === TILE_SPENT ||
+    t === TILE_SCRUB ||
+    t === TILE_VALLEY
   );
-  ctx.fillStyle = "#23282c";
-  ctx.fillRect(x + shear, y - lift, 1, 0.06);
-  ctx.fillRect(x + shear, y + 0.94 - lift, 1, 0.06);
+}
+
+function paintPlankDeck(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, alongY: boolean) {
+  ctx.fillStyle = "#6b5340";
+  ctx.fillRect(x, y, w, h);
+  const tone = 128 + ((hash(x * 3, y * 5) * 28) | 0);
+  ctx.fillStyle = `rgb(${tone + 18},${tone - 8},62)`;
+  ctx.fillRect(x + 0.05, y + 0.05, Math.max(0.08, w - 0.1), Math.max(0.08, h - 0.1));
+  ctx.fillStyle = "rgba(42, 28, 16, 0.42)";
+  const n = Math.max(3, Math.round((alongY ? h : w) * 2.2));
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    if (alongY) ctx.fillRect(x + 0.06, y + h * t, Math.max(0.04, w - 0.12), 0.028);
+    else ctx.fillRect(x + w * t, y + 0.06, 0.028, Math.max(0.04, h - 0.12));
+  }
+}
+
+function paintBridgeRamps(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
+  const dirt = (rx: number, ry: number, rw: number, rh: number, a: number) => {
+    ctx.fillStyle = `rgba(112, 84, 52, ${a})`;
+    ctx.fillRect(rx, ry, rw, rh);
+  };
+  if (bankTile(groundTile(terrain, gw, gh, x, y - 1))) {
+    dirt(x, y - 1.05, 1, 0.42, 0.16);
+    dirt(x, y - 0.64, 1, 0.42, 0.38);
+    dirt(x, y - 0.24, 1, 0.3, 0.78);
+  }
+  if (bankTile(groundTile(terrain, gw, gh, x, y + 1))) {
+    dirt(x, y + 1.58, 1, 0.4, 0.16);
+    dirt(x, y + 1.18, 1, 0.42, 0.38);
+    dirt(x, y + 0.92, 1, 0.3, 0.78);
+  }
+  if (bankTile(groundTile(terrain, gw, gh, x - 1, y))) {
+    dirt(x - 1.05, y, 0.42, 1, 0.16);
+    dirt(x - 0.64, y, 0.42, 1, 0.38);
+    dirt(x - 0.24, y, 0.3, 1, 0.78);
+  }
+  if (bankTile(groundTile(terrain, gw, gh, x + 1, y))) {
+    dirt(x + 1.58, y, 0.4, 1, 0.16);
+    dirt(x + 1.18, y, 0.42, 1, 0.38);
+    dirt(x + 0.94, y, 0.3, 1, 0.78);
+  }
+}
+
+function paintBridgeDeckTile(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
+  const n = bridgeTile(terrain, gw, gh, x, y - 1);
+  const s = bridgeTile(terrain, gw, gh, x, y + 1);
+  const e = bridgeTile(terrain, gw, gh, x + 1, y);
+  const w = bridgeTile(terrain, gw, gh, x - 1, y);
+  const ortho = n || s || e || w;
+  const dNE = bridgeTile(terrain, gw, gh, x + 1, y - 1);
+  const dNW = bridgeTile(terrain, gw, gh, x - 1, y - 1);
+  const dSE = bridgeTile(terrain, gw, gh, x + 1, y + 1);
+  const dSW = bridgeTile(terrain, gw, gh, x - 1, y + 1);
+  if (!ortho && (dNE || dNW || dSE || dSW)) {
+    const ang = dNE || dSW ? -Math.PI / 4 : Math.PI / 4;
+    ctx.save();
+    ctx.translate(x + 0.5, y + 0.5);
+    ctx.rotate(ang);
+    ctx.fillStyle = "rgba(4, 10, 16, 0.4)";
+    ctx.fillRect(-0.42, -0.02, 0.95, 0.42);
+    paintPlankDeck(ctx, -0.64, -0.2, 1.28, 0.4, false);
+    ctx.fillStyle = "#efe4d2";
+    ctx.fillRect(-0.64, -0.26, 1.28, 0.07);
+    ctx.fillRect(-0.64, 0.19, 1.28, 0.07);
+    ctx.fillStyle = "#3a2c1e";
+    ctx.fillRect(-0.58, -0.28, 0.1, 0.12);
+    ctx.fillRect(0.48, -0.28, 0.1, 0.12);
+    ctx.fillRect(-0.58, 0.16, 0.1, 0.12);
+    ctx.fillRect(0.48, 0.16, 0.1, 0.12);
+    ctx.restore();
+    return;
+  }
+  const alongY = (n || s) && !(e || w) ? true : (e || w) && !(n || s) ? false : n || s;
+  paintPlankDeck(ctx, x - 0.015, y - 0.015, 1.03, 1.03, alongY);
+  ctx.fillStyle = "#efe4d2";
+  const rail = (nx: number, ny: number, rx: number, ry: number, rw: number, rh: number) => {
+    if (!waterTile(groundTile(terrain, gw, gh, nx, ny))) return;
+    ctx.fillRect(rx, ry, rw, rh);
+  };
+  rail(x, y - 1, x, y + 0.02, 1, 0.08);
+  rail(x, y + 1, x, y + 0.9, 1, 0.08);
+  rail(x - 1, y, x + 0.02, y, 0.08, 1);
+  rail(x + 1, y, x + 0.9, y, 0.08, 1);
+  ctx.fillStyle = "#3a2c1e";
+  const post = (px: number, py: number) => ctx.fillRect(px, py, 0.11, 0.12);
+  if (waterTile(groundTile(terrain, gw, gh, x, y - 1)) && x % 2 === 0) {
+    post(x + 0.06, y);
+    post(x + 0.82, y);
+  }
+  if (waterTile(groundTile(terrain, gw, gh, x, y + 1)) && x % 2 === 0) {
+    post(x + 0.06, y + 0.86);
+    post(x + 0.82, y + 0.86);
+  }
+  if (waterTile(groundTile(terrain, gw, gh, x - 1, y)) && y % 2 === 0) {
+    post(x, y + 0.08);
+    post(x, y + 0.78);
+  }
+  if (waterTile(groundTile(terrain, gw, gh, x + 1, y)) && y % 2 === 0) {
+    post(x + 0.86, y + 0.08);
+    post(x + 0.86, y + 0.78);
+  }
+}
+
+function paintBridgeShadow(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
+  ctx.fillStyle = "rgba(4, 10, 16, 0.42)";
+  if (waterTile(groundTile(terrain, gw, gh, x, y + 1))) ctx.fillRect(x + 0.08, y + 1.0, 0.9, 0.22);
+  if (waterTile(groundTile(terrain, gw, gh, x + 1, y))) ctx.fillRect(x + 1.0, y + 0.12, 0.2, 0.86);
+  if (waterTile(groundTile(terrain, gw, gh, x, y - 1))) ctx.fillRect(x + 0.12, y - 0.16, 0.84, 0.16);
+  if (waterTile(groundTile(terrain, gw, gh, x - 1, y))) ctx.fillRect(x - 0.16, y + 0.16, 0.16, 0.8);
+}
+
+function paintBridges(
+  ctx: CanvasRenderingContext2D,
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+) {
+  const visit = (draw: (x: number, y: number) => void) => {
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        if (!bridgeTile(terrain, gw, gh, x, y)) continue;
+        draw(x, y);
+      }
+    }
+  };
+  visit((x, y) => paintBridgeShadow(ctx, terrain, gw, gh, x, y));
+  visit((x, y) => paintBridgeRamps(ctx, terrain, gw, gh, x, y));
+  visit((x, y) => paintBridgeDeckTile(ctx, terrain, gw, gh, x, y));
+}
+
+function roadTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): boolean {
+  if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
+  const t = terrain[y * gw + x] ?? 0;
+  return t === TILE_ROAD || t === TILE_BRIDGE;
+}
+
+/** One soft strip through tile centers, including diagonals. Not a brick staircase. */
+function paintRoadNet(
+  ctx: CanvasRenderingContext2D,
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+) {
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      if ((terrain[y * gw + x] ?? 0) !== TILE_ROAD) continue;
+      const links: [number, number][] = [
+        [1, 0],
+        [0, 1],
+        [1, 1],
+        [1, -1],
+      ];
+      for (const [dx, dy] of links) {
+        if (!roadTile(terrain, gw, gh, x + dx, y + dy)) continue;
+        ctx.moveTo(x + 0.5, y + 0.5);
+        ctx.lineTo(x + dx + 0.5, y + dy + 0.5);
+      }
+    }
+  }
+  ctx.strokeStyle = "rgba(48, 34, 20, 0.42)";
+  ctx.lineWidth = 0.84;
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(154, 116, 68, 0.96)";
+  ctx.lineWidth = 0.56;
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(226, 198, 150, 0.38)";
+  ctx.lineWidth = 0.12;
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Roads then bridges, on top of the baked ground. Match and editor share this. */
+export function paintCrossings(
+  ctx: CanvasRenderingContext2D,
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+) {
+  paintRoadNet(ctx, terrain, gw, gh, x0, y0, x1, y1);
+  paintBridges(ctx, terrain, gw, gh, x0, y0, x1, y1);
 }
 
 function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
@@ -2257,36 +2785,6 @@ function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
   if (land(x + 1, y)) ctx.fillRect(x + 0.93, y, 0.07, 1);
 }
 
-function paintTrack(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number) {
-  const road = (nx: number, ny: number) => {
-    if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) return false;
-    const n = sim.terrain[ny * sim.gw + nx];
-    return n === TILE_ROAD || n === TILE_BRIDGE;
-  };
-  const vert = road(x, y - 1) || road(x, y + 1);
-  const horz = road(x - 1, y) || road(x + 1, y);
-  const wob = (hash(x, y) - 0.5) * 0.06;
-  ctx.save();
-  ctx.strokeStyle = "rgba(120, 86, 42, 0.42)";
-  ctx.lineWidth = 0.045;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  if (!horz || vert) {
-    ctx.moveTo(x + 0.3 + wob, y);
-    ctx.lineTo(x + 0.3 + wob, y + 1);
-    ctx.moveTo(x + 0.7 - wob, y);
-    ctx.lineTo(x + 0.7 - wob, y + 1);
-  }
-  if (horz) {
-    ctx.moveTo(x, y + 0.3 - wob);
-    ctx.lineTo(x + 1, y + 0.3 - wob);
-    ctx.moveTo(x, y + 0.7 + wob);
-    ctx.lineTo(x + 1, y + 0.7 + wob);
-  }
-  ctx.stroke();
-  ctx.restore();
-}
-
 function paintBuilding(
   ctx: CanvasRenderingContext2D,
   bank: Painted,
@@ -2302,9 +2800,9 @@ function paintBuilding(
   const p = b.complete ? 1 : 1 - b.buildLeft / Math.max(0.01, b.buildTotal);
   const box = hallFrame(b, img);
   ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillStyle = "rgba(0,0,0,0.18)";
   ctx.beginPath();
-  ctx.ellipse(b.tx + b.w / 2, b.ty + b.h * 0.8, b.w * 0.46, Math.max(0.14, b.h * 0.18), 0, 0, Math.PI * 2);
+  ctx.ellipse(b.tx + b.w / 2 + 0.2, b.ty + b.h * 0.86, b.w * 0.36, Math.max(0.08, b.h * 0.1), 0.35, 0, Math.PI * 2);
   ctx.fill();
   ctx.globalAlpha = b.complete ? 1 : 0.42 + 0.58 * Math.max(0, Math.min(1, p));
   ctx.filter = trimFilter(color);
@@ -2348,31 +2846,35 @@ function paintBuilding(
   return true;
 }
 
-function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
-  ctx.strokeStyle = "#fff6df";
-  ctx.lineWidth = 0.06;
+function selectRing(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, color = "#fff6df", time = 0) {
+  const pulse = 0.22 + 0.08 * Math.sin(time * 4);
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.globalAlpha = pulse;
   ctx.beginPath();
-  ctx.ellipse(x, y, r * 1.2, r * 0.9, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y + 0.02, r * 1.15, r * 0.46, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 0.8;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 0.045;
   ctx.stroke();
+  ctx.restore();
 }
 
-/** Pale pad plus a light rim so olive troops do not disappear into the field. */
+/** Soft contact shadow, offset with the light, plus a thin team rim. */
 function drawStand(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, color: string) {
-  const rx = Math.max(0.46, radius * 1.45);
-  const ry = rx * 0.42;
-  const cy = y + ry * 0.2;
+  const rx = Math.max(0.28, radius * 0.95);
+  const ry = rx * 0.32;
   ctx.save();
-  ctx.fillStyle = "rgba(255, 246, 220, 0.9)";
+  ctx.fillStyle = "rgba(20, 16, 10, 0.2)";
   ctx.beginPath();
-  ctx.ellipse(x, cy, rx, ry, 0, 0, Math.PI * 2);
+  ctx.ellipse(x + 0.12, y + 0.1, rx, ry, 0.4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = "rgba(28, 22, 14, 0.88)";
-  ctx.lineWidth = 0.055;
-  ctx.stroke();
-  ctx.strokeStyle = shade(color, 1.35);
-  ctx.lineWidth = 0.07;
+  ctx.strokeStyle = shade(color, 1.2);
+  ctx.globalAlpha = 0.55;
+  ctx.lineWidth = 0.035;
   ctx.beginPath();
-  ctx.ellipse(x, cy, rx * 0.72, ry * 0.72, 0, 0, Math.PI * 2);
+  ctx.ellipse(x, y + 0.02, rx * 0.7, ry * 0.7, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 }
@@ -2466,7 +2968,7 @@ function paintUnitSprite(
       }
     }
     ctx.restore();
-    if (selected) selectRing(ctx, x, y, u.radius + 0.16);
+    if (selected) selectRing(ctx, x, y, u.radius + 0.16, color, time);
     return true;
   }
 
@@ -2481,7 +2983,7 @@ function paintUnitSprite(
     paintCutout(ctx, bank.boat, -w / 2, -h / 2, w, h);
     teamBand(ctx, -0.05, -0.08, w * 0.28, 0.1, color);
     ctx.restore();
-    if (selected) selectRing(ctx, x, y, u.radius + 0.16);
+    if (selected) selectRing(ctx, x, y, u.radius + 0.16, color, time);
     return true;
   }
 
@@ -2507,7 +3009,7 @@ function paintUnitSprite(
     ctx.arc(0, 0, 0.66, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    if (selected) selectRing(ctx, x, y, u.radius + 0.18);
+    if (selected) selectRing(ctx, x, y, u.radius + 0.18, color, time);
     return true;
   }
 
@@ -2536,7 +3038,7 @@ function paintUnitSprite(
       ctx.globalAlpha = 1;
     }
     ctx.restore();
-    if (selected) selectRing(ctx, x, y, u.radius + 0.16);
+    if (selected) selectRing(ctx, x, y, u.radius + 0.16, color, time);
     return true;
   }
 
@@ -2583,7 +3085,7 @@ function paintUnitSprite(
     paintCutout(ctx, bank.turret, -ts / 2, -ts / 2, ts, ts);
     ctx.restore();
   }
-  if (selected) selectRing(ctx, x, y, u.radius + 0.16);
+  if (selected) selectRing(ctx, x, y, u.radius + 0.16, color, time);
   return true;
 }
 
@@ -2711,32 +3213,141 @@ function unitPlate(kind: string): keyof IsoBank | null {
   return null;
 }
 
-/** World width of a troop picture. Infantry stay small. A medium tank is a step larger than a light tank. */
-function troopWide(kind: string): number {
-  const infantry =
-    kind === "rifle" ||
-    kind === "rocket" ||
-    kind === "marksman" ||
-    kind === "wader" ||
-    kind === "vanguard" ||
-    kind === "engineer";
-  if (infantry) return 0.48;
-  if (kind === "medium") return 1.18;
-  if (kind === "tank") return 0.9;
-  if (kind === "scout" || kind === "razor") return 0.82;
-  if (kind === "artillery" || kind === "apc" || kind === "harvester") return 1.12;
-  if (kind === "chinook" || kind === "bomber") return 1.15;
-  if (kind === "attackheli") return 1.02;
-  return 1;
-}
+const PLATE_SCRATCH_W = 128;
+const PLATE_SCRATCH_H = 300;
+let plateScratch: HTMLCanvasElement | null = null;
 
-function paintPlate(ctx: CanvasRenderingContext2D, img: HTMLImageElement, x: number, y: number, w: number, flip: boolean) {
+function paintPlate(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  x: number,
+  y: number,
+  w: number,
+  flip: boolean,
+  _outline = false,
+  cast: "unit" | "hall" = "unit",
+  color = "#2F7DF6",
+) {
   const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
   const h = w * aspect;
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(flip ? -1 : 1, 1 / viewPitch());
-  ctx.drawImage(img, -w / 2, -h, w, h);
+  const o = Math.max(0.01, w * 0.018);
+  ctx.save();
+  ctx.filter = "brightness(0)";
+  ctx.globalAlpha = 0.45;
+  ctx.drawImage(img, -w / 2, -h + o, w, h);
+  ctx.restore();
+  if (!paintTeamTrim(ctx, img, -w / 2, -h, w, h, color, cast)) {
+    ctx.drawImage(img, -w / 2, -h, w, h);
+  }
+  if (cast === "hall" || w > 0.75) paintFlag(ctx, w, h, color, cast);
+  ctx.restore();
+}
+
+/** Neutral body, with team color on the helmet, turret, or roof only. */
+function paintTeamTrim(
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+  ink: string,
+  cast: "unit" | "hall",
+): boolean {
+  if (typeof document === "undefined") return false;
+  if (!plateScratch) {
+    plateScratch = document.createElement("canvas");
+    plateScratch.width = PLATE_SCRATCH_W;
+    plateScratch.height = PLATE_SCRATCH_H;
+  }
+  const s = plateScratch.getContext("2d");
+  if (!s) return false;
+  const aspect = img.naturalHeight / Math.max(1, img.naturalWidth);
+  const ph = Math.max(1, Math.min(PLATE_SCRATCH_H, Math.round(PLATE_SCRATCH_W * aspect)));
+  s.setTransform(1, 0, 0, 1, 0, 0);
+  s.globalCompositeOperation = "source-over";
+  s.globalAlpha = 1;
+  s.filter = "none";
+  s.clearRect(0, 0, PLATE_SCRATCH_W, ph);
+  s.drawImage(img, 0, 0, PLATE_SCRATCH_W, ph);
+  s.save();
+  s.globalCompositeOperation = "source-atop";
+  s.fillStyle = ink;
+  s.globalAlpha = cast === "hall" ? 0.62 : 0.8;
+  s.fillRect(0, 0, PLATE_SCRATCH_W, ph);
+  s.restore();
+  const band = cast === "hall" ? 0.42 : 0.36;
+  s.save();
+  s.beginPath();
+  s.rect(0, 0, PLATE_SCRATCH_W, ph * band);
+  s.clip();
+  s.globalCompositeOperation = "source-atop";
+  s.fillStyle = ink;
+  s.globalAlpha = 0.95;
+  s.fillRect(0, 0, PLATE_SCRATCH_W, ph * band);
+  s.restore();
+  s.globalCompositeOperation = "source-over";
+  s.globalAlpha = 1;
+  ctx.drawImage(plateScratch, 0, 0, PLATE_SCRATCH_W, ph, dx, dy, dw, dh);
+  return true;
+}
+
+/** Small flag so the side still reads when the trim band is in shadow. */
+function paintFlag(ctx: CanvasRenderingContext2D, w: number, h: number, ink: string, cast: "unit" | "hall") {
+  const fw = Math.max(0.08, w * (cast === "unit" ? 0.28 : 0.18));
+  const fh = Math.max(0.04, h * (cast === "unit" ? 0.08 : 0.055));
+  const x0 = w * (cast === "unit" ? 0.02 : 0.16);
+  const y0 = -h * (cast === "unit" ? 0.96 : 0.9);
+  const pole = Math.max(0.015, w * 0.035);
+  ctx.fillStyle = "#14110e";
+  ctx.fillRect(x0, y0, pole, h * (cast === "unit" ? 0.18 : 0.12));
+  ctx.fillStyle = ink;
+  ctx.fillRect(x0 + pole, y0, fw, fh);
+  ctx.strokeStyle = "#14110e";
+  ctx.lineWidth = Math.max(0.012, w * 0.02);
+  ctx.strokeRect(x0 + pole, y0, fw, fh);
+}
+
+/** Team ring under a troop. Selected troops get the gold ground hex. */
+function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
+  const rx = Math.max(selected ? 0.46 : 0.34, wide * (selected ? 0.72 : 0.9));
+  const ry = Math.max(0.1, rx * 0.4);
+  ctx.save();
+  if (!selected) {
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.55;
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(0.04, wide * 0.07);
+    ctx.beginPath();
+    ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+  ctx.translate(x, y + 0.03);
+  ctx.beginPath();
+  const reach = Math.max(0.5, rx);
+  for (let i = 0; i < 6; i++) {
+    const a = -Math.PI / 2 + (i * Math.PI) / 3;
+    const px = Math.cos(a) * reach;
+    const py = Math.sin(a) * reach * 0.42;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = "rgba(242, 194, 48, 0.16)";
+  ctx.fill();
+  ctx.strokeStyle = "#f2c230";
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = Math.max(0.045, wide * 0.06);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -2753,9 +3364,23 @@ function drawBuilding(
     if (sim) drawFence(ctx, b, color, selected, time, sim);
     return;
   }
-  if (b.kind === "span") {
-    const foot = sim ? bridgeFoot(sim, b) : { x: b.tx, y: b.ty, w: b.w, h: b.h };
-    paintSpanBridge(ctx, foot.x, foot.y, foot.w, foot.h);
+  if (b.kind === "span") return;
+  if (b.collapse > 0) {
+    const t = 1 - Math.max(0, Math.min(1, b.collapse / 1.35));
+    const footX = b.tx + b.w / 2;
+    const footY = b.ty + b.h - 0.02;
+    const wide = Math.max(b.w, b.h);
+    ctx.save();
+    ctx.translate(footX, footY);
+    ctx.scale(1 + t * 0.2, Math.max(0.1, 1 - t * 0.9));
+    ctx.translate(-footX, -footY);
+    ctx.globalAlpha = Math.max(0.2, 1 - t * 0.85);
+    ctx.fillStyle = "#4a3a2c";
+    ctx.fillRect(b.tx + 0.12, b.ty + 0.35, Math.max(0.4, b.w - 0.24), Math.max(0.3, b.h - 0.5));
+    ctx.fillStyle = color;
+    ctx.fillRect(b.tx + 0.12, b.ty + b.h * 0.42, Math.max(0.4, b.w - 0.24), 0.16);
+    ctx.restore();
+    paintCollapse(ctx, b, footX, footY - 0.15, wide, time);
     return;
   }
   const plate = hallPlate(b.kind);
@@ -2763,12 +3388,10 @@ function drawBuilding(
   if (img) {
     const footX = b.tx + b.w / 2;
     const footY = b.ty + b.h - 0.02;
-    const tall = b.kind === "tower" || b.kind === "aa";
-    const wide = Math.max(b.w, b.h) * (tall ? 1.05 : 1);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.88;
+    const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+    ctx.fillStyle = "rgba(20, 16, 10, 0.2)";
     ctx.beginPath();
-    ctx.ellipse(footX, footY, Math.max(0.35, b.w * 0.38), Math.max(0.14, b.h * 0.14), 0, 0, Math.PI * 2);
+    ctx.ellipse(footX + 0.26, footY + 0.2, wide * 0.34, wide * 0.09, 0.4, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = low && b.complete ? 0.62 : 1;
     if (!b.complete) {
@@ -2779,26 +3402,175 @@ function drawBuilding(
       ctx.beginPath();
       ctx.rect(footX - wide / 2, footY - h * p, wide, h * p + 0.08);
       ctx.clip();
-      paintPlate(ctx, img, footX, footY, wide, false);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
       ctx.restore();
     } else {
-      paintPlate(ctx, img, footX, footY, wide, false);
+      paintPlate(ctx, img, footX, footY, wide, false, true, "hall", color);
     }
     ctx.globalAlpha = 1;
+    paintStructureHurt(ctx, b, footX, footY, wide, time);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 0.16;
+    ctx.globalAlpha = 0.95;
+    ctx.strokeRect(b.tx + 0.05, b.ty + b.h - 0.28, Math.max(0.4, b.w - 0.1), 0.2);
+    ctx.fillStyle = color;
+    ctx.fillRect(b.tx + 0.08, b.ty + b.h - 0.24, Math.max(0.32, b.w - 0.16), 0.12);
+    ctx.restore();
     if (selected) {
       ctx.strokeStyle = "#f4f7ea";
-      ctx.lineWidth = 0.055;
+      ctx.lineWidth = 0.05;
       ctx.beginPath();
-      ctx.ellipse(footX, footY, Math.max(0.4, b.w * 0.46), Math.max(0.16, b.h * 0.18), 0, 0, Math.PI * 2);
+      ctx.ellipse(footX, footY, Math.max(0.35, b.w * 0.42), Math.max(0.14, b.h * 0.16), 0, 0, Math.PI * 2);
       ctx.stroke();
-      // Clear cell footprint so the blocked area is obvious at close zoom
-      ctx.strokeStyle = "rgba(244,247,234,0.55)";
-      ctx.lineWidth = 0.04;
-      ctx.strokeRect(b.tx, b.ty, b.w, b.h);
     }
     return;
   }
   paintSolidBuilding(ctx, b, color, selected, time, THEATER === "snow", low);
+  paintStructureHurt(ctx, b, b.tx + b.w / 2, b.ty + b.h * 0.45, Math.max(b.w, b.h), time);
+}
+
+/** Damage stages. Procedural fire and smoke. No texture, no magenta. */
+function paintStructureHurt(
+  ctx: CanvasRenderingContext2D,
+  b: Building,
+  x: number,
+  y: number,
+  wide: number,
+  time: number,
+) {
+  if (!b.complete || b.maxHp <= 0 || isFence(b.kind) || b.kind === "span") return;
+  if (b.collapse > 0) {
+    paintCollapse(ctx, b, x, y, wide, time);
+    return;
+  }
+  if (b.rubble > 0 || b.hp <= 0) return;
+  const frac = b.hp / b.maxHp;
+  if (frac >= 0.66) return;
+  ctx.save();
+  if (frac < 0.66) {
+    ctx.globalAlpha = 0.18 + (0.66 - frac) * 0.4;
+    ctx.fillStyle = "rgba(20, 16, 12, 0.55)";
+    ctx.beginPath();
+    ctx.ellipse(x, y - wide * 0.15, wide * 0.42, wide * 0.18, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const light = frac >= 0.33;
+  const points = light ? 2 : 4;
+  if (!light) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(0.04 + 0.02 * Math.sin(time * 2 + b.id));
+    ctx.translate(-x, -y);
+  }
+  for (let i = 0; i < points; i++) {
+    const ox = (i - (points - 1) / 2) * wide * 0.22;
+    const oy = -wide * (0.35 + (i % 2) * 0.12);
+    paintSmoke(ctx, x + ox, y + oy, wide * (light ? 0.14 : 0.22), time + i * 0.7, light);
+    if (!light) {
+      paintFlame(ctx, x + ox, y + oy + wide * 0.08, wide * 0.16, time + i);
+      if (Math.sin(time * 9 + i) > 0.6) {
+        ctx.fillStyle = "#fff6d0";
+        ctx.globalAlpha = 0.8;
+        ctx.fillRect(x + ox + 0.04, y + oy - 0.1, 0.04, 0.04);
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+  if (!light) ctx.restore();
+  ctx.restore();
+}
+
+function paintSmoke(ctx: CanvasRenderingContext2D, x: number, y: number, r: number, time: number, light: boolean) {
+  const rise = (time * 0.4) % 1;
+  ctx.save();
+  ctx.globalAlpha = (light ? 0.35 : 0.55) * (1 - rise * 0.6);
+  ctx.fillStyle = light ? "rgba(70, 70, 74, 0.7)" : "rgba(28, 26, 24, 0.85)";
+  ctx.beginPath();
+  ctx.arc(x + Math.sin(time * 1.3) * r * 0.3, y - rise * r * 2.2, r * (0.7 + rise * 0.6), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function paintFlame(ctx: CanvasRenderingContext2D, x: number, y: number, h: number, time: number) {
+  const flick = 0.75 + 0.25 * Math.sin(time * 11);
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  ctx.fillStyle = "#e25822";
+  ctx.beginPath();
+  ctx.moveTo(x - h * 0.35, y);
+  ctx.quadraticCurveTo(x - h * 0.1, y - h * flick, x, y - h * 1.3 * flick);
+  ctx.quadraticCurveTo(x + h * 0.1, y - h * flick, x + h * 0.35, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#ffe7a0";
+  ctx.beginPath();
+  ctx.moveTo(x - h * 0.15, y);
+  ctx.quadraticCurveTo(x, y - h * 0.7 * flick, x + h * 0.15, y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function paintCollapse(ctx: CanvasRenderingContext2D, b: Building, x: number, y: number, wide: number, time: number) {
+  const t = 1 - b.collapse / 1.35;
+  ctx.save();
+  ctx.globalAlpha = 0.55 + t * 0.35;
+  ctx.fillStyle = "rgba(90, 78, 62, 0.75)";
+  ctx.beginPath();
+  ctx.ellipse(x, y + t * 0.45, wide * (0.55 + t * 0.35), wide * 0.22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  for (let i = 0; i < 8; i++) {
+    const a = i * 0.8 + time * 2;
+    const d = wide * (0.15 + t * 0.55);
+    ctx.fillStyle = i % 2 ? "#6a5644" : "#2e261f";
+    ctx.fillRect(x + Math.cos(a) * d - 0.1, y + Math.sin(a) * d * 0.45 - t * 0.35, 0.22, 0.12);
+  }
+  paintSmoke(ctx, x - wide * 0.2, y - wide * 0.35, wide * 0.42, time, false);
+  paintSmoke(ctx, x + wide * 0.18, y - wide * 0.2, wide * 0.36, time + 0.6, false);
+  ctx.restore();
+}
+
+function paintCaptureRing(ctx: CanvasRenderingContext2D, x: number, y: number, progress: number) {
+  ctx.save();
+  ctx.strokeStyle = "#2F7DF6";
+  ctx.lineWidth = 0.06;
+  ctx.beginPath();
+  ctx.arc(x, y, 0.35, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function rubbleSeen(sim: Sim, b: Building): boolean {
+  const fog = sim.fog[VIEWER];
+  if (!fog) return true;
+  for (let y = b.ty; y < b.ty + b.h; y++) {
+    for (let x = b.tx; x < b.tx + b.w; x++) {
+      if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) continue;
+      if ((fog[y * sim.gw + x] ?? 0) !== 0) return true;
+    }
+  }
+  return false;
+}
+
+function paintRubble(ctx: CanvasRenderingContext2D, b: Building) {
+  const x0 = b.tx + 0.08;
+  const y0 = b.ty + 0.12;
+  ctx.save();
+  ctx.fillStyle = "rgba(36, 28, 22, 0.72)";
+  ctx.fillRect(x0, y0, Math.max(0.6, b.w - 0.16), Math.max(0.5, b.h - 0.2));
+  ctx.strokeStyle = "#8a7060";
+  ctx.lineWidth = 0.06;
+  ctx.strokeRect(x0, y0, Math.max(0.6, b.w - 0.16), Math.max(0.5, b.h - 0.2));
+  ctx.fillStyle = "#5c4638";
+  for (let i = 0; i < 8; i++) {
+    const ox = ((i * 37) % 9) * b.w * 0.08;
+    const oy = ((i * 19) % 7) * b.h * 0.09;
+    ctx.fillRect(b.tx + 0.2 + ox, b.ty + 0.25 + oy, 0.28 + (i % 3) * 0.08, 0.16);
+  }
+  ctx.fillStyle = "#2a211c";
+  ctx.fillRect(b.tx + 0.3, b.ty + b.h * 0.55, Math.max(0.4, b.w * 0.45), 0.14);
+  ctx.restore();
 }
 
 /** 0 on the pad, 1 in flight. The gap between picture and shadow is the altitude cue. */
@@ -2814,22 +3586,28 @@ function airPictureOffset(u: Unit): { x: number; y: number } {
   return { x: -0.52 * lift, y: -0.7 * lift };
 }
 
-function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number) {
+function drawAirShadow(ctx: CanvasRenderingContext2D, u: Unit, x: number, y: number, color = "#2F7DF6") {
   const lift = airLift(u);
-  const wide = u.kind === "bomber" || u.kind === "chinook";
-  const ox = x + 0.16 + 0.58 * lift;
-  const oy = y + 0.2 + 0.78 * lift;
-  const rx = (wide ? 0.9 : 0.64) * (0.7 + 0.3 * lift);
-  const ry = rx * 0.4;
+  const span = unitWorldSpan(u.kind);
+  const ox = x + 0.16 + 0.42 * lift;
+  const oy = y + 0.16 + 0.55 * lift;
+  const rx = span * 0.38 * (0.72 + 0.28 * lift);
+  const ry = rx * 0.42;
   ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.2)";
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
   ctx.beginPath();
-  ctx.ellipse(ox, oy, rx * 1.45, ry * 1.55, 0.12, 0, Math.PI * 2);
+  ctx.ellipse(ox, oy, rx * 1.35, ry * 1.45, 0.12, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = `rgba(4,6,8,${0.42 + 0.22 * lift})`;
+  ctx.fillStyle = `rgba(4,6,8,${0.4 + 0.2 * lift})`;
   ctx.beginPath();
   ctx.ellipse(ox, oy, rx, ry, 0.18, 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = 0.9;
+  ctx.lineWidth = 0.04;
+  ctx.beginPath();
+  ctx.ellipse(x, y + 0.04, Math.max(0.28, span * 0.42), Math.max(0.1, span * 0.16), 0, 0, Math.PI * 2);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -2842,29 +3620,68 @@ function drawUnit(
   selected: boolean,
   time = 0,
   aim = u.facing,
+  leaf = false,
+  zoom = 48,
+  _zoomOut = 46,
 ) {
   const moving = Math.hypot(u.x - u.px, u.y - u.py) > 0.004;
   const plate = unitPlate(u.kind);
   const img = plate ? iso()?.[plate] : undefined;
-  if (img) {
-    const wide = troopWide(u.kind);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = 0.9;
+  const aspect = img && img.naturalWidth > 0 ? img.naturalHeight / Math.max(1, img.naturalWidth) : 1;
+  const wide = img ? unitPictureWidth(u.kind, aspect) : unitWorldSpan(u.kind);
+  const ground = u.loco !== "air";
+  if (ground) {
+    ctx.fillStyle = "rgba(20, 16, 10, 0.18)";
     ctx.beginPath();
-    ctx.ellipse(x, y + 0.05, wide * 0.32, wide * 0.13, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + 0.08, y + 0.06, wide * 0.34, wide * 0.1, 0.4, 0, Math.PI * 2);
     ctx.fill();
-    ctx.globalAlpha = 1;
-    paintPlate(ctx, img, x, y + 0.06, wide, Math.cos(aim) < -0.15);
-    if (selected) {
-      ctx.strokeStyle = "#f4f7ea";
-      ctx.lineWidth = 0.04;
-      ctx.beginPath();
-      ctx.ellipse(x, y + 0.05, wide * 0.46, wide * 0.18, 0, 0, Math.PI * 2);
-      ctx.stroke();
-    }
+    paintUnitMark(ctx, x, y + 0.04, wide, color, selected);
+  }
+  // The battle camera stays close. A dot is only for a sprite that would
+  // be smaller than a finger-tip, which this zoom range does not reach.
+  if (wide * zoom < 8) {
+    paintSideIcon(ctx, x, y, wide, color);
+    if (leaf) paintLeaf(ctx, x, y);
+    return;
+  }
+  if (img) {
+    paintPlate(ctx, img, x, y + 0.04, wide, Math.cos(aim) < -0.15, true, "unit", color);
+    if (leaf) paintLeaf(ctx, x, y);
     return;
   }
   paintSolidUnit(ctx, u, x, y, color, selected, time, aim, moving, THEATER === "snow", VIEWER);
+  if (selected) paintUnitMark(ctx, x, y + 0.04, wide, color, true);
+}
+
+/** Far-zoom mark. Infantry stay a smaller dot than a tank. */
+function paintSideIcon(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string) {
+  const foot = wide < 0.55;
+  ctx.save();
+  ctx.fillStyle = "#100c08";
+  ctx.beginPath();
+  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.7, 0, Math.PI * 2);
+  else ctx.ellipse(x, y - wide * 0.2, wide * 0.42, wide * 0.24, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  if (foot) ctx.arc(x, y - wide * 0.45, wide * 0.5, 0, Math.PI * 2);
+  else ctx.ellipse(x, y - wide * 0.2, wide * 0.3, wide * 0.16, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function paintLeaf(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.save();
+  ctx.translate(x, y - 0.42);
+  ctx.strokeStyle = "rgba(186, 220, 110, 0.9)";
+  ctx.fillStyle = "rgba(42, 110, 48, 0.4)";
+  ctx.lineWidth = 0.03;
+  ctx.beginPath();
+  ctx.ellipse(-0.16, 0.02, 0.1, 0.05, -0.7, 0, Math.PI * 2);
+  ctx.ellipse(0.14, -0.06, 0.09, 0.045, 0.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
 }
 
 function drawWake(ctx: CanvasRenderingContext2D, x: number, y: number, facing: number, frame: number) {
@@ -3027,11 +3844,12 @@ function minimapSheet(sim: Sim): HTMLCanvasElement | null {
     const f = fog?.[i] ?? 0;
     const x = i % sim.gw;
     const y = (i / sim.gw) | 0;
-    const [r, gc, b] = f === 0 ? [7, 8, 6] : miniRgb(sim.terrain[i] ?? 0, sim.crystal[i] ?? 0, f, x, y);
+    const [r, gc, b] = miniRgb(sim.terrain[i] ?? 0, f === 2 ? (sim.crystal[i] ?? 0) : 0, 2, x, y);
+    const dim = f === 2 ? 1 : f === 1 ? 0.92 : 0.84;
     const o = i * 4;
-    d[o] = r;
-    d[o + 1] = gc;
-    d[o + 2] = b;
+    d[o] = r * dim;
+    d[o + 1] = gc * dim;
+    d[o + 2] = b * dim;
     d[o + 3] = 255;
   }
   g.putImageData(img, 0, 0);
@@ -3060,6 +3878,111 @@ function seatAtCorner(sim: Sim, x: number, y: number): number {
   return best;
 }
 
+let fogVeil: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+/** Gray multiply mask. The terrain picture stays visible under the fog. */
+function minimapFogVeil(sim: Sim): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  const key = `${sim.gw}x${sim.gh}|${(sim.time * 4) | 0}|${VIEWER}`;
+  if (fogVeil?.key === key) return fogVeil.canvas;
+  const canvas = fogVeil?.canvas ?? document.createElement("canvas");
+  if (canvas.width !== sim.gw) canvas.width = sim.gw;
+  if (canvas.height !== sim.gh) canvas.height = sim.gh;
+  const g = canvas.getContext("2d");
+  if (!g) return null;
+  const w = sim.gw;
+  const h = sim.gh;
+  const n = w * h;
+  const src = new Float32Array(n);
+  const fog = sim.fog[VIEWER];
+  for (let i = 0; i < n; i++) {
+    const f = fog?.[i] ?? 0;
+    src[i] = f === 2 ? 255 : f === 1 ? 236 : 214;
+  }
+  const tmp = new Float32Array(n);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      let c = 0;
+      for (let k = -1; k <= 1; k++) {
+        s += src[y * w + Math.max(0, Math.min(w - 1, x + k))] ?? 0;
+        c++;
+      }
+      tmp[y * w + x] = s / c;
+    }
+  }
+  const img = g.createImageData(w, h);
+  const d = img.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let s = 0;
+      let c = 0;
+      for (let k = -1; k <= 1; k++) {
+        s += tmp[Math.max(0, Math.min(h - 1, y + k)) * w + x] ?? 0;
+        c++;
+      }
+      const v = s / c;
+      const o = (y * w + x) * 4;
+      d[o] = v;
+      d[o + 1] = v;
+      d[o + 2] = v;
+      d[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  fogVeil = { key, canvas };
+  return canvas;
+}
+
+function paintMiniRoutes(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy: number, cell: number) {
+  const fog = sim.fog[VIEWER];
+  for (let y = 0; y < sim.gh; y++) {
+    for (let x = 0; x < sim.gw; x++) {
+      const i = y * sim.gw + x;
+      const t = sim.terrain[i] ?? 0;
+      let color = "";
+      if (t === TILE_BRIDGE) color = "#c4a06a";
+      else if (t === TILE_ROAD) color = "#8d6840";
+      else if (t === TILE_HIGH) color = "#e4dcc8";
+      else if (t === TILE_CLIFF) color = "#5c5348";
+      else if (t === TILE_RAMP) color = "#b08a58";
+      else continue;
+      const f = fog?.[i] ?? 0;
+      ctx.globalAlpha = f === 2 ? 1 : f === 1 ? 0.72 : 0.38;
+      ctx.fillStyle = color;
+      const pad = t === TILE_ROAD ? 0.35 : 0.45;
+      ctx.fillRect(ox + x * cell, oy + y * cell, cell + pad, cell + pad);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function paintEnemySpawns(ctx: CanvasRenderingContext2D, sim: Sim, r: { x: number; y: number; s: number }) {
+  // 1v1 and skirmish: every enemy start is a red marker from the first second, fog or not.
+  const slots = sim.starts.slots;
+  for (let t = 0; t < slots.length; t++) {
+    if (t === VIEWER || sim.allied(VIEWER, t)) continue;
+    const s = slots[t];
+    if (!s) continue;
+    const cx = r.x + (s.x / Math.max(1, sim.gw)) * r.s;
+    const cy = r.y + (s.y / Math.max(1, sim.gh)) * r.s;
+    const rad = 6.5;
+    ctx.save();
+    ctx.fillStyle = "#d63428";
+    ctx.strokeStyle = "#fff6ea";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - rad);
+    ctx.lineTo(cx + rad * 0.82, cy);
+    ctx.lineTo(cx, cy + rad);
+    ctx.lineTo(cx - rad * 0.82, cy);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawMinimap(
   ctx: CanvasRenderingContext2D,
   sim: Sim,
@@ -3069,7 +3992,12 @@ function drawMinimap(
   relief?: CanvasImageSource | null,
 ) {
   const r = minimapRect(view, wideField(sim.mapSize));
-  ctx.fillStyle = "#100e0c";
+  const veil = view.h < 500 && view.w > view.h;
+  if (veil) {
+    ctx.save();
+    ctx.globalAlpha = 0.78;
+  }
+  ctx.fillStyle = veil ? "rgba(16,14,12,0.72)" : "#100e0c";
   ctx.fillRect(r.x - 4, r.y - 4, r.s + 8, r.s + 8);
   ctx.strokeStyle = "#c6a56a";
   ctx.lineWidth = 2;
@@ -3080,21 +4008,20 @@ function drawMinimap(
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(relief, r.x, r.y, r.s, r.s);
+    const shade = minimapFogVeil(sim);
+    if (shade) {
+      ctx.save();
+      ctx.globalCompositeOperation = "multiply";
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(shade, r.x, r.y, r.s, r.s);
+      ctx.restore();
+    }
     for (let y = 0; y < sim.gh; y++) {
       for (let x = 0; x < sim.gw; x++) {
         const i = y * sim.gw + x;
-        const f = fog[i] ?? 0;
-        if (f === 0) {
-          ctx.fillStyle = "#070806";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.5, cell + 0.5);
-        } else if (f === 1) {
-          ctx.fillStyle = "rgba(6,8,6,0.42)";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.5, cell + 0.5);
-        }
-        if (f !== 0 && (sim.crystal[i] ?? 0) > 0) {
-          ctx.fillStyle = "#3dcc6e";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, Math.max(1.5, cell), Math.max(1.5, cell));
-        }
+        if ((fog[i] ?? 0) === 0 || (sim.crystal[i] ?? 0) <= 0) continue;
+        ctx.fillStyle = "#3dcc6e";
+        ctx.fillRect(r.x + x * cell, r.y + y * cell, Math.max(1.5, cell), Math.max(1.5, cell));
       }
     }
     for (const b of sim.buildings) {
@@ -3114,25 +4041,17 @@ function drawMinimap(
     for (let y = 0; y < sim.gh; y++) {
       for (let x = 0; x < sim.gw; x++) {
         const i = y * sim.gw + x;
-        if (fog[i] === 0) {
-          ctx.fillStyle = "#070806";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.4, cell + 0.4);
-          continue;
-        }
         const t = sim.terrain[i];
+        const seen = (fog[i] ?? 0) === 2;
         if (!ground) {
-          ctx.fillStyle = miniTone(t, sim.crystal[i], fog[i]);
+          ctx.fillStyle = miniTone(t, (fog[i] ?? 0) === 2 ? sim.crystal[i] : 0, 2);
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (sim.crystal[i] > 0) {
+        } else if (seen && sim.crystal[i] > 0) {
           ctx.fillStyle = "#3dcc6e";
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        } else if (t === TILE_ROCK) {
+        } else if (seen && t === TILE_ROCK) {
           ctx.fillStyle = "rgba(20,16,12,0.75)";
           ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.3, cell + 0.3);
-        }
-        if (ground && fog[i] === 1) {
-          ctx.fillStyle = "rgba(8,10,8,0.45)";
-          ctx.fillRect(r.x + x * cell, r.y + y * cell, cell + 0.4, cell + 0.4);
         }
       }
     }
@@ -3143,6 +4062,7 @@ function drawMinimap(
     }
   }
   }
+  paintMiniRoutes(ctx, sim, r.x, r.y, cell);
   for (const c of sim.starts.corners) {
     const seat = seatAtCorner(sim, c.x, c.y);
     const cx = r.x + c.x * cell;
@@ -3179,12 +4099,39 @@ function drawMinimap(
     }
     ctx.fillRect(cx - 1, cy - 1, 2.2, 2.2);
   }
+  for (const c of sim.crates) {
+    if (c.x < 0) continue;
+    const cx = r.x + c.x * cell;
+    const cy = r.y + c.y * cell;
+    ctx.fillStyle = c.kind === "mend" ? "#8fd9b0" : c.kind === "squad" ? "#e2c27a" : "#3dcc6e";
+    ctx.fillRect(cx - 1.7, cy - 1.7, 3.4, 3.4);
+    ctx.strokeStyle = "#100e0c";
+    ctx.lineWidth = 0.6;
+    ctx.strokeRect(cx - 1.7, cy - 1.7, 3.4, 3.4);
+  }
   for (const g of sim.ghosts) {
     if (g.viewer !== VIEWER || g.ttl <= 0) continue;
     const live = sim.unitById(g.id);
     if (live && live.hp > 0 && sim.minimapUnit(VIEWER, live)) continue;
     ctx.fillStyle = "rgba(224,122,85,0.7)";
     ctx.fillRect(r.x + g.x * cell - 1.4, r.y + g.y * cell - 1.4, 2.8, 2.8);
+  }
+  for (const b of sim.buildings) {
+    if (b.kind !== "yard" || b.team === VIEWER || b.hp <= 0) continue;
+    if (!sim.buildingVisible(VIEWER, b)) continue;
+    const cx = r.x + (b.tx + b.w / 2) * cell;
+    const cy = r.y + (b.ty + b.h / 2) * cell;
+    ctx.fillStyle = "#e5483b";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.font = "8px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("B", cx, cy + 2);
   }
   const alarm = sim.alarm[VIEWER];
   if (alarm && sim.time < alarm.until) {
@@ -3193,9 +4140,11 @@ function drawMinimap(
     ctx.lineWidth = 4;
     ctx.strokeRect(r.x - 6, r.y - 6, r.s + 12, r.s + 12);
   }
+  paintEnemySpawns(ctx, sim, r);
   const halfW = view.w / (2 * cam.zoom);
   const halfH = view.h / (2 * cam.zoom * viewPitch());
   ctx.strokeStyle = "#f3ead7";
   ctx.lineWidth = 1;
   ctx.strokeRect(r.x + (cam.x - halfW) * cell, r.y + (cam.y - halfH) * cell, halfW * 2 * cell, halfH * 2 * cell);
+  if (veil) ctx.restore();
 }

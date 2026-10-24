@@ -1,5 +1,6 @@
-import { spawnTrail, spawnSparks, spawnDirt, spawnWreck, spawnFall, spawnBuildingDebris } from "./combat-fx.ts";
-import { allows, blocksSight, boatBeaches, isShell, isWater, slowsVehicles } from "./tileset.ts";
+import { spawnTrail, spawnTracer, spawnSparks, spawnDirt, spawnWreck, spawnFall, spawnRuin } from "./combat-fx.ts";
+import { hallPictureLift, viewPitch } from "./view.ts";
+import { allows, blocksSight, boatBeaches, isShell, isWater } from "./tileset.ts";
 import { barkClass, type Cue, type SfxName } from "./audio.ts";
 import { Rng } from "./rng.ts";
 import {
@@ -7,6 +8,7 @@ import {
   BUILDING_CAP,
   BUILDINGS,
   BUILD_GAP,
+  BUILD_ORDER,
   CP_BASE,
   CP_MAX,
   CP_STEP,
@@ -16,9 +18,13 @@ import {
   START_CREDITS,
   START_STORAGE,
   SUPPLY_DRIP,
+  SILO_DRIP,
   SURVIVE_SECONDS,
   TILE_FORD,
+  TILE_HIGH,
+  TILE_RAMP,
   TILE_ROAD,
+  TILE_VALLEY,
   TILE_WRECK,
   TILE_BRIDGE,
   TILE_CLIFF,
@@ -45,7 +51,10 @@ import {
   normalizeSize,
   normalizeStart,
   normalizeTeams,
-  FACTION_COLOR,
+  SIDE_BLUE,
+  SIDE_GREEN,
+  SIDE_RED,
+  SIDE_YELLOW,
   otherFaction,
   resolveBuilding,
   resolveUnit,
@@ -53,6 +62,8 @@ import {
   theaterOf,
   unitRequires,
   wideField,
+  counterMul,
+  plateOf,
   type AiDifficulty,
   type AiIntent,
   type AiProfile,
@@ -72,11 +83,34 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { generateMap, plantCorners, resampleMap, snapLand, stampCamp, waterKind } from "./maps.ts";
+import { dressBattlefield, dressProps, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
-import { hallScale, troopScale } from "./view.ts";
+import { unitPickRadius } from "./view.ts";
 import { aiThink } from "./ai.ts";
+
+/** Nobody shoots or steps into a hostile start until this many seconds have passed. */
+export const DEPLOY_SECS = 40;
+/**
+ * First-attack marks on the in-game clock (sim.time), in seconds.
+ * Game speed only changes how fast that clock advances, so these do not move.
+ * No personality may attack before its mark.
+ */
+export const EASY_SCOUT_UNTIL = 6 * 60;
+export const EASY_PUSH_AT = 8 * 60;
+export const NORMAL_HARASS_AT = 4 * 60;
+export const NORMAL_PUSH_AT = 6 * 60 + 30;
+export const HARD_PUSH_AT = 3 * 60;
+
+export function firstPushAt(diff: AiDifficulty): number {
+  if (diff === "easy") return EASY_PUSH_AT;
+  if (diff === "hard") return HARD_PUSH_AT;
+  return NORMAL_PUSH_AT;
+}
+/** Tiles around a start the other side cannot enter during deployment. */
+const START_BUBBLE = 8;
+/** Hard matches end here if both yards are still standing. Score picks the winner. */
+const HARD_CAP_SECS = 1200;
 
 export type Order =
   | { t: "idle" }
@@ -145,6 +179,10 @@ export interface Unit {
   blocked: number;
   /** Seconds left on the red damage flash. Visual only. */
   hit: number;
+  /** Unit that last shot this one. 0 means nobody. Not saved. */
+  aggro: number;
+  /** In-game clock time until return fire may chase that shooter. */
+  aggroUntil: number;
   /** Kills this unit has scored. Stars are cosmetic until a later balance pass. */
   kills: number;
   /** Seconds of the harvest scoop animation. */
@@ -154,6 +192,15 @@ export interface Unit {
    * 0 means the way is open. Not saved — the next path search fills it again.
    */
   breach: number;
+  /** Artillery cannot shoot closer than this. */
+  minRange: number;
+  /** Where an idle squad walks back to after a short chase. */
+  postX: number;
+  postY: number;
+  /** Cap for a group march. 0 uses this unit's own speed. */
+  pace: number;
+  /** Angle of this unit's slot around a focus-fire target. Negative means unset. */
+  ring: number;
 }
 
 export interface Building {
@@ -194,8 +241,12 @@ export interface Building {
   rubble: number;
   /** Seconds left on the red damage flash. */
   hit: number;
+  /** Sim time until the attack bar hides. Visual only. */
+  shown: number;
   /** Spending credits to restore hit points. */
   mending: boolean;
+  /** Seconds left on the collapse. 0 means not collapsing. */
+  collapse: number;
 }
 
 export interface Shot {
@@ -218,6 +269,11 @@ export interface Shot {
   vsAir: number;
   /** Unit that fired. 0 if the shot has no owner. */
   owner: number;
+  /** 0 flies flat. Artillery and bombers loft. */
+  arc: number;
+  age: number;
+  /** Weapon owner kind, so a dead firer still applies the right counter. */
+  who: string;
 }
 
 export interface Fx {
@@ -230,6 +286,17 @@ export interface Fx {
   max: number;
   color: string;
   r: number;
+}
+
+/** A move or attack the player just issued. Drawn, not simulated. */
+export interface OrderPing {
+  kind: "move" | "attack" | "amove";
+  x: number;
+  y: number;
+  life: number;
+  /** Squad center when the order was an attack-move. */
+  fx?: number;
+  fy?: number;
 }
 
 /** A muzzle flash the victim can see through the fog for a short time. */
@@ -295,7 +362,7 @@ export interface SimSave {
   fog2?: string;
   fog3?: string;
   commandLv?: number[];
-  caches?: { x: number; y: number; kind: "cash" | "squad" | "haul" }[];
+  caches?: { x: number; y: number; kind: "cash" | "squad" | "haul" | "mend" }[];
   haulLanded?: boolean;
   units: {
     id: number;
@@ -346,7 +413,7 @@ export interface MapMark {
 export interface Crate {
   x: number;
   y: number;
-  kind: "cash" | "squad" | "haul";
+  kind: "cash" | "squad" | "haul" | "mend";
 }
 
 export interface NewGame {
@@ -386,7 +453,12 @@ export interface NewGame {
 }
 export function footprintOrigin(kind: BuildingId, wx: number, wy: number): { tx: number; ty: number } {
   const d = BUILDINGS[kind];
-  return { tx: Math.round(wx - d.w / 2), ty: Math.round(wy - d.h / 2) };
+  // The tapped tile stays inside the footprint. Even sizes hang down-right of that tile
+  // instead of rounding onto the tile above the finger.
+  return {
+    tx: Math.floor(wx) - Math.floor((d.w - 1) / 2),
+    ty: Math.floor(wy) - Math.floor((d.h - 1) / 2),
+  };
 }
 
 /** Ghost copy. The sim keeps the precise reason; the phone shows one of these. */
@@ -484,6 +556,8 @@ export class Sim {
   readonly skills: [AiDifficulty, AiDifficulty, AiDifficulty];
   readonly fogOn: boolean;
   readonly cratesOn: boolean;
+  /** Practice skirmish. The bot does not attack or build. */
+  practice = false;
   readonly mapSize: MapSizeId;
   readonly opponents: OpponentCount;
   readonly teamMode: TeamMode;
@@ -524,6 +598,10 @@ export class Sim {
   startCredits = START_CREDITS;
   income: number[] = [0, 0, 0, 0];
   crates: Crate[] = [];
+  /** Opening crates wait until deployment ends, then drop once. */
+  private cratesOpened = false;
+  /** Short repair aura from a mend crate. Game clock, per seat. */
+  private mendUntil = [0, 0, 0, 0];
   /** Heavy center haul has already dropped. */
   haulLanded = false;
   /** Seconds of Emergency Works still running, per seat. */
@@ -579,7 +657,8 @@ export class Sim {
   private constructBed = false;
   private brownBed = false;
   private lowNag = 0;
-  private crateAcc = 25;
+  /** True after this team has finished a power plant. Opening yards are not a brownout. */
+  private gridOn: boolean[] = [false, false, false, false];
   private incomeAt: number[] = [0, 0, 0, 0];
   rate: number[] = [0, 0, 0, 0];
   private logLock = new Map<string, number>();
@@ -590,10 +669,14 @@ export class Sim {
   frozen = false;
   cpu: boolean[] = [false, true, true, true];
   marks: MapMark[] = [];
+  /** Green move pings and red attack pings. Client-local drawing. */
+  pings: OrderPing[] = [];
   /** Muzzle flashes that punch a hole in the fog. Deterministic. */
   spots: Spot[] = [];
   /** Last-known enemy marks. Drawing only; both clients update them the same way. */
   ghosts: Ghost[] = [];
+  /** Wrecks, fences, and crates drawn on top of the paint. Not blocking. */
+  fieldProps: FieldProp[] = [];
   /** Where each seat was last shot. The phone recenters on the viewer's alarm. */
   alarm: ({ x: number; y: number; until: number } | null)[] = [null, null, null, null];
   rng: Rng | null = null;
@@ -649,12 +732,16 @@ export class Sim {
       for (let i = 0; i < 4; i++) this.cpu[i] = !!opts.cpu[i];
     }
     this.alliance = alliances(this.opponents, this.teamMode);
-    this.aiNext = this.ai === "raider" ? 40 : 70;
+    this.aiNext = firstPushAt(this.difficulty);
     this.aiAt = [0, this.aiNext, this.aiNext + 8, this.aiNext + 16];
     const purse = opts.credits ?? START_CREDITS;
     this.startCredits = purse;
     this.credits = [0, 0, 0, 0];
     for (let t = 0; t <= this.opponents; t++) this.credits[t] = purse;
+    if ((BUILD_ORDER as readonly string[]).includes("silo")) {
+      console.warn("VIRIDITE: Silo is on the build list (data.ts BUILD_ORDER). Do not cap haul() with storageOf.");
+    }
+    if (this.credits[0] < purse) throw new Error("skirmish credit cap: sim.ts haul() must not clamp with storageOf");
     this.terrain = custom ? custom.terrain : map!.terrain;
     this.craters = new Uint8Array(gw * gh);
     this.crystal = custom ? custom.crystal : map!.crystal;
@@ -675,6 +762,10 @@ export class Sim {
           );
     while (slots.length < seatCount && slots[0]) slots.push(slots[slots.length - 1]!);
     this.starts = { player: slots[0]!, enemy: slots[1] ?? slots[0]!, slots, corners };
+    this.fieldProps = custom
+      ? dressProps(this.terrain, gw, gh, slots)
+      : dressBattlefield(this.terrain, this.crystal, gw, gh, slots, this.mapId);
+    if (!custom) seedScars(this.craters, this.terrain, this.crystal, gw, gh, slots, this.mapId);
     this.occ = new Int32Array(gw * gh);
     this.fog = [0, 1, 2, 3].map(() => new Uint8Array(gw * gh));
     if (!opts.empty) {
@@ -687,8 +778,8 @@ export class Sim {
       const spans = custom ? custom.spans : (map?.spans ?? []);
       for (const span of spans) this.addBuilding(0, "span", span.tx, span.ty, true, true);
       if (custom) for (const dock of custom.docks) this.addBuilding(0, "dock", dock.tx, dock.ty, true, true);
+      this.plantOutposts();
       this.updateFog();
-      this.seedFieldCaches();
     }
   }
 
@@ -718,7 +809,24 @@ export class Sim {
     if (!kind) return;
     if (!b.queue.length) b.prod = 0;
     const refund = resolveUnit(kind, this.factionOf(team)).cost;
-    this.credits[team] = Math.min(this.storageOf(team), this.credits[team] + refund);
+    this.credits[team] += refund;
+  }
+
+  /** Refund one queued unit of this type. The in-progress item, if removed, starts the next from zero. */
+  cancelQueued(buildingId: number, team: Team, unitId: UnitId) {
+    const b = this.buildingById(buildingId);
+    if (!b || b.team !== team || b.hp <= 0 || !b.queue.length) return;
+    let idx = -1;
+    for (let i = b.queue.length - 1; i >= 0; i--) {
+      if (b.queue[i] === unitId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx < 0) return;
+    b.queue.splice(idx, 1);
+    if (idx === 0) b.prod = 0;
+    this.credits[team] += resolveUnit(unitId, this.factionOf(team)).cost;
   }
 
   /** Integer fingerprint of the match. Two lockstep clients must print the same number. */
@@ -765,22 +873,74 @@ export class Sim {
     return this.skills[team - 1] ?? this.difficulty;
   }
 
+  /** Opening truce. Attacks and hostile starts are closed. */
+  deploying(): boolean {
+    return this.outcome === "playing" && this.time < DEPLOY_SECS;
+  }
+
+  /** True when this point sits in an enemy deployment bubble. */
+  hostileStart(team: number, x: number, y: number): boolean {
+    if (!this.deploying()) return false;
+    for (let t = 0; t <= this.opponents; t++) {
+      if (this.allied(team, t)) continue;
+      const s = this.starts.slots[t];
+      if (s && Math.hypot(x - s.x, y - s.y) < START_BUBBLE) return true;
+    }
+    return false;
+  }
+
+  /** Push a destination back to the rim of any hostile start during deployment. */
+  quietPoint(team: number, x: number, y: number): { x: number; y: number } {
+    if (!this.deploying()) return { x, y };
+    let px = x;
+    let py = y;
+    for (let n = 0; n < 4; n++) {
+      let hit = false;
+      for (let t = 0; t <= this.opponents; t++) {
+        if (this.allied(team, t)) continue;
+        const s = this.starts.slots[t];
+        if (!s) continue;
+        const dx = px - s.x;
+        const dy = py - s.y;
+        const d = Math.hypot(dx, dy);
+        if (d < START_BUBBLE) {
+          const k = (START_BUBBLE + 0.25) / (d || 0.01);
+          px = s.x + dx * k;
+          py = s.y + dy * k;
+          hit = true;
+        }
+      }
+      if (!hit) break;
+    }
+    return {
+      x: Math.max(1.2, Math.min(this.gw - 1.2, px)),
+      y: Math.max(1.2, Math.min(this.gh - 1.2, py)),
+    };
+  }
+
   stanceOf(team: Team): AiProfile {
     if (!this.stanceEach || team === 0) return this.ai;
     return this.stances[team - 1] ?? this.ai;
   }
 
-  /** Paint color. A fallen commander goes gray. A duplicated fourth seat goes brass. */
-  seatColor(team: number): string {
+  /**
+   * Battlefield paint. The local viewer is blue, an ally is green, the first
+   * enemy is red, and the next enemy is yellow. A fallen commander goes gray.
+   */
+  seatColor(team: number, viewer = this.ear): string {
     if (this.eliminated[team]) return "#8d8478";
-    const faction = this.factionOf((team > 3 ? 3 : team) as Team);
-    const mine = FACTION_COLOR[faction];
-    if (team === 3) {
-      for (let t = 0; t < 3; t++) {
-        if (this.factionOf(t as Team) === faction) return "#d7b56a";
-      }
+    const who = team > 3 ? 3 : team;
+    if (who === viewer) return SIDE_BLUE;
+    if (this.allied(who, viewer)) return SIDE_GREEN;
+    const foes: number[] = [];
+    for (let t = 0; t < 4; t++) {
+      if (t === viewer || this.allied(t, viewer)) continue;
+      foes.push(t);
     }
-    return mine;
+    const i = foes.indexOf(who);
+    if (i <= 0) return SIDE_RED;
+    if (i === 1) return "#F27A30";
+    return SIDE_GREEN;
   }
 
   /** Same alliance. Free-for-all is never friendly across seats. One opponent matches the old 1v1. */
@@ -827,15 +987,40 @@ export class Sim {
     };
   }
 
+  /** Army, base, and kills. Used when a hard match is called at twenty minutes. */
+  private matchScore(side: number): number {
+    let n = 0;
+    for (let t = 0; t <= this.opponents; t++) {
+      if ((this.alliance[t] ?? t) !== side) continue;
+      const team = t as Team;
+      n += (this.statKills[team] ?? 0) * 120;
+      n += (this.statRazed[team] ?? 0) * 200;
+      n += (this.credits[team] ?? 0) * 0.15;
+      const faction = this.factionOf(team);
+      for (const u of this.units) {
+        if (u.team !== team || u.hp <= 0) continue;
+        n += resolveUnit(u.kind, faction).cost * (u.hp / Math.max(1, u.maxHp));
+      }
+      for (const b of this.buildings) {
+        if (b.team !== team || b.hp <= 0 || b.neutral) continue;
+        n += resolveBuilding(b.kind, faction).cost * 0.35 * (b.hp / Math.max(1, b.maxHp));
+      }
+    }
+    return n;
+  }
+
   powerOf(team: Team): { supply: number; use: number; low: boolean } {
     let supply = 0;
     let use = 0;
+    let plant = false;
     for (const b of this.buildings) {
       if (b.neutral || b.team !== team || b.hp <= 0 || !b.complete) continue;
       supply += b.powerOut;
       use += b.powerUse;
+      if (b.kind === "power" || b.kind === "advpower") plant = true;
     }
-    return { supply, use, low: use > supply };
+    if (plant) this.gridOn[team] = true;
+    return { supply, use, low: !!this.gridOn[team] && use > supply };
   }
 
   storageOf(team: Team): number {
@@ -901,31 +1086,50 @@ export class Sim {
   }
 
   pickAt(wx: number, wy: number, zoom: number, viewer: Team): { kind: "unit" | "building"; id: number } | null {
-    const minR = 52 / Math.max(8, zoom);
-    const fat = troopScale(zoom);
+    const building = this.pickBuilding(wx, wy, zoom, viewer);
+    if (building && wx >= building.tx && wx <= building.tx + building.w && wy >= building.ty && wy <= building.ty + building.h) {
+      return { kind: "building", id: building.id };
+    }
     let best: Unit | null = null;
     let bestD = Infinity;
     for (const u of this.units) {
       if (!this.visibleUnit(viewer, u)) continue;
       const d = Math.hypot(u.x - wx, u.y - wy);
-      const r = Math.max(u.radius * fat + 0.05, minR);
+      const r = Math.max(u.radius, unitPickRadius(u.kind, zoom));
       if (d <= r && d < bestD) {
         best = u;
         bestD = d;
       }
     }
     if (best) return { kind: "unit", id: best.id };
-    const hall = hallScale(zoom);
+    if (building) return { kind: "building", id: building.id };
+    return null;
+  }
+
+  /** Building under a finger. The pad is at least 44 px, and it includes the picture above the footprint. */
+  pickBuilding(wx: number, wy: number, zoom: number, viewer: Team): Building | null {
+    const z = Math.max(8, zoom);
+    const padX = 44 / z;
+    // Ground Y is scaled by pitch, so 44 screen pixels is a taller world pad on Dry Basin and Coastline.
+    const padY = padX / Math.max(0.5, viewPitch());
+    let best: Building | null = null;
+    let bestD = Infinity;
     for (let i = this.buildings.length - 1; i >= 0; i--) {
-      const b = this.buildings[i];
-      if (!this.buildingVisible(viewer, b)) continue;
-      const bulge = isFence(b.kind) ? 0 : Math.max(0, hall - 1) * Math.max(b.w, b.h) * 0.5;
-      const pad = Math.max(minR * 0.45, bulge);
-      if (wx >= b.tx - pad && wx <= b.tx + b.w + pad && wy >= b.ty - pad && wy <= b.ty + b.h + pad) {
-        return { kind: "building", id: b.id };
+      const b = this.buildings[i]!;
+      if (b.hp <= 0 || b.rubble > 0 || !this.buildingVisible(viewer, b)) continue;
+      const lift = hallPictureLift(b.kind, b.w, b.h);
+      const y0 = Math.min(b.ty, b.ty + b.h - lift) - padY;
+      const y1 = b.ty + b.h + padY;
+      if (wx < b.tx - padX || wx > b.tx + b.w + padX || wy < y0 || wy > y1) continue;
+      const cx = Math.max(b.tx, Math.min(wx, b.tx + b.w));
+      const cy = Math.max(b.ty, Math.min(wy, b.ty + b.h));
+      const d = Math.hypot(wx - cx, wy - cy);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
       }
     }
-    return null;
+    return best;
   }
 
   unitsInRect(x0: number, y0: number, x1: number, y1: number, team: Team): number[] {
@@ -1119,14 +1323,16 @@ export class Sim {
     return this.commandLoad(team, true);
   }
 
-  /** Credits per second from the yard and supply centers. Zero while power is low. */
+  /** Credits per second from the yard and supply centers. Zero until a plant is up, and while power is low. */
   supplyPerSec(team: Team): number {
-    if (this.eliminated[team] || this.powerOf(team).low) return 0;
+    const live = this.powerOf(team);
+    if (this.eliminated[team] || !this.gridOn[team] || live.low) return 0;
     let n = 0;
     for (const b of this.buildings) {
       if (b.team !== team || !b.complete || b.hp <= 0 || b.neutral) continue;
       if (b.kind === "yard") n += YARD_DRIP;
       else if (b.kind === "supply") n += SUPPLY_DRIP;
+      else if (b.kind === "silo") n += SILO_DRIP;
     }
     return n;
   }
@@ -1168,17 +1374,44 @@ export class Sim {
   }
 
   issueMove(ids: number[], x: number, y: number, attackMove: boolean) {
-    const units = this.idsToUnits(ids);
+    const units = this.idsToUnits(ids).filter((u) => this.groundOrder(u));
     if (!units.length) return;
+    let cx = 0;
+    let cy = 0;
+    let pace = 0;
+    let marchers = 0;
+    for (const u of units) {
+      cx += u.x;
+      cy += u.y;
+      if (u.loco !== "air") {
+        pace = marchers === 0 ? u.speed : Math.min(pace, u.speed);
+        marchers++;
+      }
+    }
+    cx /= units.length;
+    cy /= units.length;
+    if (marchers < 2) pace = 0;
+    let fx = x - cx;
+    let fy = y - cy;
+    const fl = Math.hypot(fx, fy) || 1;
+    fx /= fl;
+    fy /= fl;
+    const rx = -fy;
+    const ry = fx;
     const n = units.length;
     const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
     const rows = Math.ceil(n / cols);
+    const gap = 1.15;
     units.forEach((u, i) => {
-      if (!this.groundOrder(u)) return;
-      const ox = ((i % cols) - (cols - 1) / 2) * 0.85;
-      const oy = (Math.floor(i / cols) - (rows - 1) / 2) * 0.85;
-      const goal = this.domainGoal(u, x + ox, y + oy);
-      u.order = { t: "move", x: goal.x, y: goal.y, attackMove: attackMove && u.damage > 0 };
+      const col = (i % cols) - (cols - 1) / 2;
+      const row = Math.floor(i / cols) - (rows - 1) / 2;
+      const ox = rx * col * gap - fx * row * gap * 0.85;
+      const oy = ry * col * gap - fy * row * gap * 0.85;
+      const quiet = this.quietPoint(u.team, x + ox, y + oy);
+      const goal = this.domainGoal(u, quiet.x, quiet.y);
+      u.order = { t: "move", x: goal.x, y: goal.y, attackMove: attackMove && u.damage > 0 && !this.deploying() };
+      u.pace = u.loco === "air" ? 0 : pace;
+      u.ring = -1;
       u.path = [];
       u.repath = 0;
       u.deploy = 0;
@@ -1188,7 +1421,13 @@ export class Sim {
     if (units.some((u) => u.team === this.ear)) {
       const mine = units.find((u) => u.team === this.ear);
       if (mine) this.cue({ t: "bark", cls: barkClass(mine.kind), act: attackMove ? "attack" : "move" });
-      this.blip(attackMove ? "attack" : "move", 0.05);
+      this.blip(attackMove ? "attack" : "move", 0.05, x, y);
+      this.pings.push(
+        attackMove
+          ? { kind: "amove", x, y, fx: cx, fy: cy, life: 1.8 }
+          : { kind: "move", x, y, life: 1.2 },
+      );
+      if (this.pings.length > 8) this.pings.shift();
     }
   }
 
@@ -1200,6 +1439,7 @@ export class Sim {
     const neutralBuilding = target.kind === "building" && target.b.neutral && target.b.kind !== "span" && target.b.rubble <= 0;
     let any = false;
     let mine: Unit | null = null;
+    const fighters: Unit[] = [];
     for (const u of this.idsToUnits(ids)) {
       if (!wreckedSpan && !neutralBuilding && this.allied(u.team, team)) continue;
       if (target.kind === "unit" && target.u.loco === "air" && !u.hitsAir) {
@@ -1231,12 +1471,23 @@ export class Sim {
       u.repath = 0;
       u.deploy = 0;
       u.breach = 0;
+      u.pace = 0;
+      fighters.push(u);
       any = true;
       if (u.team === this.ear) mine = u;
     }
+    const n = fighters.length;
+    fighters.forEach((u, i) => {
+      u.ring = n <= 1 ? Math.atan2(u.y - this.targetPoint(target).y, u.x - this.targetPoint(target).x) : (i / n) * Math.PI * 2;
+    });
     if (any) {
       if (mine) this.cue({ t: "bark", cls: barkClass(mine.kind), act: "attack" });
-      this.blip("attack", 0.05);
+      const p = this.targetPoint(target);
+      this.blip("attack", 0.05, p.x, p.y);
+      if (mine) {
+        this.pings.push({ kind: "attack", x: p.x, y: p.y, life: 1.35 });
+        if (this.pings.length > 8) this.pings.shift();
+      }
     }
   }
 
@@ -1247,23 +1498,24 @@ export class Sim {
       u.path = [];
       u.deploy = 0;
       u.breach = 0;
+      u.pace = 0;
+      u.ring = -1;
+      u.postX = u.x;
+      u.postY = u.y;
     }
   }
 
   issueGuard(ids: number[]) {
     for (const u of this.idsToUnits(ids)) {
       if (!this.groundOrder(u)) continue;
-      if (u.damage <= 0 && u.kind !== "harvester") {
-        u.order = { t: "guard", x: u.x, y: u.y };
-        u.path = [];
-        u.deploy = 0;
-        u.breach = 0;
-      } else if (u.damage > 0) {
-        u.order = { t: "guard", x: u.x, y: u.y };
-        u.path = [];
-        u.deploy = 0;
-        u.breach = 0;
-      }
+      u.order = { t: "guard", x: u.x, y: u.y };
+      u.path = [];
+      u.deploy = 0;
+      u.breach = 0;
+      u.pace = 0;
+      u.ring = -1;
+      u.postX = u.x;
+      u.postY = u.y;
     }
     this.blip("select");
   }
@@ -1347,7 +1599,7 @@ export class Sim {
       this.credits[team] += resolveUnit(kind, this.factionOf(team)).cost;
     }
     b.queue = [];
-    this.credits[team] = Math.min(this.storageOf(team), this.credits[team] + refund);
+    this.credits[team] += refund;
     this.clearOcc(b);
     b.hp = 0;
     this.say(`Sold for ${refund}`);
@@ -1518,12 +1770,21 @@ export class Sim {
       vsAir: spec.vsAir ?? 0,
       blocked: 0,
       hit: 0,
+      aggro: 0,
+      aggroUntil: 0,
       kills: 0,
       gather: 0,
       breach: 0,
+      minRange: spec.minRange ?? (kind === "artillery" ? 3.15 : 0),
+      postX: 0,
+      postY: 0,
+      pace: 0,
+      ring: -1,
     };
     u.px = u.x;
     u.py = u.y;
+    u.postX = u.x;
+    u.postY = u.y;
     // Aircraft ignore the ground grid — a rock or a yard does not shove them off their flight point.
     if (flying || !this.blockedTile(x | 0, y | 0)) {
       u.x = x;
@@ -1533,6 +1794,40 @@ export class Sim {
     }
     this.units.push(u);
     return u;
+  }
+
+  /** Practice: bot holds, one small base with no guns, and 20,000 credits. Combat starts immediately. */
+  startPractice() {
+    this.practice = true;
+    (this as { ai: AiProfile }).ai = "passive";
+    (this as { stances: [AiProfile, AiProfile, AiProfile] }).stances = ["passive", "passive", "passive"];
+    (this as { fogOn: boolean }).fogOn = false;
+    this.time = DEPLOY_SECS;
+    this.credits[0] = 20000;
+    this.startCredits = 20000;
+    for (const u of this.units) {
+      if (u.team !== 0) u.hp = 0;
+    }
+    for (const b of this.buildings) {
+      if (b.team === 0 || b.neutral || b.kind === "span") continue;
+      b.hp = 0;
+      b.collapse = 0;
+      b.rubble = 0;
+      this.clearOcc(b);
+    }
+    const player = this.starts.player;
+    const home = this.starts.slots[1] ?? this.starts.enemy;
+    const dx = home.x - player.x;
+    const dy = home.y - player.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const near = this.findPad(Math.round(player.x + (dx / dist) * 14), Math.round(player.y + (dy / dist) * 14), 3, 3);
+    const spot = near ?? { x: Math.round(player.x + 12), y: Math.round(player.y) };
+    const yard = this.addBuilding(1, "yard", spot.x, spot.y, true);
+    this.addBuilding(1, "power", yard.tx + yard.w + 1, yard.ty, true);
+    this.addBuilding(1, "barracks", yard.tx, yard.ty + yard.h + 1, true);
+    for (let i = 0; i < 6; i++) this.spawnUnit(0, "rifle", player.x + 1.5 + (i % 3), player.y + 2 + ((i / 3) | 0));
+    this.spawnUnit(0, "engineer", player.x + 2.5, player.y + 4);
+    this.say("Practice. The bot will not attack.", "practice", 6);
   }
 
   tick(dt: number) {
@@ -1556,11 +1851,13 @@ export class Sim {
       if (u.hp > 0 && this.liveUnit(u)) this.tickUnit(u, dt);
     }
     this.crushWalls(dt);
+    this.tickCollapse(dt);
     this.tickRubble(dt);
     this.separate();
     this.tickShots(dt);
     this.tickTowers(dt);
     this.tickCrates(dt);
+    this.tickMend(dt);
     this.tickIncome(dt);
     this.applyCloak();
     this.sweep();
@@ -1571,6 +1868,10 @@ export class Sim {
     if (this.marks.length) {
       for (const m of this.marks) m.life -= dt;
       if (this.marks.some((m) => m.life <= 0)) this.marks = this.marks.filter((m) => m.life > 0);
+    }
+    if (this.pings.length) {
+      for (const p of this.pings) p.life -= dt;
+      if (this.pings.some((p) => p.life <= 0)) this.pings = this.pings.filter((p) => p.life > 0);
     }
     this.aiAcc += dt;
     if (this.aiAcc >= 1) {
@@ -1737,11 +2038,12 @@ export class Sim {
       sim.crates = [];
       for (const c of data.caches) {
         if (!c || typeof c.x !== "number" || typeof c.y !== "number") continue;
-        const kind = c.kind === "squad" || c.kind === "haul" ? c.kind : "cash";
+        const kind = c.kind === "squad" || c.kind === "haul" || c.kind === "mend" ? c.kind : "cash";
         sim.crates.push({ x: c.x, y: c.y, kind });
       }
-    } else if (sim.cratesOn && (data.time || 0) < 1) {
-      sim.seedFieldCaches();
+      sim.cratesOpened = true;
+    } else {
+      sim.cratesOpened = (data.time || 0) > DEPLOY_SECS;
     }
     sim.haulLanded = !!data.haulLanded || (data.time || 0) >= HAUL_AT;
     sim.nextId = data.nextId || 1;
@@ -1811,6 +2113,7 @@ export class Sim {
   }
 
   private runAi() {
+    if (this.practice) return;
     for (let t = 0; t <= this.opponents; t++) {
       if (!this.cpu[t]) continue;
       aiThink(this, t as Team);
@@ -1847,9 +2150,11 @@ export class Sim {
       if (b.hp <= 0 || b.rubble > 0) continue;
       if (b.neutral || this.eliminated[b.team]) continue;
       if (!b.complete) {
-        const low = this.powerOf(b.team).low && b.kind !== "power" && b.kind !== "advpower";
+        const low = this.powerOf(b.team).low;
+        const plant = b.kind === "power" || b.kind === "advpower";
         const rush = this.worksLeft[b.team]! > 0 ? 1.65 : 1;
-        b.buildLeft -= dt * (low ? 0.5 : 1) * rush;
+        const brown = low ? (plant ? 0.8 : 0.5) : 1;
+        b.buildLeft -= dt * brown * 1.25 * rush;
         const p = 1 - b.buildLeft / Math.max(0.01, b.buildTotal);
         b.hp = Math.max(1, b.maxHp * (0.12 + 0.88 * clamp01(p)));
         if (b.buildLeft <= 0) {
@@ -1898,7 +2203,7 @@ export class Sim {
         b.queue.shift();
         b.prod = Math.max(0, b.prod - spec.time);
         if (res === "drop") {
-          this.credits[b.team] = Math.min(this.storageOf(b.team), this.credits[b.team] + spec.cost);
+          this.credits[b.team] += spec.cost;
           const capped = this.countLiving(b.team) >= UNIT_CAP;
           if (b.team === this.ear || b.team === 0) this.say(capped ? "Unit cap reached" : "Command points full", "cap", 2);
         }
@@ -2002,10 +2307,28 @@ export class Sim {
       return;
     }
 
-    const engage = u.damage > 0 ? this.pickEngage(u) : null;
+    if (this.deploying() && (u.order.t === "attack" || u.order.t === "move")) {
+      this.holdFire(u, dt);
+      return;
+    }
+
+    let engage = u.damage > 0 && !this.deploying() ? this.pickEngage(u) : null;
     if (u.order.t === "attack" && !engage) {
-      u.order = { t: "idle" };
-      u.path = [];
+      // Target died. Auto-target the nearest living enemy building, then any foe.
+      const next = this.nearestBuilding(u, 48) ?? this.nearestFoe(u.team, u.x, u.y, Math.max(u.sight, u.range + 0.4), u.hitsAir, false, false);
+      if (next && !(next.kind === "building" && next.b.rubble > 0)) {
+        u.order = { t: "attack", id: next.kind === "unit" ? next.u.id : next.b.id };
+        u.path = [];
+        if (u.ring < 0) {
+          const p = this.targetPoint(next);
+          u.ring = Math.atan2(u.y - p.y, u.x - p.x);
+        }
+        engage = next;
+      } else {
+        // Keep the order. Do not silently cancel.
+        const held = this.targetById(u.order.id);
+        if (held) engage = held;
+      }
     }
     if (engage) {
       const d = this.distTo(u, engage);
@@ -2013,30 +2336,39 @@ export class Sim {
       const chasing =
         hunting ||
         u.order.t === "attack" ||
-        u.order.t === "guard" ||
+        u.order.t === "idle" ||
         (u.order.t === "move" && u.order.attackMove);
-      if (d <= u.range) {
+      if (d < u.minRange && u.loco !== "air") {
+        this.stepAway(u, engage, dt);
+        return;
+      }
+      if (d <= this.reachOf(u.range, u.x, u.y, u.loco)) {
         this.tryShoot(u, engage);
         this.faceTarget(u, engage);
-        // Bomber keeps flying the pass until the single release, then peels for the pad.
         if (u.kind === "bomber" && u.ammo > 0) {
           this.stepTowardTarget(u, engage, dt);
           return;
         }
         if (u.ammoMax > 0 && u.ammo <= 0) return;
-        // Attack heli hovers in place while the magazine lasts.
         if (u.kind === "attackheli") return;
-        if (u.order.t !== "move" || u.order.attackMove) return;
+        if (u.order.t === "attack" || u.order.t === "idle" || u.order.t === "guard" || (u.order.t === "move" && u.order.attackMove)) {
+          return;
+        }
       } else if (chasing) {
         if (u.repath <= 0) u.path = [];
-        this.stepTowardTarget(u, engage, dt);
+        const spread = u.order.t === "attack" && engage.kind === "unit" && u.loco !== "sea" && u.kind !== "bomber";
+        if (spread) this.stepRing(u, engage, dt);
+        else this.stepTowardTarget(u, engage, dt);
         return;
       }
     }
 
     if (u.order.t === "move") {
-      if (hypot(u.x, u.y, u.order.x, u.order.y) < 0.28) {
+      if (hypot(u.x, u.y, u.order.x, u.order.y) < 0.32) {
         u.path = [];
+        u.pace = 0;
+        u.postX = u.x;
+        u.postY = u.y;
         u.order = { t: "idle" };
         return;
       }
@@ -2044,10 +2376,41 @@ export class Sim {
       return;
     }
     if (u.order.t === "guard") {
-      if (hypot(u.x, u.y, u.order.x, u.order.y) > 1.15) this.navigate(u, u.order.x, u.order.y, dt);
+      if (hypot(u.x, u.y, u.order.x, u.order.y) > 0.42) this.navigate(u, u.order.x, u.order.y, dt);
       return;
     }
-    if (u.order.t === "attack" && engage) this.stepTowardTarget(u, engage, dt);
+    if (u.order.t === "idle" && hypot(u.x, u.y, u.postX, u.postY) > 0.55) {
+      this.navigate(u, u.postX, u.postY, dt);
+      return;
+    }
+    if (u.order.t === "attack" && engage) {
+      if (engage.kind === "unit" && u.loco !== "sea" && u.kind !== "bomber") this.stepRing(u, engage, dt);
+      else this.stepTowardTarget(u, engage, dt);
+    }
+  }
+
+  /**
+   * Deployment: nobody shoots. An attack or capture order is kept and resumes
+   * when the clock ends. A march stops at the enemy start instead of walking in.
+   */
+  private holdFire(u: Unit, dt: number) {
+    if (u.order.t === "attack" || u.order.t === "capture") {
+      const t = this.targetById(u.order.id);
+      if (!t) return;
+      const p = this.targetPoint(t);
+      const q = this.quietPoint(u.team, p.x, p.y);
+      if (Math.hypot(u.x - q.x, u.y - q.y) > 0.45) this.navigate(u, q.x, q.y, dt);
+      return;
+    }
+    if (u.order.t !== "move") return;
+    const q = this.quietPoint(u.team, u.order.x, u.order.y);
+    const armed = u.order.attackMove;
+    if (armed || Math.hypot(q.x - u.order.x, q.y - u.order.y) >= 0.05) {
+      u.order = { t: "move", x: q.x, y: q.y, attackMove: false };
+      u.path = [];
+      u.ring = -1;
+    }
+    this.navigate(u, u.order.x, u.order.y, dt);
   }
 
   private pickEngage(u: Unit): Target | null {
@@ -2062,7 +2425,7 @@ export class Sim {
       if (t.kind === "unit" && t.u.loco === "air" && !u.hitsAir) return null;
       if (t.kind === "unit" && !this.visibleUnit(u.team, t.u)) return t;
       const wall = this.liveBreach(u);
-      if (wall && t.kind === "building" && !isFence(t.b.kind) && this.distTo(u, t) > u.range) return wall;
+      if (wall && t.kind === "building" && !isFence(t.b.kind) && this.distTo(u, t) > this.reachOf(u.range, u.x, u.y, u.loco)) return wall;
       return t;
     }
     const roaming = u.order.t === "idle" || u.order.t === "guard" || (u.order.t === "move" && u.order.attackMove);
@@ -2090,19 +2453,71 @@ export class Sim {
       return this.liveBreach(u);
     }
     if (u.order.t === "guard") {
-      const foe = this.nearestFoe(u.team, u.x, u.y, u.sight, u.hitsAir, false, false);
-      if (!foe) return null;
-      const p = this.targetPoint(foe);
-      if (hypot(p.x, p.y, u.order.x, u.order.y) > 8) return null;
-      return foe;
+      const foe = this.nearestFoe(u.team, u.x, u.y, Math.max(u.range, u.minRange), u.hitsAir, false, false);
+      if (foe && this.distTo(u, foe) <= this.reachOf(u.range, u.x, u.y, u.loco)) return foe;
+      return this.returnFire(u);
     }
-    if (u.order.t === "idle") return this.nearestFoe(u.team, u.x, u.y, u.range, u.hitsAir, false, true);
+    if (u.order.t === "idle") {
+      const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+      const foe = this.nearestFoe(u.team, u.x, u.y, Math.max(reach, Math.min(u.sight, reach + 2.2)), u.hitsAir, false, false);
+      if (foe && !(foe.kind === "building" && foe.b.rubble > 0)) {
+        const d = this.distTo(u, foe);
+        if (foe.kind === "building" && d > reach) {
+          /* a hall out of range is not a reason to wander */
+        } else if (d <= reach || d < u.minRange) {
+          return foe;
+        } else {
+          const p = this.targetPoint(foe);
+          if (hypot(p.x, p.y, u.postX, u.postY) <= u.range + 2.4) return foe;
+        }
+      }
+      return this.returnFire(u);
+    }
     if (u.order.t === "move") {
+      const back = this.returnFire(u);
+      if (back) return back;
       // A reposition doesn't spend a magazine. Attack-move still engages above.
       if (u.ammoMax > 0 && !u.order.attackMove) return null;
       return this.nearestFoe(u.team, u.x, u.y, u.range * 0.95, u.hitsAir, false, false);
     }
     return null;
+  }
+
+  /**
+   * Idle troops shoot back at whoever just hit them, and walk into range if
+   * that shooter is still inside sight. Guard and a plain move only fire when
+   * the shooter is already in range, so they do not abandon the order.
+   */
+  private returnFire(u: Unit): Target | null {
+    if (u.damage <= 0 || !u.aggro || this.time > u.aggroUntil) return null;
+    const t = this.targetById(u.aggro);
+    if (!t || t.kind !== "unit" || t.u.hp <= 0 || t.u.aboard || this.allied(t.u.team, u.team)) return null;
+    if (t.u.loco === "air" && !u.hitsAir) return null;
+    const d = this.distTo(u, t);
+    const reach = this.reachOf(u.range, u.x, u.y, u.loco);
+    if (d <= reach || d < u.minRange) return t;
+    if (u.order.t !== "idle") return null;
+    if (d > Math.max(u.sight, reach)) return null;
+    return t;
+  }
+
+  /** Spread a squad onto a ring at firing range so the rear ranks are not stuck in a file. */
+  private stepRing(u: Unit, target: Target, dt: number) {
+    const p = this.targetPoint(target);
+    const stand = Math.max(u.minRange + 0.55, Math.min(u.range * 0.82, Math.max(1.2, u.range - 0.45)));
+    const ang = u.ring >= 0 ? u.ring : Math.atan2(u.y - p.y, u.x - p.x);
+    const goal = this.domainGoal(u, p.x + Math.cos(ang) * stand, p.y + Math.sin(ang) * stand);
+    this.navigate(u, goal.x, goal.y, dt);
+  }
+
+  /** Artillery inside its minimum range backs out until the gun can elevate. */
+  private stepAway(u: Unit, target: Target, dt: number) {
+    const p = this.targetPoint(target);
+    const dx = u.x - p.x;
+    const dy = u.y - p.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const goal = this.domainGoal(u, u.x + (dx / dist) * (u.minRange + 0.7), u.y + (dy / dist) * (u.minRange + 0.7));
+    this.navigate(u, goal.x, goal.y, dt);
   }
 
   private stepTowardTarget(u: Unit, target: Target, dt: number) {
@@ -2117,10 +2532,12 @@ export class Sim {
       this.navigate(u, goal.x, goal.y, dt);
       return;
     }
-    const tile = this.approachTile(target.b, u.x, u.y);
+    const tile = this.approachTile(target.b, u, u.range);
     if (!tile) {
-      const door = this.doorOf(target.b);
-      this.navigate(u, door.x, door.y, dt);
+      // No open tile within weapon range of the edge. The building's own tiles are not the reason.
+      if (u.order.t === "attack" && u.team === this.ear) u.blocked = Math.max(u.blocked, 0.45);
+      const p = this.targetPoint(target);
+      this.navigate(u, p.x, p.y, dt);
       return;
     }
     this.navigate(u, tile.x + 0.5, tile.y + 0.5, dt);
@@ -2159,11 +2576,14 @@ export class Sim {
     dx /= dist;
     dy /= dist;
     let speed = u.loco === "amphib" ? u.speed * 0.5 : u.speed;
+    if (u.pace > 0 && u.order.t === "move") speed = Math.min(speed, u.pace);
     const under = this.terrain[(Math.floor(u.y) * this.gw + Math.floor(u.x)) | 0];
     const vehicle = u.armor === "vehicle" || u.armor === "heavy";
     if (under === TILE_FORD) speed *= 0.45;
-    else if (vehicle && slowsVehicles(under)) speed *= 0.62;
-    else if (under === TILE_ROAD) speed *= 1.12;
+    else if (under === TILE_SHALLOW && u.armor === "infantry") speed *= 0.5;
+    else if (under === TILE_RAMP) speed *= vehicle ? 0.58 : 0.75;
+    else if (under === TILE_VALLEY || (vehicle && under === TILE_ROUGH)) speed *= 0.72;
+    else if (under === TILE_ROAD && vehicle) speed *= 1.2;
     if (u.armor === "infantry" && this.marchLeft[u.team]! > 0) speed *= 1.4;
     if (u.kind === "tank" || u.kind === "medium") {
       const bag = this.buildingAtPoint(u.x, u.y);
@@ -2261,12 +2681,7 @@ export class Sim {
     }
     const dock = this.doorOf(ref);
     if (hypot(u.x, u.y, dock.x, dock.y) < 1.25 || distPointToRect(u.x, u.y, ref) < 1.15) {
-      const room = this.storageOf(u.team) - this.credits[u.team];
-      if (room <= 1) {
-        if (u.team === 0) this.say("Vaults full — build a Silo", "vault", 12);
-        return;
-      }
-      const dump = Math.min(u.cargo, room);
+      const dump = u.cargo;
       u.cargo -= dump;
       this.credits[u.team] += dump;
       this.income[u.team] += dump;
@@ -2306,21 +2721,28 @@ export class Sim {
       const tgt = this.targetById(s.targetId);
       if (tgt) {
         const p = this.targetPoint(tgt);
-        const dx = p.x - s.x;
-        const dy = p.y - s.y;
-        const d = Math.hypot(dx, dy);
-        if (d < 0.38) {
+        const nx = s.x + s.vx * dt;
+        const ny = s.y + s.vy * dt;
+        const d = distToSeg(p.x, p.y, s.x, s.y, nx, ny);
+        if (d <= (s.arc > 0.6 ? 0.72 : 0.42)) {
+          s.x = p.x;
+          s.y = p.y;
           this.detonate(s, tgt);
           s.ttl = 0;
           continue;
         }
         const spd = Math.hypot(s.vx, s.vy) || 1;
-        s.vx = s.vx * 0.65 + (dx / d) * spd * 0.35;
-        s.vy = s.vy * 0.65 + (dy / d) * spd * 0.35;
+        const steer = s.arc > 0.5 ? 0.12 : 0.45;
+        const dx = p.x - s.x;
+        const dy = p.y - s.y;
+        const aim = Math.hypot(dx, dy) || 1;
+        s.vx = s.vx * (1 - steer) + (dx / aim) * spd * steer;
+        s.vy = s.vy * (1 - steer) + (dy / aim) * spd * steer;
         const v = Math.hypot(s.vx, s.vy) || 1;
         s.vx = (s.vx / v) * spd;
         s.vy = (s.vy / v) * spd;
       }
+      s.age += dt;
       s.x += s.vx * dt;
       s.y += s.vy * dt;
       s.ttl -= dt;
@@ -2345,14 +2767,18 @@ export class Sim {
     const before = direct.kind === "unit" ? direct.u.hp : 0;
     const sky = direct.kind === "unit" && direct.u.loco === "air";
     if (!sky || (s.hitsAir && s.vsAir > 0)) {
-      this.applyDamage(direct, s.dmg, s.vsInf, s.vsVeh, s.vsBld, s.vsAir, s.kind, s.team);
+      this.applyDamage(direct, s.dmg, s.vsInf, s.vsVeh, s.vsBld, s.vsAir, s.kind, s.team, s.who, s.owner);
     }
     if (direct.kind === "unit" && before > 0 && direct.u.hp <= 0) this.creditKill(s.owner);
     const p = this.targetPoint(direct);
-    this.boom(p.x, p.y, s.kind === "rocket" ? 0.45 : 0.28);
+    const heavy = s.arc > 0.6 || s.kind === "rocket";
+    this.boom(p.x, p.y, heavy ? 0.72 : 0.32);
     if (s.kind === "rocket" || s.kind === "shell") {
-      this.blip("explosion", 0.1);
+      this.blip("explosion", 0.1, p.x, p.y);
       this.scorch(p.x, p.y);
+      spawnSparks(p.x, p.y, heavy ? 8 : 4);
+      spawnDirt(p.x, p.y, heavy ? 6 : 3);
+      this.impulse = Math.max(this.impulse, heavy ? 0.85 : 0.32);
     }
     if (s.splash > 0) {
       for (const o of this.units) {
@@ -2362,12 +2788,13 @@ export class Sim {
         const d = Math.hypot(o.x - p.x, o.y - p.y);
         if (d >= s.splash) continue;
         const splash = s.dmg * 0.4 * (1 - d / s.splash);
-        this.hurtUnit(o, o.loco === "air" ? splash * s.vsAir : splash, s.team);
+        this.hurtUnit(o, o.loco === "air" ? splash * s.vsAir : splash, s.team, s.owner);
       }
     }
   }
 
   private tickTowers(dt: number) {
+    if (this.deploying()) return;
     for (const b of this.buildings) {
       const aa = b.special === "aa";
       if ((b.kind !== "tower" && !aa) || !b.complete || b.hp <= 0) continue;
@@ -2375,11 +2802,12 @@ export class Sim {
       if (this.powerOf(b.team).low) continue;
       const cx = b.tx + b.w / 2;
       const cy = b.ty + b.h / 2;
-      const foe = this.nearestFoe(b.team, cx, cy, b.range, aa, aa, true);
+      const reach = this.reachOf(b.range, cx, cy, "ground");
+      const foe = this.nearestFoe(b.team, cx, cy, reach, aa, aa, true);
       if (!foe || b.cooldown > 0) continue;
       if (foe.kind === "unit" && foe.u.loco === "air" && !aa) continue;
       const d = this.distFrom(cx, cy, foe);
-      if (d > b.range) continue;
+      if (d > reach) continue;
       b.cooldown = b.rof;
       this.applyDamage(foe, b.damage, b.vsInf, b.vsVeh, b.vsBld, aa ? b.vsAir : 0, "structure", b.team);
       const p = this.targetPoint(foe);
@@ -2390,9 +2818,13 @@ export class Sim {
   }
 
   private tryShoot(u: Unit, target: Target) {
+    if (this.deploying()) return;
     if (u.cooldown > 0 || u.damage <= 0) return;
     if (target.kind === "unit" && target.u.loco === "air" && !u.hitsAir) return;
     if (u.ammoMax > 0 && u.ammo <= 0) return;
+    const pos = this.targetPoint(target);
+    const gap = target.kind === "building" ? distPointToRect(u.x, u.y, target.b) : Math.hypot(pos.x - u.x, pos.y - u.y);
+    if (u.minRange > 0 && gap < u.minRange) return;
     u.cooldown = u.rof;
     if (u.stealth) u.reveal = 1.7;
     this.markFire(u);
@@ -2400,20 +2832,23 @@ export class Sim {
       u.ammo -= 1;
       if (u.ammo <= 0) this.beginRearm(u);
     }
-    const pos = this.targetPoint(target);
     const mul = this.navalMul(u, target);
     if (u.shot === "hit") {
       const before = target.kind === "unit" ? target.u.hp : 0;
-      this.applyDamage(target, u.damage * mul, u.vsInf, u.vsVeh, u.vsBld, u.vsAir, u.shot, u.team);
+      this.applyDamage(target, u.damage * mul, u.vsInf, u.vsVeh, u.vsBld, u.vsAir, u.shot, u.team, u.kind, u.id);
       if (target.kind === "unit" && before > 0 && target.u.hp <= 0) u.kills++;
       this.beam(u.x, u.y, pos.x, pos.y, u.team);
+      spawnTracer(u.x, u.y, pos.x, pos.y, u.team);
       this.weaponSfx(u);
       return;
     }
-    const spd = u.shot === "rocket" ? 7.2 : 9.2;
+    const arc = u.kind === "artillery" || u.kind === "bomber" ? 1 : u.shot === "shell" ? 0.32 : 0;
+    const spd = u.kind === "artillery" ? 5.2 : u.shot === "rocket" ? 7.2 : 9.2;
     const dx = pos.x - u.x;
     const dy = pos.y - u.y;
     const d = Math.hypot(dx, dy) || 1;
+    const splash =
+      u.kind === "artillery" ? 1.15 : u.kind === "bomber" ? 1.45 : u.shot === "rocket" ? 0.75 : u.shot === "shell" ? 0.4 : 0;
     this.shots.push({
       x: u.x,
       y: u.y,
@@ -2427,15 +2862,18 @@ export class Sim {
       vsVeh: u.vsVeh,
       vsBld: u.vsBld,
       targetId: target.kind === "unit" ? target.u.id : target.b.id,
-      ttl: 2.6,
+      ttl: arc > 0.6 ? 3.2 : 2.6,
       kind: u.shot,
-      splash: u.shot === "rocket" ? 0.75 : 0,
+      splash,
       hitsAir: u.hitsAir,
       vsAir: u.vsAir,
       owner: u.id,
+      arc,
+      age: 0,
+      who: u.kind,
     });
     if (u.shot === "rocket" || u.shot === "shell") {
-      spawnTrail(u.x, u.y, (dx / d) * spd, (dy / d) * spd, u.shot === "rocket" ? "rocket" : "shell");
+      spawnTrail(u.x, u.y, (dx / d) * spd, (dy / d) * spd, u.kind === "artillery" ? "artillery" : u.shot === "rocket" ? "rocket" : "shell");
     }
     this.weaponSfx(u);
   }
@@ -2449,23 +2887,28 @@ export class Sim {
     vsAir = 0,
     shot: ShotKind | "structure" = "structure",
     from: Team = 0,
+    who = "",
+    attacker = 0,
   ) {
+    const weapon = who || (shot === "rocket" ? "rocket" : shot === "hit" ? "rifle" : "tank");
     if (target.kind === "unit") {
       if (target.u.loco === "air") {
         if (vsAir <= 0) return;
-        this.hurtUnit(target.u, base * vsAir, from);
+        this.hurtUnit(target.u, base * vsAir, from, attacker);
         return;
       }
-      const mul = target.u.armor === "infantry" ? vsInf : vsVeh;
-      this.hurtUnit(target.u, base * mul, from);
+      const plate = plateOf(target.u.kind, target.u.armor);
+      const mul = (target.u.armor === "infantry" ? vsInf : vsVeh) * counterMul(weapon, plate);
+      this.hurtUnit(target.u, base * mul, from, attacker);
     } else {
       let dmg = base * vsBld;
       if ((target.b.kind === "wall" || target.b.kind === "gate" || target.b.kind === "sandbag") && target.b.rubble <= 0) {
         const explosive = shot === "shell" || shot === "rocket";
         const wall = !explosive ? (shot === "hit" ? 0.08 : 0.15) : target.b.kind === "sandbag" ? 6 : 2.8;
         dmg *= wall;
-      } else if (target.b.kind === "span" && (shot === "shell" || shot === "rocket")) {
-        dmg *= 1.65;
+      } else {
+        dmg *= counterMul(weapon, "building");
+        if (target.b.kind === "span" && (shot === "shell" || shot === "rocket")) dmg *= 1.65;
       }
       this.hurtBuilding(target.b, dmg, from);
     }
@@ -2487,22 +2930,30 @@ export class Sim {
     this.aiAlert[victim] = { x, y, until: this.time + 30 };
   }
 
-  private hurtUnit(u: Unit, dmg: number, from?: Team) {
+  private hurtUnit(u: Unit, dmg: number, from?: Team, attacker = 0) {
     if (u.hp <= 0 || dmg <= 0) return;
     u.hp -= dmg;
     u.hit = 0.28;
+    if (attacker > 0 && from !== undefined && !this.allied(from, u.team)) {
+      u.aggro = attacker;
+      u.aggroUntil = this.time + 5;
+    }
     if (from !== undefined) this.noteThreat(u.team, u.x, u.y, from);
     if (u.hp <= 0) {
       u.hp = 0;
       this.noteUnit(u.team, from);
       this.boom(u.x, u.y, u.armor === "vehicle" ? 0.55 : 0.32);
       this.debris(u.x, u.y, u.armor === "infantry" ? 4 : 6);
-      this.blip("explosion", 0.08);
-      if (u.armor === "vehicle") {
+      this.blip("explosion", 0.08, u.x, u.y);
+      if (u.armor !== "infantry" && u.armor !== "light") {
         spawnWreck(u.x, u.y, u.team);
         this.impulse = Math.max(this.impulse, 0.35);
+      } else if (u.armor === "light" && u.loco !== "air") {
+        spawnWreck(u.x, u.y, u.team);
+        this.impulse = Math.max(this.impulse, 0.4);
       } else {
         spawnFall(u.x, u.y, u.team);
+        this.impulse = Math.max(this.impulse, 0.12);
       }
       if (u.team === this.ear && u.kind !== "mcv") {
         this.say("Unit lost", "lost", 2);
@@ -2525,6 +2976,8 @@ export class Sim {
     if (b.hp <= 0 || dmg <= 0) return;
     if (from !== undefined) this.noteThreat(b.team, b.tx + b.w / 2, b.ty + b.h / 2, from);
     b.hit = 0.4;
+    b.shown = this.time + 4;
+    spawnSparks(b.tx + b.w / 2, b.ty + b.h / 2, 5);
     if (b.rubble > 0) {
       b.hp = 1;
       return;
@@ -2558,14 +3011,14 @@ export class Sim {
       this.say("Bridge down", "bridge", 1);
       return;
     }
-    b.hp = 0;
+    b.hp = Math.max(1, b.maxHp * 0.02);
+    b.collapse = 1.35;
     this.notePlant(b, from);
-    this.clearOcc(b);
-    this.boom(b.tx + b.w / 2, b.ty + b.h / 2, 0.9);
+    this.boom(b.tx + b.w / 2, b.ty + b.h / 2, 0.95);
     this.debris(b.tx + b.w / 2, b.ty + b.h / 2, 7);
-    spawnBuildingDebris(b.tx + b.w / 2, b.ty + b.h / 2, 8);
-    this.blip("explosion", 0.08);
-    this.impulse = Math.max(this.impulse, 0.7);
+    spawnRuin(b.tx + b.w / 2, b.ty + b.h / 2, b.w, b.h);
+    this.blip("explosion", 0.08, b.tx + b.w / 2, b.ty + b.h / 2);
+    this.impulse = Math.max(this.impulse, 0.55);
     if (b.team === 0) this.say(`${b.name} destroyed`);
     else this.say(`Enemy ${b.name} destroyed`, "kb", 1.2);
   }
@@ -2795,9 +3248,21 @@ export class Sim {
     }
   }
 
+  private tickCollapse(dt: number) {
+    for (const b of this.buildings) {
+      if (b.collapse <= 0) continue;
+      b.collapse -= dt;
+      if (b.collapse > 0) continue;
+      b.collapse = 0;
+      b.hp = 0;
+      b.rubble = 9999;
+      this.clearOcc(b);
+    }
+  }
+
   private tickRubble(dt: number) {
     for (const b of this.buildings) {
-      if (b.rubble <= 0 || b.hp <= 0 || b.kind === "span") continue;
+      if (b.rubble <= 0 || b.rubble > 100 || b.hp <= 0 || b.kind === "span") continue;
       b.rubble -= dt;
       if (b.rubble <= 0) {
         b.rubble = 0;
@@ -2812,6 +3277,7 @@ export class Sim {
     const tx = Math.floor(x);
     const ty = Math.floor(y);
     if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return false;
+    if (this.hostileStart(u.team, tx + 0.5, ty + 0.5)) return false;
     if (u.loco === "air") return true;
     const t = this.terrain[ty * this.gw + tx];
     const who = u.loco === "sea" ? "boat" : u.loco === "amphib" ? "amphib" : u.armor === "infantry" ? "infantry" : "vehicle";
@@ -2930,10 +3396,21 @@ export class Sim {
       return;
     }
     const d = distPointToRect(u.x, u.y, b);
-    const reach = wreck ? 3.2 : 1.25;
+    const reach = wreck ? 3.2 : 1.65;
+    if (this.deploying()) {
+      const q = this.quietPoint(u.team, b.tx + b.w / 2, b.ty + b.h / 2);
+      const cx = b.tx + b.w / 2;
+      const cy = b.ty + b.h / 2;
+      if (Math.hypot(q.x - cx, q.y - cy) > 0.3) {
+        this.navigate(u, q.x, q.y, dt);
+        u.capture = 0;
+        return;
+      }
+    }
     if (d > reach) {
-      const tile = this.approachTile(b, u.x, u.y);
+      const tile = this.approachTile(b, u, reach);
       if (tile) this.navigate(u, tile.x + 0.5, tile.y + 0.5, dt);
+      else this.navigate(u, b.tx + b.w / 2, b.ty + b.h / 2, dt);
       u.capture = 0;
       return;
     }
@@ -2955,10 +3432,10 @@ export class Sim {
       if (u.team === this.ear) this.say("Bridge repaired", "bridge", 1);
       return;
     }
-    if (u.capture < 6) return;
+    if (u.capture < 3) return;
     b.team = u.team;
     b.neutral = false;
-    this.say(u.team === 0 ? `Captured ${b.name}` : `Lost ${b.name}`, "cap", 0.4);
+    this.say(u.team === 0 ? "Building captured" : `Lost ${b.name}`, "cap", 0.4);
     u.hp = 0;
     this.statLost[u.team] = (this.statLost[u.team] ?? 0) + 1;
   }
@@ -2994,27 +3471,28 @@ export class Sim {
 
   private tickCrates(dt: number) {
     if (!this.cratesOn) return;
-    if (!this.haulLanded && this.time >= HAUL_AT) this.landHaul();
-    this.crateAcc -= dt;
-    if (this.crateAcc <= 0 && this.crates.length < 5) {
-      this.crateAcc = 55 + this.roll(21);
-      const spot = this.randomLand();
-      if (spot) this.crates.push({ x: spot.x + 0.5, y: spot.y + 0.5, kind: this.roll(10) < 7 ? "cash" : "squad" });
+    if (!this.cratesOpened && this.time >= DEPLOY_SECS) {
+      this.cratesOpened = true;
+      this.placeOpeningCrates();
     }
+    if (!this.haulLanded && this.time >= HAUL_AT) this.landHaul();
     for (const c of this.crates) {
       for (const u of this.units) {
         if (u.hp <= 0 || u.aboard || u.loco === "air" || u.loco === "sea") continue;
         if (Math.hypot(u.x - c.x, u.y - c.y) > 0.7) continue;
         if (c.kind === "haul") {
-          this.credits[u.team] = Math.min(this.storageOf(u.team), this.credits[u.team] + 1400);
+          this.credits[u.team] += 1400;
           this.income[u.team] += 1400;
           this.splitHaul(c.x, c.y);
           if (u.team === this.ear) this.say("Field haul: 1400");
           else if (this.ear === 0) this.say("Enemy took the field haul");
         } else if (c.kind === "cash") {
-          this.credits[u.team] = Math.min(this.storageOf(u.team), this.credits[u.team] + 450);
+          this.credits[u.team] += 450;
           this.income[u.team] += 450;
           if (u.team === this.ear) this.say("Field cache: 450");
+        } else if (c.kind === "mend") {
+          this.mendUntil[u.team] = this.time + 14;
+          if (u.team === this.ear) this.say("Field repair", "mend", 1.2);
         } else {
           this.spawnUnit(u.team, "rifle", u.x + 0.6, u.y);
           if (u.team === this.ear) this.say("Cache: rifle squad");
@@ -3026,21 +3504,147 @@ export class Sim {
     if (this.crates.some((c) => c.x < 0)) this.crates = this.crates.filter((c) => c.x >= 0);
   }
 
-  /** Opening caches toward the center. Both clients place the same ones. */
-  private seedFieldCaches() {
+  /** High ground stretches weapons a little. Aircraft and boats ignore the slope. */
+  private reachOf(range: number, x: number, y: number, loco: string): number {
+    if (loco === "air" || loco === "sea") return range;
+    const tx = x | 0;
+    const ty = y | 0;
+    if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return range;
+    return this.terrain[ty * this.gw + tx] === TILE_HIGH ? range * 1.12 : range;
+  }
+
+  /** Roads and bridges are the fast line. Ramps and fords are the slow cut. */
+  private stepCost(tx: number, ty: number): number {
+    const t = this.terrain[ty * this.gw + tx] ?? 0;
+    if (t === TILE_ROAD) return 0.83;
+    if (t === TILE_BRIDGE) return 0.78;
+    if (t === TILE_RAMP || t === TILE_FORD) return 1.65;
+    if (t === TILE_ROUGH || t === TILE_VALLEY) return 1.35;
+    if (t === TILE_SHALLOW) return 1.5;
+    return 1;
+  }
+
+  private tickMend(dt: number) {
+    for (let t = 0; t < 4; t++) {
+      if ((this.mendUntil[t] ?? 0) <= this.time) continue;
+      for (const u of this.units) {
+        if (u.team !== t || u.hp <= 0 || u.hp >= u.maxHp) continue;
+        u.hp = Math.min(u.maxHp, u.hp + u.maxHp * 0.045 * dt);
+      }
+      for (const b of this.buildings) {
+        if (b.team !== t || b.neutral || b.hp <= 0 || b.hp >= b.maxHp) continue;
+        b.hp = Math.min(b.maxHp, b.hp + b.maxHp * 0.035 * dt);
+      }
+    }
+  }
+
+  private outpostAt(x: number, y: number): boolean {
+    for (const b of this.buildings) {
+      if (b.hp <= 0 || !b.neutral || b.kind === "span" || b.kind === "dock") continue;
+      if (x >= b.tx - 1 && y >= b.ty - 1 && x < b.tx + b.w + 1 && y < b.ty + b.h + 1) return true;
+    }
+    return false;
+  }
+
+  /** Neutral plants an engineer can take. They do not shoot and do not pay out until captured. */
+  private plantOutposts() {
+    const kinds: BuildingId[] = ["supply", "silo", "supply"];
+    const slots = this.starts.slots;
+    const cx = this.gw / 2;
+    const cy = this.gh / 2;
+    const raw: { x: number; y: number }[] = [];
+    slots.forEach((s, i) => {
+      const ang = Math.atan2(cy - s.y, cx - s.x) + (i % 2 === 0 ? 0.8 : -0.8);
+      raw.push({ x: (s.x + cx) / 2 + Math.cos(ang) * 5, y: (s.y + cy) / 2 + Math.sin(ang) * 5 });
+    });
+    raw.push({ x: cx + 6, y: cy - 3 });
+    let n = 0;
+    for (const s of raw) {
+      if (n >= 3) break;
+      const kind = kinds[n]!;
+      const def = resolveBuilding(kind, this.factionOf(0));
+      const pad = this.findPad(Math.round(s.x), Math.round(s.y), def.w, def.h);
+      if (!pad) continue;
+      const b = this.addBuilding(0, kind, pad.x, pad.y, true, true);
+      this.fillOcc(b);
+      n++;
+    }
+  }
+
+  private findPad(x: number, y: number, w: number, h: number): { x: number; y: number } | null {
+    if (this.padFits(x, y, w, h)) return { x, y };
+    for (let r = 1; r <= 8; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          if (this.padFits(x + dx, y + dy, w, h)) return { x: x + dx, y: y + dy };
+        }
+      }
+    }
+    return null;
+  }
+
+  private padFits(x: number, y: number, w: number, h: number): boolean {
+    if (x < 2 || y < 2 || x + w >= this.gw - 1 || y + h >= this.gh - 1) return false;
+    for (let ty = y; ty < y + h; ty++) {
+      for (let tx = x; tx < x + w; tx++) {
+        const i = ty * this.gw + tx;
+        const t = this.terrain[i] ?? 0;
+        if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH && t !== TILE_HIGH && t !== TILE_ROAD && t !== TILE_SHORE) return false;
+        if ((this.crystal[i] ?? 0) > 0 || this.occ[i] !== 0) return false;
+        if (isShell(t)) return false;
+        for (const s of this.starts.slots) {
+          if (Math.hypot(s.x - tx, s.y - ty) < 11) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  /** Contested caches after the deployment window. Both clients roll the same spots. */
+  private placeOpeningCrates() {
     if (!this.cratesOn || this.crates.length) return;
+    const slots = this.starts.slots;
+    const raw: { x: number; y: number }[] = [{ x: this.gw / 2, y: this.gh / 2 }];
+    for (let i = 0; i < slots.length; i++) {
+      for (let j = i + 1; j < slots.length; j++) {
+        const a = slots[i];
+        const b = slots[j];
+        if (!a || !b) continue;
+        raw.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+        const ang = Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2;
+        raw.push({ x: (a.x + b.x) / 2 + Math.cos(ang) * 6, y: (a.y + b.y) / 2 + Math.sin(ang) * 6 });
+      }
+    }
+    for (const b of this.buildings) {
+      if (b.hp <= 0 || b.kind !== "span") continue;
+      raw.push({ x: b.tx + b.w / 2, y: b.ty - 3 });
+      raw.push({ x: b.tx + b.w / 2, y: b.ty + b.h + 2 });
+    }
+    const kinds = ["cash", "squad", "mend", "cash", "squad"] as const;
+    const used: { x: number; y: number }[] = [];
+    let placed = 0;
+    const want = 4;
+    for (const s of raw) {
+      if (placed >= want) break;
+      const spot = this.nearestCacheTile(Math.round(s.x), Math.round(s.y));
+      if (!spot) continue;
+      if (used.some((u) => Math.hypot(u.x - spot.x, u.y - spot.y) < 7)) continue;
+      if (this.outpostAt(spot.x, spot.y)) continue;
+      this.crates.push({ x: spot.x + 0.5, y: spot.y + 0.5, kind: kinds[placed] ?? "cash" });
+      used.push(spot);
+      placed++;
+    }
+    if (placed >= 3) return;
     const cx = (this.gw / 2) | 0;
     const cy = (this.gh / 2) | 0;
-    const rings = [0.18, 0.3, 0.42];
-    let placed = 0;
-    for (const ring of rings) {
-      const steps = ring < 0.2 ? 4 : 6;
-      for (let i = 0; i < steps && placed < 9; i++) {
-        const ang = (i / steps) * Math.PI * 2 + ring * 3;
-        const x = Math.round(cx + Math.cos(ang) * this.gw * ring);
-        const y = Math.round(cy + Math.sin(ang) * this.gh * ring * 0.82);
-        if (!this.cacheTileOk(x, y)) continue;
-        this.crates.push({ x: x + 0.5, y: y + 0.5, kind: "cash" });
+    for (let r = 6; r <= 28 && placed < 5; r += 4) {
+      for (let i = 0; i < 8 && placed < 5; i++) {
+        const ang = (i / 8) * Math.PI * 2 + r * 0.17;
+        const spot = this.nearestCacheTile(Math.round(cx + Math.cos(ang) * r), Math.round(cy + Math.sin(ang) * r * 0.85));
+        if (!spot || used.some((u) => Math.hypot(u.x - spot.x, u.y - spot.y) < 7)) continue;
+        this.crates.push({ x: spot.x + 0.5, y: spot.y + 0.5, kind: kinds[placed] ?? "cash" });
+        used.push(spot);
         placed++;
       }
     }
@@ -3073,7 +3677,7 @@ export class Sim {
     if (isWater(t) && t !== TILE_FORD) return false;
     if (!allows(t, "infantry", 0)) return false;
     for (const s of this.starts.slots) {
-      if (Math.hypot(s.x - x, s.y - y) < 8) return false;
+      if (Math.hypot(s.x - x, s.y - y) < 7) return false;
     }
     for (const c of this.crates) {
       if (c.x < 0) continue;
@@ -3084,7 +3688,7 @@ export class Sim {
 
   private nearestCacheTile(x: number, y: number): { x: number; y: number } | null {
     if (this.cacheTileOk(x, y)) return { x, y };
-    for (let r = 1; r <= 8; r++) {
+    for (let r = 1; r <= 24; r++) {
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
@@ -3100,9 +3704,7 @@ export class Sim {
       const team = t as Team;
       const per = this.supplyPerSec(team);
       if (per <= 0) continue;
-      const room = this.storageOf(team) - this.credits[team];
-      const add = Math.min(room, per * dt);
-      if (add <= 0) continue;
+      const add = per * dt;
       this.credits[team] += add;
       this.income[team] += add;
     }
@@ -3125,7 +3727,7 @@ export class Sim {
     }
   }
 
-  /** Infantry in woods are hidden from vehicles until another infantry walks up. */
+  /** Infantry in woods stay hidden until a ground unit walks up beside them. Air does not spot them. */
   private inCover(u: Unit): boolean {
     if (u.armor !== "infantry" || u.loco === "air" || u.loco === "sea") return false;
     const tx = u.x | 0;
@@ -3136,8 +3738,9 @@ export class Sim {
 
   private coverBroken(viewer: Team, u: Unit): boolean {
     for (const o of this.units) {
-      if (!this.allied(o.team, viewer) || o.hp <= 0 || o.armor !== "infantry") continue;
-      if (Math.hypot(o.x - u.x, o.y - u.y) <= 4.2) return true;
+      if (!this.allied(o.team, viewer) || o.hp <= 0 || o.aboard) continue;
+      if (o.loco === "air" || o.loco === "sea") continue;
+      if (Math.hypot(o.x - u.x, o.y - u.y) <= 1.55) return true;
     }
     for (const b of this.buildings) {
       if (!this.allied(b.team, viewer) || b.hp <= 0 || !b.complete) continue;
@@ -3201,7 +3804,9 @@ export class Sim {
 
   private sweep() {
     if (this.units.some((u) => u.hp <= 0)) this.units = this.units.filter((u) => u.hp > 0);
-    if (this.buildings.some((b) => b.hp <= 0)) this.buildings = this.buildings.filter((b) => b.hp > 0);
+    if (this.buildings.some((b) => b.hp <= 0 && b.rubble < 100)) {
+      this.buildings = this.buildings.filter((b) => b.hp > 0 || b.rubble >= 100);
+    }
   }
 
   private checkEnd() {
@@ -3228,6 +3833,25 @@ export class Sim {
       const mine = this.alliance[0] ?? 0;
       const up = [...sides].some((side) => side === mine);
       this.finish(up ? "win" : "lose", up ? "Held the field" : "Construction Yard lost and no MCV remains");
+      return;
+    }
+    if (this.mode === "destroy" && this.difficulty === "hard" && this.time >= HARD_CAP_SECS) {
+      const mineSide = this.alliance[0] ?? 0;
+      const mine = this.matchScore(mineSide);
+      let bestOther = -1;
+      const seen = new Set<number>();
+      for (let t = 0; t <= this.opponents; t++) {
+        if (this.eliminated[t]) continue;
+        const side = this.alliance[t] ?? t;
+        if (side === mineSide || seen.has(side)) continue;
+        seen.add(side);
+        bestOther = Math.max(bestOther, this.matchScore(side));
+      }
+      const won = mine >= bestOther;
+      this.finish(
+        won ? "win" : "lose",
+        won ? "Twenty minutes. Your side leads on score" : "Twenty minutes. The enemy leads on score",
+      );
       return;
     }
     if (this.time >= 720 && this.rate[0] > this.hostileRate() + 8) {
@@ -3353,7 +3977,10 @@ export class Sim {
         if (zone && !this.liveUnit(b)) continue;
         let dx = b.x - a.x;
         let dy = b.y - a.y;
-        const min = a.radius + b.radius;
+        const friendly = a.team === b.team;
+        const bothFoot = a.armor === "infantry" && b.armor === "infantry";
+        const gap = friendly ? (bothFoot ? 0.72 : Math.max(a.radius + b.radius, 0.95)) : a.radius + b.radius;
+        const min = Math.max(gap, a.radius + b.radius);
         let d = Math.hypot(dx, dy);
         if (d < 0.001) {
           dx = ((a.id % 5) - 2) * 0.01;
@@ -3361,7 +3988,7 @@ export class Sim {
           d = Math.hypot(dx, dy);
         }
         if (d >= min) continue;
-        const push = (min - d) * 0.4;
+        const push = (min - d) * (friendly ? 0.7 : 0.4);
         const ux = dx / d;
         const uy = dy / d;
         this.tryNudge(a, -ux * push, -uy * push);
@@ -3444,7 +4071,9 @@ export class Sim {
       open: kind === "gate",
       rubble: 0,
       hit: 0,
+      shown: 0,
       mending: false,
+      collapse: 0,
     };
     const door = this.doorOf(b);
     b.rallyX = door.x;
@@ -3571,9 +4200,18 @@ export class Sim {
   /** Snap an order onto this unit's domain. Sea goals land on water; transports can stop on shore. */
   private domainGoal(u: Unit, x: number, y: number): { x: number; y: number } {
     if (u.loco === "air" || this.passable(u, x, y)) return { x, y };
-    const tile = this.nearestDomainTile(u, x | 0, y | 0);
-    if (!tile) return { x, y };
-    return { x: tile.x + 0.5, y: tile.y + 0.5 };
+    const tile = this.nearestDomainTile(u, x | 0, y | 0, 48);
+    if (tile) return { x: tile.x + 0.5, y: tile.y + 0.5 };
+    // Open water (or a cliff) farther than the ring search: walk the ray back toward the unit.
+    const dist = Math.hypot(u.x - x, u.y - y);
+    const steps = Math.min(96, Math.max(8, Math.ceil(dist) + 1));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const px = x + (u.x - x) * t;
+      const py = y + (u.y - y) * t;
+      if (this.passable(u, px, py)) return { x: px, y: py };
+    }
+    return { x: u.x, y: u.y };
   }
 
   private nearestDomainTile(u: Unit, gx: number, gy: number, radius = 10): { x: number; y: number } | null {
@@ -3793,7 +4431,16 @@ export class Sim {
     const attackHop =
       !ordered && u.order.t === "move" && u.order.attackMove && hypot(x, y, u.order.x, u.order.y) < 2.5;
     const goal = sticky ? { x, y } : this.domainGoal(u, x, y);
-    const path = findPath((tx, ty) => !this.passable(u, tx, ty), u.x | 0, u.y | 0, goal.x | 0, goal.y | 0, this.gw, this.gh);
+    const path = findPath(
+      (tx, ty) => !this.passable(u, tx, ty),
+      u.x | 0,
+      u.y | 0,
+      goal.x | 0,
+      goal.y | 0,
+      this.gw,
+      this.gh,
+      (tx, ty) => this.stepCost(tx, ty),
+    );
     u.repath = 0.4 + (u.id % 5) * 0.07;
     if (!path) {
       u.path = [];
@@ -3807,6 +4454,7 @@ export class Sim {
         u.order = { t: "idle" };
         if (u.team === 0) this.say("Blocked", "blocked", 1.4);
       }
+      // Attack orders are never cancelled because the building's own tiles are blocked.
       return;
     }
     if (path.length && path[0].x === (u.x | 0) && path[0].y === (u.y | 0)) path.shift();
@@ -3834,14 +4482,19 @@ export class Sim {
     return false;
   }
 
-  private approachTile(b: Building, fromX: number, fromY: number): { x: number; y: number } | null {
+  /** Nearest open tile within weapon range of the footprint edge. The building's own tiles are never a block. */
+  private approachTile(b: Building, u: Unit, range = 4.4): { x: number; y: number } | null {
     let best: { x: number; y: number } | null = null;
     let bestD = Infinity;
-    for (let y = b.ty - 1; y <= b.ty + b.h; y++) {
-      for (let x = b.tx - 1; x <= b.tx + b.w; x++) {
-        const inside = x >= b.tx && x < b.tx + b.w && y >= b.ty && y < b.ty + b.h;
-        if (inside || this.blockedTile(x, y)) continue;
-        const d = hypot(fromX, fromY, x + 0.5, y + 0.5);
+    const pad = Math.max(1, Math.ceil(range));
+    for (let y = b.ty - pad; y <= b.ty + b.h + pad - 1; y++) {
+      for (let x = b.tx - pad; x <= b.tx + b.w + pad - 1; x++) {
+        if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
+        if (x >= b.tx && x < b.tx + b.w && y >= b.ty && y < b.ty + b.h) continue;
+        if (!this.passable(u, x + 0.5, y + 0.5)) continue;
+        const edge = distPointToRect(x + 0.5, y + 0.5, b);
+        if (edge > range + 0.05) continue;
+        const d = hypot(u.x, u.y, x + 0.5, y + 0.5);
         if (d < bestD) {
           bestD = d;
           best = { x, y };
@@ -4267,16 +4920,17 @@ export class Sim {
   }
 
   private weaponSfx(u: Unit) {
-    if (u.shot === "rocket") this.blip("rocket", 0.16);
-    else if (u.shot === "shell") this.blip("cannon", 0.2);
-    else this.blip("rifle", 0.08);
+    if (u.kind === "artillery" || u.kind === "bomber") this.blip("cannon", 0.22, u.x, u.y);
+    else if (u.shot === "rocket") this.blip("rocket", 0.16, u.x, u.y);
+    else if (u.shot === "shell") this.blip("cannon", 0.18, u.x, u.y);
+    else this.blip("rifle", 0.07, u.x, u.y);
   }
 
-  private blip(name: SfxName, gap = 0.12) {
+  private blip(name: SfxName, gap = 0.12, x?: number, y?: number) {
     const until = this.sfxAt.get(name) ?? 0;
     if (this.time < until) return;
     this.sfxAt.set(name, this.time + gap);
-    this.cue({ t: "sfx", id: name });
+    this.cue({ t: "sfx", id: name, x, y });
   }
 
   /** Construction hammer and brownout hum follow the listener's base. Audio only. */
@@ -4479,9 +5133,20 @@ export class Sim {
     return best;
   }
 
-  /** Rally snapped onto ground this unit can stand on, so the exit does not stay clogged. */
+  /** Rally snapped onto open ground, with a loose slot so trainees do not stack. */
   private rallyStand(u: Unit, x: number, y: number): { x: number; y: number } {
-    const goal = this.domainGoal(u, x, y);
+    let n = 0;
+    for (const o of this.units) {
+      if (o.id === u.id || o.hp <= 0 || o.team !== u.team || o.aboard) continue;
+      const gx = o.order.t === "move" ? o.order.x : o.x;
+      const gy = o.order.t === "move" ? o.order.y : o.y;
+      if (Math.hypot(gx - x, gy - y) < 3.6 || Math.hypot(o.x - x, o.y - y) < 3.6) n++;
+    }
+    const ang = n * 2.399963;
+    const rad = n === 0 ? 0 : 0.82 + 0.26 * Math.sqrt(n);
+    const sx = x + Math.cos(ang) * rad;
+    const sy = y + Math.sin(ang) * rad;
+    const goal = this.domainGoal(u, sx, sy);
     if (u.loco === "air" || u.loco === "sea") return goal;
     if (this.footOpen(goal.x, goal.y)) return goal;
     const gx = goal.x | 0;
@@ -4495,7 +5160,7 @@ export class Sim {
         }
       }
     }
-    return goal;
+    return this.domainGoal(u, x, y);
   }
 }
 

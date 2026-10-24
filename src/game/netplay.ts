@@ -1202,14 +1202,15 @@ export class NetPlay {
 
   private makeSim(go: GoPayload): Sim {
     const doc = go.chart ? readShare(go.chart) : null;
+    const diff = go.rules.difficulty === "easy" || go.rules.difficulty === "hard" ? go.rules.difficulty : "normal";
     return new Sim({
       mapId: doc ? (doc.terrain.some((t) => t === TILE_DEEP) ? "coast" : "dry") : go.rules.mapId,
       faction: go.rules.player,
       enemy: go.rules.enemy,
       mode: "destroy",
       credits: go.rules.credits,
-      ai: "raider",
-      difficulty: go.rules.difficulty === "easy" || go.rules.difficulty === "hard" ? go.rules.difficulty : "normal",
+      ai: diff === "hard" ? "raider" : "builder",
+      difficulty: diff,
       fog: go.rules.fog,
       crates: true,
       mapSize: doc ? lobbySize(doc) : go.rules.size,

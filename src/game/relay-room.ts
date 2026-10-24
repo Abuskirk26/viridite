@@ -359,7 +359,7 @@ export class RelayRoom {
       }
       if (msg.fill === "ai") {
         target.fill = "ai";
-        target.name = "AI raider";
+        target.name = this.rules.difficulty === "hard" ? "AI raider" : "AI builder";
         target.clientId = null;
         target.connected = false;
         target.ready = true;
@@ -524,7 +524,7 @@ export class RelayRoom {
       if (s.fill !== "human" || s.connected || !s.leftAt) continue;
       if (now - s.leftAt < REJOIN_MS) continue;
       s.fill = "ai";
-      s.name = "AI raider";
+      s.name = this.rules.difficulty === "hard" ? "AI raider" : "AI builder";
       s.ready = true;
       s.rtt = 0;
       s.loaded = true;

@@ -15,6 +15,7 @@ import {
   TILE_CRYSTAL,
   TILE_DEEP,
   TILE_FORD,
+  TILE_HIGH,
   TILE_RAMP,
   TILE_ROAD,
   TILE_ROCK,
@@ -919,6 +920,7 @@ const WALK = new Set([
   TILE_CRYSTAL,
   TILE_SPENT,
   TILE_STUMP,
+  TILE_HIGH,
 ]);
 
 function flood(doc: EditorDoc, sx: number, sy: number): { tiles: number; crystal: boolean; shore: boolean } {

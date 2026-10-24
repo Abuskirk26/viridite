@@ -18,6 +18,7 @@ import {
   START_LABEL,
   TEAM_LABEL,
   aiCount,
+  applyDifficulty,
   chooseOpponents,
   dockRequired,
   factionCanDock,
@@ -25,6 +26,8 @@ import {
   lobbyBlock,
   placeGridOn,
   setPlaceGrid,
+  withNewBotSkill,
+  normalBotDefaults,
   type MyMapRow,
   type SkirmishSetup,
 } from "@/game/lobby";
@@ -47,8 +50,8 @@ const CONTROLS: { how: string; what: string }[] = [
   { how: "Tap", what: "Select a unit or building. Tap empty ground to deselect." },
   { how: "Drag", what: "Box-select your units." },
   { how: "Order", what: "With units selected, tap ground to move. Tap an enemy to attack." },
-  { how: "Double-tap", what: "Attack-move. They shoot anything they meet." },
-  { how: "Minimap", what: "Top right. Larger in landscape. Tap or drag to jump the camera." },
+  { how: "Double-tap", what: "Attack-move. Or tap A-Move on the pad, then the map or the minimap." },
+  { how: "Minimap", what: "Below the top bar. Red diamonds are enemy starts, even in the fog. Tap or drag to jump. Tap while A-Move is on to send troops." },
   { how: "Build", what: "Landscape: right-hand column. Portrait: bottom drawer. Ghost is green if legal, red if blocked." },
   { how: "Orders", what: "Stop, Guard, Attack-Move, and Scatter sit on the bottom bar." },
   { how: "Pause", what: "Restart uses this same lobby setup." },
@@ -60,6 +63,7 @@ export function SkirmishLobby({
   hasSave,
   onChange,
   onStart,
+  onPractice,
   onRandomize,
   onContinue,
   onFriends,
@@ -71,6 +75,7 @@ export function SkirmishLobby({
   hasSave: boolean;
   onChange: (partial: Partial<SkirmishSetup>) => void;
   onStart: () => void;
+  onPractice: () => void;
   onRandomize: () => void;
   onContinue: () => void;
   onFriends: () => void;
@@ -173,7 +178,7 @@ export function SkirmishLobby({
                   testId={`opponents-${n}`}
                   active={setup.teams === "tvt" ? n === 2 : setup.opponents === n}
                   label={`${n} ${n === 1 ? "opponent" : "opponents"}`}
-                  onClick={() => onChange(chooseOpponents(setup, n))}
+                  onClick={() => onChange({ ...chooseOpponents(setup, n), ...withNewBotSkill(setup, n) })}
                 >
                   {n}
                 </Segment>
@@ -207,7 +212,7 @@ export function SkirmishLobby({
                   testId="teams-tvt"
                   active={setup.teams === "tvt"}
                   label="Co-op. You and East against North and South."
-                  onClick={() => onChange(chooseOpponents({ ...setup, teams: "tvt" }, 2))}
+                  onClick={() => onChange({ ...chooseOpponents({ ...setup, teams: "tvt" }, 2), ...withNewBotSkill(setup, 2) })}
                 >
                   Co-op
                 </Segment>
@@ -233,13 +238,15 @@ export function SkirmishLobby({
                   testId={`diff-${id}`}
                   active={setup.difficulty === id}
                   label={`${DIFF_LABEL[id]} difficulty`}
-                  onClick={() => onChange({ difficulty: id })}
+                  onClick={() => onChange(applyDifficulty(setup, id))}
                 >
                   {DIFF_LABEL[id]}
                 </Segment>
               ))}
             </SegmentRow>
-            <p className="text-xs text-muted">Bots start easy and climb to this. Hard is the top of the climb.</p>
+            <p className="text-xs text-muted">
+              Easy scouts until 6:00 and attacks after 8:00. Normal harasses at 4:00 and pushes at 6:30. Hard attacks at 3:00. Those times are the in-game clock.
+            </p>
           </div>
 
           <div className="flex flex-col gap-2">
@@ -251,7 +258,7 @@ export function SkirmishLobby({
                   testId={`you-${id}`}
                   active={setup.player === id}
                   illegal={dockRequired(setup.mapId) && !factionCanDock(id)}
-                  onClick={() => onChange({ player: id })}
+                  onClick={() => onChange({ player: id, ...normalBotDefaults() })}
                 />
               ))}
             </FactionRow>
@@ -263,7 +270,7 @@ export function SkirmishLobby({
                   testId={`enemy-${id}`}
                   active={setup.enemy === id}
                   illegal={dockRequired(setup.mapId) && !factionCanDock(id)}
-                  onClick={() => onChange({ enemy: id, bots: [id, setup.bots[1], setup.bots[2]] })}
+                  onClick={() => onChange({ enemy: id, bots: [id, setup.bots[1], setup.bots[2]], ...normalBotDefaults() })}
                 />
               ))}
             </FactionRow>
@@ -288,7 +295,7 @@ export function SkirmishLobby({
                   testId="map-fourisles"
                   active={setup.customId === "tpl:fourisles"}
                   label="Four Isles. Four islands, beaches, and viridite."
-                  onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", opponents: 3, teams: "ffa" })}
+                  onClick={() => onChange({ customId: "tpl:fourisles", mapId: "coast", size: "large", opponents: 3, teams: "ffa", ...withNewBotSkill(setup, 3), ...normalBotDefaults() })}
                 >
                   Isles
                 </Chip>
@@ -301,8 +308,8 @@ export function SkirmishLobby({
                     onClick={() =>
                       onChange(
                         m.id === "michigan"
-                          ? { mapId: m.id, customId: "", size: "continent", opponents: 3, teams: "ffa" }
-                          : { mapId: m.id, customId: "" },
+                          ? { mapId: m.id, customId: "", size: "continent", opponents: 3, teams: "ffa", ...withNewBotSkill(setup, 3), ...normalBotDefaults() }
+                          : { mapId: m.id, customId: "", ...normalBotDefaults() },
                       )
                     }
                   >
@@ -327,6 +334,14 @@ export function SkirmishLobby({
                   >
                     <Dices className="size-5" />
                     Randomize
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="practice"
+                    onClick={onPractice}
+                    className="bevel-btn flex h-14 items-center justify-center gap-2 font-display text-base uppercase tracking-widest"
+                  >
+                    Practice
                   </button>
                   <button
                     type="button"
@@ -369,7 +384,7 @@ export function SkirmishLobby({
                   {mine
                     .filter((row) => row.group === "featured")
                     .map((row) => (
-                      <FeaturedRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, row)} onRemix={() => onRemix(row.id)} />
+                      <FeaturedRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, setup, row)} onRemix={() => onRemix(row.id)} />
                     ))}
                 </div>
               </div>
@@ -378,7 +393,7 @@ export function SkirmishLobby({
                 {mine
                   .filter((row) => row.group === "classic")
                   .map((row) => (
-                    <MapRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, row)} />
+                    <MapRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, setup, row)} />
                   ))}
                 {mine.some((row) => row.group === "saved") && (
                   <p className="mt-2 font-display text-[10px] uppercase tracking-wide text-brass">On this device</p>
@@ -386,7 +401,7 @@ export function SkirmishLobby({
                 {mine
                   .filter((row) => row.group === "saved")
                   .map((row) => (
-                    <MapRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, row)} />
+                    <MapRow key={row.id} row={row} active={setup.customId === row.id} onPick={() => pickMap(onChange, setup, row)} />
                   ))}
               </Fold>
               <button type="button" data-testid="open-editor" className="bevel-btn mt-2 h-12 w-full font-display text-sm uppercase" onClick={onEdit}>
@@ -409,6 +424,9 @@ export function SkirmishLobby({
                 </Chip>
               ))}
             </Row>
+            <p className="text-xs text-pretty text-muted">
+              Easy and Normal start as Builder. Raider is the Hard personality. You can still tap Raider yourself on Easy or Normal. The attack clock does not move.
+            </p>
             <SegmentRow label="AI stance" testId="lobby-stance-mode">
               <Segment
                 testId="stance-global"
@@ -694,7 +712,8 @@ function EconomyTable() {
   );
 }
 
-function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, row: MyMapRow) {
+function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, setup: SkirmishSetup, row: MyMapRow) {
+  const next = (row.group === "featured" && row.starts >= 4 ? 3 : row.group === "featured" && row.starts < 4 ? 1 : setup.opponents) as 1 | 2 | 3;
   onChange({
     customId: row.id,
     mapId: row.deep ? "coast" : "dry",
@@ -702,8 +721,10 @@ function pickMap(onChange: (partial: Partial<SkirmishSetup>) => void, row: MyMap
     ...(row.credits != null ? { credits: row.credits } : {}),
     ...(row.fog != null ? { fog: row.fog } : {}),
     ...(row.walls != null ? { walls: row.walls } : {}),
-    ...(row.group === "featured" && row.starts >= 4 ? { opponents: 3 as const, teams: "ffa" as const } : {}),
+    ...(row.group === "featured" && row.starts >= 4 ? { opponents: 3 as const, teams: "ffa" as const, ...withNewBotSkill(setup, 3) } : {}),
     ...(row.group === "featured" && row.starts < 4 ? { opponents: 1 as const, teams: "ffa" as const } : {}),
+    ...(row.group !== "featured" ? withNewBotSkill(setup, next) : {}),
+    ...normalBotDefaults(),
   });
 }
 

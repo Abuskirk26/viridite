@@ -9,7 +9,8 @@
  *   - Tap an enemy with units selected: attack.
  *   - Double-tap empty ground: attack-move.
  *   - Drag on the ground: box-select, unless a phone is panning. On touch,
- *     one finger pans the field. Box-select is the Select button (selectMode).
+ *     one finger pans the field. A long-press then a drag draws a box even
+ *     when Select is off. The Select button stays on until it is tapped again.
  *     A mouse drag still draws the rectangle.
  *   - While placing a structure, the ghost follows the pointer and snaps to the
  *     grid. A mouse click drops it (hold Shift to place another). Right-click
@@ -17,18 +18,19 @@
  *     beside it commits. Pinch zooms and does not cancel the ghost.
  *   - While placing a fence, drag along the ground. The ghost follows the
  *     finger. Lift to lay the run. Pinch zooms without dropping the tool.
- *   - Tap or drag the minimap (top right): jump the camera.
+ *   - Tap or drag the minimap: jump the camera. A tap while Attack-move is armed
+ *     sends the selected units there. Double-tap jumps to base.
  *
  * Two fingers
  *   - Drag: pan. Pinch: zoom toward the fingers. Cancels a box-select in progress.
  *
  * Mouse extras (desktop preview only; touch is unchanged)
- *   - Wheel zooms toward the cursor. +/- on the battle screen does the same.
+ *   - Wheel zooms toward the cursor. The Zoom buttons do the same around the view center.
  *   - Right-drag or middle-drag pans.
  */
 
 import { MAP_H, MAP_W } from "./data.ts";
-import { clampCamera, minimapHit, zoomAbout, viewPitch, type Camera, type View } from "./view.ts";
+import { clampCamera, minimapHit, seekZoom, viewPitch, type Camera, type View } from "./view.ts";
 
 export interface PointerDraft {
   box: { x0: number; y0: number; x1: number; y1: number } | null;
@@ -36,6 +38,8 @@ export interface PointerDraft {
   hoverY: number;
   hovering: boolean;
   wallPts: { x: number; y: number }[];
+  /** True after the place finger has moved. The ghost lifts only while this is set. */
+  lift: boolean;
 }
 
 export interface InputHooks {
@@ -51,10 +55,14 @@ export interface InputHooks {
   onTap: (sx: number, sy: number, isDouble: boolean, shift?: boolean) => void;
   onBox: (box: { x0: number; y0: number; x1: number; y1: number }) => void;
   onMinimap: (wx: number, wy: number) => void;
+  /** A short tap on the minimap. Attack-move uses this; drags stay camera-only. */
+  onMinimapTap?: (wx: number, wy: number) => void;
   /** Double-tap on the minimap jumps the camera to the player's base. */
   onJumpBase?: () => void;
   /** Touch pans with one finger unless this is true. Mouse drag still boxes. */
   selectMode?: () => boolean;
+  /** Attack-target mode. A drag pans. It never starts a selection box. */
+  suppressBox?: () => boolean;
   placing?: () => boolean;
   /** Fence or structure ghost. */
   placingWall?: () => boolean;
@@ -86,8 +94,11 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   let prevDist = 0;
   let prevMidX = 0;
   let prevMidY = 0;
+  let touchPinch = false;
   let suppressUntil = 0;
   let tapTimer: ReturnType<typeof setTimeout> | null = null;
+  let holdTimer: ReturnType<typeof setTimeout> | null = null;
+  let armedBox = false;
   let lastTap = { t: 0, x: 0, y: 0, pending: false };
 
   const local = (e: PointerEvent) => {
@@ -101,6 +112,11 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     lastTap.pending = false;
   };
 
+  const clearHold = () => {
+    if (holdTimer) clearTimeout(holdTimer);
+    holdTimer = null;
+  };
+
   const grid = () => hooks.grid?.() ?? { w: MAP_W, h: MAP_H };
 
   const pinchPair = (): [Pt, Pt] | null => {
@@ -112,23 +128,57 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     return [a, b];
   };
 
+  const beginPinch = (dist: number, midX: number, midY: number) => {
+    clearTap();
+    hooks.draft.box = null;
+    mode = "pinch";
+    prevDist = dist || 1;
+    prevMidX = midX;
+    prevMidY = midY;
+    hooks.camera.hold = true;
+    hooks.camera.vx = 0;
+    hooks.camera.vy = 0;
+  };
+
+  const applyPinch = (dist: number, midX: number, midY: number) => {
+    const cam = hooks.camera;
+    const view = hooks.getView();
+    const g = grid();
+    const wz = !!hooks.warzone?.();
+    cam.x -= (midX - prevMidX) / cam.zoom;
+    cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
+    seekZoom(cam, midX, midY, view, dist / (prevDist || 1), g.w, g.h, wz);
+    hooks.onZoom?.(cam.aim ?? cam.zoom);
+    prevDist = dist || 1;
+    prevMidX = midX;
+    prevMidY = midY;
+  };
+
+  const touchPoint = (t: Touch) => {
+    const r = el.getBoundingClientRect();
+    return { x: t.clientX - r.left, y: t.clientY - r.top };
+  };
+
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === "mouse" && e.button === 2) e.preventDefault();
     el.setPointerCapture(e.pointerId);
     const p = local(e);
     pts.set(e.pointerId, { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, px: p.x, py: p.y, button: e.button });
     hooks.onPointerKind?.(e.pointerType !== "mouse");
+    hooks.camera.hold = true;
+    hooks.camera.vx = 0;
+    hooks.camera.vy = 0;
+    hooks.draft.lift = false;
 
     if (pts.size >= 2) {
-      clearTap();
-      hooks.draft.box = null;
-      mode = "pinch";
       const pair = pinchPair();
       if (pair) {
-        prevDist = Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) || 1;
-        prevMidX = (pair[0].x + pair[1].x) / 2;
-        prevMidY = (pair[0].y + pair[1].y) / 2;
-      }
+        beginPinch(
+          Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) || 1,
+          (pair[0].x + pair[1].x) / 2,
+          (pair[0].y + pair[1].y) / 2,
+        );
+      } else mode = "pinch";
       return;
     }
 
@@ -177,6 +227,14 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       return;
     }
     mode = "pending";
+    armedBox = !!hooks.selectMode?.() && !hooks.suppressBox?.();
+    clearHold();
+    if (!armedBox && !hooks.suppressBox?.() && e.pointerType !== "mouse") {
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        if (mode === "pending") armedBox = true;
+      }, 320);
+    }
   };
 
   const onMove = (e: PointerEvent) => {
@@ -195,22 +253,13 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     cur.y = p.y;
 
     if (mode === "pinch") {
+      if (touchPinch) return;
       const pair = pinchPair();
       if (!pair) return;
       const dist = Math.hypot(pair[0].x - pair[1].x, pair[0].y - pair[1].y) || 1;
       const midX = (pair[0].x + pair[1].x) / 2;
       const midY = (pair[0].y + pair[1].y) / 2;
-      const cam = hooks.camera;
-      const view = hooks.getView();
-      const g = grid();
-      const wz = !!hooks.warzone?.();
-      cam.x -= (midX - prevMidX) / cam.zoom;
-      cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
-      zoomAbout(cam, midX, midY, view, cam.zoom * (dist / prevDist), g.w, g.h, wz);
-      hooks.onZoom?.(cam.zoom);
-      prevDist = dist;
-      prevMidX = midX;
-      prevMidY = midY;
+      applyPinch(dist, midX, midY);
       return;
     }
 
@@ -223,8 +272,9 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       const dyw = dy / (cam.zoom * viewPitch());
       cam.x -= dxw;
       cam.y -= dyw;
-      cam.vx = -dxw / 0.016;
-      cam.vy = -dyw / 0.016;
+      cam.hold = true;
+      cam.vx = -dxw / 0.18;
+      cam.vy = -dyw / 0.18;
       clampCamera(cam, g.w, g.h, view, wz);
       return;
     }
@@ -239,10 +289,18 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       if (!last || Math.hypot(p.x - last.x, p.y - last.y) > 6) run.push({ x: p.x, y: p.y });
       return;
     }
-    if (mode === "place") return;
+    if (mode === "place") {
+      if (Math.hypot(p.x - cur.sx, p.y - cur.sy) > 8) hooks.draft.lift = true;
+      return;
+    }
     if (mode === "pending") {
-      if (Math.hypot(p.x - cur.sx, p.y - cur.sy) > 12) {
-        const touchPan = e.pointerType !== "mouse" && !hooks.selectMode?.();
+      const moved = Math.hypot(p.x - cur.sx, p.y - cur.sy);
+      // Attack-target mode: a short slide is still a tap. A real drag pans, and never boxes.
+      const slop = hooks.suppressBox?.() ? 36 : 12;
+      if (moved > slop) {
+        clearHold();
+        const strike = !!hooks.suppressBox?.();
+        const touchPan = strike || (e.pointerType !== "mouse" && !hooks.selectMode?.() && !armedBox);
         if (touchPan) {
           mode = "pan";
           const cam = hooks.camera;
@@ -253,10 +311,11 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
           const dyw = (p.y - cur.py) / (cam.zoom * viewPitch());
           cam.x -= dxw;
           cam.y -= dyw;
-          cam.vx = -dxw / 0.016;
-          cam.vy = -dyw / 0.016;
+          cam.hold = true;
+          cam.vx = -dxw / 0.18;
+          cam.vy = -dyw / 0.18;
           clampCamera(cam, g.w, g.h, view, wz);
-        } else {
+        } else if (!strike) {
           mode = "box";
           hooks.draft.box = { x0: cur.sx, y0: cur.sy, x1: p.x, y1: p.y };
         }
@@ -278,6 +337,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     pts.delete(e.pointerId);
     if (!cur) return;
     const p = local(e);
+    try {
 
     if (mode === "pinch") {
       if (pts.size === 0) {
@@ -292,6 +352,16 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       return;
     }
     if (mode === "pan" || mode === "minimap") {
+      const slide = Math.hypot(p.x - cur.sx, p.y - cur.sy);
+      if (mode === "minimap" && slide < 12) {
+        const hit = minimapHit(p.x, p.y, hooks.getView(), grid().w, grid().h, !!hooks.warzone?.());
+        if (hit) hooks.onMinimapTap?.(hit.x, hit.y);
+      } else if (mode === "pan" && hooks.suppressBox?.() && slide < 36) {
+        mode = "none";
+        fireTap(p.x, p.y, false);
+        if (pts.size === 0) hooks.camera.hold = false;
+        return;
+      }
       if (pts.size === 0) mode = "none";
       return;
     }
@@ -305,6 +375,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
     if (mode === "place") {
       mode = "none";
+      hooks.draft.lift = false;
       if (performance.now() < suppressUntil) return;
       if (e.pointerType !== "mouse") return;
       fireTap(p.x, p.y, false, e.shiftKey);
@@ -314,12 +385,17 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       const box = hooks.draft.box;
       hooks.draft.box = null;
       mode = "none";
-      if (box && Math.hypot(box.x1 - box.x0, box.y1 - box.y0) > 14) hooks.onBox(box);
+      const span = box ? Math.hypot(box.x1 - box.x0, box.y1 - box.y0) : 0;
+      // A shaky finger is a tap. Attack mode never reaches here (it pans instead).
+      if (box && span > 20 && !hooks.suppressBox?.()) hooks.onBox(box);
+      else fireTap(p.x, p.y, false);
       return;
     }
 
     mode = "none";
-    if (Math.hypot(p.x - cur.sx, p.y - cur.sy) > 12) return;
+    clearHold();
+    const slop = hooks.suppressBox?.() ? 36 : 12;
+    if (Math.hypot(p.x - cur.sx, p.y - cur.sy) > slop) return;
     const now = performance.now();
     if (lastTap.pending && now - lastTap.t < 300 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 32) {
       clearTap();
@@ -339,6 +415,9 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       tapTimer = null;
       fireTap(lastTap.x, lastTap.y, false);
     }, 230);
+    } finally {
+      if (pts.size === 0) hooks.camera.hold = false;
+    }
   };
 
   const onWheel = (e: WheelEvent) => {
@@ -349,15 +428,58 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     const g = grid();
     const factor = Math.exp(-e.deltaY * 0.0016);
     const wz = !!hooks.warzone?.();
-    zoomAbout(cam, p.x, p.y, view, cam.zoom * factor, g.w, g.h, wz);
-    hooks.onZoom?.(cam.zoom);
+    seekZoom(cam, p.x, p.y, view, factor, g.w, g.h, wz);
+    hooks.onZoom?.(cam.aim ?? cam.zoom);
   };
 
   const onCancel = (e: PointerEvent) => {
     pts.delete(e.pointerId);
     hooks.draft.box = null;
     hooks.draft.wallPts = [];
+    hooks.draft.lift = false;
+    clearHold();
     if (pts.size === 0) mode = "none";
+  };
+
+  const onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length < 2) return;
+    e.preventDefault();
+    const a = touchPoint(e.touches[0]!);
+    const b = touchPoint(e.touches[1]!);
+    touchPinch = true;
+    beginPinch(Math.hypot(a.x - b.x, a.y - b.y) || 1, (a.x + b.x) / 2, (a.y + b.y) / 2);
+  };
+  const onTouchMove = (e: TouchEvent) => {
+    if (e.touches.length < 2) return;
+    e.preventDefault();
+    const a = touchPoint(e.touches[0]!);
+    const b = touchPoint(e.touches[1]!);
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    touchPinch = true;
+    if (mode !== "pinch") {
+      beginPinch(dist, midX, midY);
+      return;
+    }
+    applyPinch(dist, midX, midY);
+  };
+  const onTouchEnd = (e: TouchEvent) => {
+    if (e.touches.length >= 2) {
+      const a = touchPoint(e.touches[0]!);
+      const b = touchPoint(e.touches[1]!);
+      beginPinch(Math.hypot(a.x - b.x, a.y - b.y) || 1, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      return;
+    }
+    if (!touchPinch) return;
+    touchPinch = false;
+    if (mode === "pinch") {
+      mode = "none";
+      suppressUntil = performance.now() + 280;
+      clearTap();
+      hooks.draft.box = null;
+    }
+    if (e.touches.length === 0) hooks.camera.hold = false;
   };
 
   el.addEventListener("pointerdown", onDown);
@@ -365,14 +487,23 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   el.addEventListener("pointerup", onUp);
   el.addEventListener("pointercancel", onCancel);
   el.addEventListener("wheel", onWheel, { passive: false });
+  el.addEventListener("touchstart", onTouchStart, { passive: false });
+  el.addEventListener("touchmove", onTouchMove, { passive: false });
+  el.addEventListener("touchend", onTouchEnd);
+  el.addEventListener("touchcancel", onTouchEnd);
   el.addEventListener("contextmenu", (e) => e.preventDefault());
 
   return () => {
     clearTap();
+    clearHold();
     el.removeEventListener("pointerdown", onDown);
     el.removeEventListener("pointermove", onMove);
     el.removeEventListener("pointerup", onUp);
     el.removeEventListener("pointercancel", onCancel);
     el.removeEventListener("wheel", onWheel);
+    el.removeEventListener("touchstart", onTouchStart);
+    el.removeEventListener("touchmove", onTouchMove);
+    el.removeEventListener("touchend", onTouchEnd);
+    el.removeEventListener("touchcancel", onTouchEnd);
   };
 }

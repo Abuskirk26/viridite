@@ -7,7 +7,7 @@
 
 export interface Particle {
   alive: boolean;
-  kind: "tracer" | "trail" | "spark" | "dirt" | "smoke" | "debris" | "scorch" | "fall" | "wreck";
+  kind: "tracer" | "trail" | "spark" | "dirt" | "smoke" | "debris" | "scorch" | "fall" | "wreck" | "ruin";
   x: number;
   y: number;
   vx: number;
@@ -125,7 +125,7 @@ export function spawnScorch(x: number, y: number, r = 0.45) {
   p.color = "#1a1410";
 }
 
-/** Vehicle wreck that smokes and fades (~20s). */
+/** Vehicle wreck that smokes, burns, and fades (~20s). */
 export function spawnWreck(x: number, y: number, team: number) {
   const p = alloc();
   if (!p) return;
@@ -133,12 +133,12 @@ export function spawnWreck(x: number, y: number, team: number) {
   p.x = x; p.y = y;
   p.vx = 0; p.vy = 0;
   p.ttl = 20; p.max = 20;
-  p.size = 0.55;
-  p.color = team === 0 ? "#3a4248" : "#4a3830";
+  p.size = 0.72;
+  p.color = team === 0 ? "#4a555c" : "#6a4034";
   p.team = team;
   p.angle = Math.random() * Math.PI;
-  // Smoke puffs
-  for (let i = 0; i < 3; i++) spawnSmoke(x, y - 0.2, 1.8);
+  spawnSmoke(x, y - 0.15, 2.2);
+  spawnSmoke(x + 0.12, y - 0.05, 1.6);
 }
 
 function spawnSmoke(x: number, y: number, life: number) {
@@ -153,18 +153,38 @@ function spawnSmoke(x: number, y: number, life: number) {
   p.color = "rgba(40,40,40,0.6)";
 }
 
-/** Infantry fall (simple rotate + fade). */
+/** Infantry fall, then a small body that stays and fades. */
 export function spawnFall(x: number, y: number, team: number) {
   const p = alloc();
   if (!p) return;
   p.kind = "fall";
   p.x = x; p.y = y;
   p.vx = 0; p.vy = 0;
-  p.ttl = 0.8; p.max = 0.8;
+  p.ttl = 10; p.max = 10;
   p.size = 0.28;
-  p.color = team === 0 ? "#6aa4d0" : "#e07a55";
+  p.color = team === 0 ? "#8fb7d4" : "#e08a62";
   p.team = team;
   p.angle = 0;
+}
+
+/** Building collapse. The pile stays about twenty seconds, then fades. */
+export function spawnRuin(x: number, y: number, w: number, h: number) {
+  const p = alloc();
+  if (p) {
+    p.kind = "ruin";
+    p.x = x;
+    p.y = y;
+    p.vx = 0;
+    p.vy = 0;
+    p.ttl = 20;
+    p.max = 20;
+    p.size = Math.max(0.7, Math.max(w, h) * 0.42);
+    p.color = "#4a3b30";
+    p.angle = 0.15;
+  }
+  spawnScorch(x, y, Math.max(w, h) * 0.55);
+  spawnBuildingDebris(x, y, 10);
+  for (let i = 0; i < 4; i++) spawnSmoke(x + (i - 1.5) * 0.25, y - 0.1, 2.4);
 }
 
 /** Building debris + fire. */
@@ -206,8 +226,11 @@ export function stepParticles(dt: number) {
     p.x += p.vx * dt;
     p.y += p.vy * dt;
     if (p.kind === "smoke") p.vy -= 0.15 * dt;
-    if (p.kind === "debris" || p.kind === "spark") p.vy += 1.8 * dt; // gravity
-    if (p.kind === "fall") p.angle = (p.angle ?? 0) + dt * 4;
+    if (p.kind === "debris" || p.kind === "spark") p.vy += 1.8 * dt;
+    if (p.kind === "wreck") {
+      const before = p.ttl + dt;
+      if (p.ttl > 1 && Math.floor(before / 2) !== Math.floor(p.ttl / 2)) spawnSmoke(p.x, p.y - 0.18, 1.5);
+    }
   }
 }
 
@@ -255,22 +278,64 @@ export function drawParticles(ctx: CanvasRenderingContext2D, time: number) {
       ctx.ellipse(p.x, p.y, p.size, p.size * 0.55, 0, 0, Math.PI * 2);
       ctx.fill();
     } else if (p.kind === "wreck") {
+      const fade = k < 0.2 ? k / 0.2 : 1;
       ctx.save();
       ctx.translate(p.x, p.y);
       ctx.rotate(p.angle ?? 0);
+      ctx.globalAlpha *= fade;
+      ctx.fillStyle = "#1a1612";
+      ctx.fillRect(-0.5, -0.24, 1, 0.48);
       ctx.fillStyle = p.color;
-      ctx.fillRect(-0.28, -0.16, 0.56, 0.32);
-      ctx.fillStyle = "#1a1410";
-      ctx.fillRect(-0.12, -0.08, 0.24, 0.16);
+      ctx.fillRect(-0.4, -0.16, 0.72, 0.32);
+      ctx.fillStyle = "#14110e";
+      ctx.fillRect(0.05, -0.12, 0.28, 0.22);
+      ctx.fillStyle = "#2a221c";
+      ctx.fillRect(-0.46, -0.2, 0.1, 0.4);
+      ctx.fillRect(0.36, -0.2, 0.1, 0.4);
       ctx.restore();
-      // Occasional smoke
-      if (Math.random() < 0.04) spawnSmoke(p.x, p.y - 0.15, 1.2);
-    } else if (p.kind === "fall") {
+      const flick = 0.65 + 0.35 * Math.sin(time * 12 + p.x * 5);
+      ctx.globalAlpha = fade * flick * 0.9;
+      ctx.fillStyle = "#ff5a18";
+      ctx.beginPath();
+      ctx.arc(p.x + 0.06, p.y - 0.14, 0.11 * flick, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffe08a";
+      ctx.globalAlpha = fade * 0.85;
+      ctx.beginPath();
+      ctx.arc(p.x + 0.06, p.y - 0.18, 0.045, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (p.kind === "ruin") {
       ctx.save();
       ctx.translate(p.x, p.y);
-      ctx.rotate(p.angle ?? 0);
+      ctx.globalAlpha *= 0.9;
+      ctx.fillStyle = "#2a211c";
+      ctx.beginPath();
+      ctx.ellipse(0, 0.08, p.size, p.size * 0.42, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#5c4638";
+      ctx.fillRect(-p.size * 0.55, -p.size * 0.15, p.size * 0.38, p.size * 0.22);
+      ctx.fillStyle = "#3d3028";
+      ctx.fillRect(-p.size * 0.05, -p.size * 0.28, p.size * 0.46, p.size * 0.28);
+      ctx.fillStyle = "#7a5a42";
+      ctx.fillRect(p.size * 0.18, -0.02, p.size * 0.28, p.size * 0.16);
+      ctx.restore();
+      if (Math.random() < 0.05) spawnSmoke(p.x, p.y - 0.2, 1.4);
+    } else if (p.kind === "fall") {
+      const age = p.max - p.ttl;
+      const drop = Math.min(1, age / 0.45);
+      const fade = p.ttl < 1.6 ? p.ttl / 1.6 : 1;
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(drop * 1.2);
+      ctx.globalAlpha *= fade;
       ctx.fillStyle = p.color;
-      ctx.fillRect(-0.12, -0.08, 0.24, 0.16);
+      ctx.fillRect(-0.045, -0.22 + drop * 0.16, 0.09, 0.26 - drop * 0.1);
+      ctx.beginPath();
+      ctx.ellipse(0, 0.05, 0.06 + drop * 0.12, 0.05, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(0.14 * drop, -0.02, 0.045, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
     }
     ctx.globalAlpha = 1;

@@ -3,7 +3,7 @@ import { Check, Expand, Grid3x3, Redo2, Undo2 } from "lucide-react";
 import { onArt } from "@/game/art";
 import { TILE_BRIDGE, TILE_CRYSTAL, TILE_SAND, TILE_SCRUB, TILE_SPENT, TILE_STUMP, type MapId, type MapSizeId } from "@/game/data";
 import { MAP_LIST } from "@/game/maps";
-import { bakeTerrain, frameScale, paintDocTiles, paintRelief, tileColor } from "@/game/render";
+import { bakeTerrain, frameScale, paintCrossings, paintDocTiles, paintRelief, tileColor } from "@/game/render";
 import { isShell, paintOre, paintShell, paintTree, paintWaterSheen } from "@/game/tileset";
 import { deleteMap, saveMap, shareCode } from "@/game/custom";
 import { duplicateMap, resolveMyMap } from "@/game/lobby";
@@ -266,6 +266,7 @@ export function MapEditor({
       });
     }
     if (layers.objects) {
+      paintCrossings(ctx, live.terrain, live.w, live.h, x0, y0, x1, y1);
       ctx.strokeStyle = "#c45c32";
       ctx.lineWidth = 0.12;
       for (const d of live.docks) ctx.strokeRect(d.tx, d.ty, 2, 2);

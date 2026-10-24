@@ -26,8 +26,10 @@ import {
   toNewGame,
   unitOffered,
   trainOffered,
+  withNewBotSkill,
+  type SkirmishSetup,
 } from "./lobby.ts";
-import { Sim } from "./sim.ts";
+import { NORMAL_PUSH_AT, Sim, firstPushAt } from "./sim.ts";
 
 test("a texted room keeps the skirmish the host already set", () => {
   const packed = netRulesFromSetup({
@@ -84,6 +86,28 @@ test("randomize only returns a legal lobby", () => {
     assert.equal(lobbyBlock(setup), null);
     assert.ok(LOBBY_MAPS.some((m) => m.id === setup.mapId));
   }
+});
+
+test("a new bot slot is Normal, and Normal does not push before 6:00", () => {
+  assert.equal(DEFAULT_SETUP.difficulty, "normal");
+  assert.deepEqual(DEFAULT_SETUP.skills, ["normal", "normal", "normal"]);
+  const stale: SkirmishSetup = {
+    ...DEFAULT_SETUP,
+    difficulty: "easy",
+    skills: ["normal", "easy", "easy"],
+  };
+  const added = { ...stale, ...chooseOpponents(stale, 2), ...withNewBotSkill(stale, 2) };
+  assert.equal(added.skills[0], "normal");
+  assert.equal(added.skills[1], "normal");
+  assert.equal(added.difficulty, "normal");
+  const game = toNewGame(added);
+  assert.equal(game.difficulty, "normal");
+  assert.deepEqual(game.skills, ["normal", "normal", "easy"]);
+  assert.equal(firstPushAt("normal"), NORMAL_PUSH_AT);
+  assert.ok(NORMAL_PUSH_AT >= 6 * 60);
+  const fresh = parseSetup({ mapId: "coast", player: "concord", enemy: "syndicate", difficulty: "easy" });
+  assert.equal(fresh?.difficulty, "easy");
+  assert.deepEqual(fresh?.skills, ["easy", "normal", "normal"]);
 });
 
 test("saved setup remembers both factions", () => {
@@ -334,6 +358,13 @@ test("four factions keep their colors, rosters, and spare seats", () => {
   assert.equal(sim.factionOf(1), "syndicate");
   assert.equal(sim.factionOf(2), "steel");
   assert.equal(sim.factionOf(3), "prism");
-  assert.equal(sim.seatColor(2), "#5b86b0");
-  assert.equal(sim.seatColor(3), "#2ec4d6");
+  assert.equal(sim.seatColor(0), "#2F7DF6");
+  assert.equal(sim.seatColor(1), "#E5483B");
+  assert.equal(sim.seatColor(2), "#F27A30");
+  assert.equal(sim.seatColor(3), "#3FBF5A");
+  const teams = new Sim({ mapId: "basin", faction: "concord", enemy: "syndicate", opponents: 3, teams: "tvt", mode: "destroy", fog: false });
+  assert.equal(teams.seatColor(0), "#2F7DF6");
+  assert.equal(teams.seatColor(2), "#3FBF5A");
+  assert.equal(teams.seatColor(1), "#E5483B");
+  assert.equal(teams.seatColor(3), "#F27A30");
 });

@@ -89,6 +89,7 @@ const DIRS = [
 ] as const;
 
 export type BlockedFn = (x: number, y: number) => boolean;
+export type CostFn = (x: number, y: number) => number;
 
 function inb(x: number, y: number, gw: number, gh: number): boolean {
   return x >= 0 && y >= 0 && x < gw && y < gh;
@@ -162,6 +163,7 @@ export function findPath(
   gy: number,
   gw = MAP_W,
   gh = MAP_H,
+  cost?: CostFn,
 ): { x: number; y: number }[] | null {
   sx = Math.max(0, Math.min(gw - 1, sx | 0));
   sy = Math.max(0, Math.min(gh - 1, sy | 0));
@@ -190,7 +192,8 @@ export function findPath(
   SEEN[start] = stamp;
   G[start] = 0;
   CAME[start] = -1;
-  HEAP.push({ f: octile(sx, sy, gx, gy), g: 0, i: start });
+  const hScale = cost ? 0.7 : 1;
+  HEAP.push({ f: octile(sx, sy, gx, gy) * hScale, g: 0, i: start });
 
   let found = false;
   let exp = 0;
@@ -215,12 +218,13 @@ export function findPath(
         if (blocked(cx + dir[0], cy) || blocked(cx, cy + dir[1])) continue;
       }
       const ni = ny * gw + nx;
-      const ng = cur.g + dir[2];
+      const mul = cost ? Math.max(0.55, Math.min(2.4, cost(nx, ny))) : 1;
+      const ng = cur.g + dir[2] * mul;
       if (SEEN[ni] === stamp && ng >= G[ni] - 1e-4) continue;
       SEEN[ni] = stamp;
       G[ni] = ng;
       CAME[ni] = cur.i;
-      HEAP.push({ f: ng + octile(nx, ny, gx, gy), g: ng, i: ni });
+      HEAP.push({ f: ng + octile(nx, ny, gx, gy) * hScale, g: ng, i: ni });
     }
   }
   if (!found && !(SEEN[goal] === stamp)) return null;

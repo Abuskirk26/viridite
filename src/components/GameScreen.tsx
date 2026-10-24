@@ -32,9 +32,11 @@ import {
   Wrench,
   X,
   Zap,
+  Ban,
+  Hand,
+  Route,
 } from "lucide-react";
-import { earthOf } from "@/game/maps";
-import { loadDetail, loadRegion, type SatPatch } from "@/game/sat";
+import { Sim, DEPLOY_SECS, footprintOrigin, ghostPlaceReason, traceTiles, type Building, type SimSave } from "@/game/sim";
 import { combatTrack, handleCue, isMuted, playScore, setMuted, sfx, stopBeds, unlockAudio, bark, barkClass, subscribeAudioGate, subscribeMute } from "@/game/audio";
 import {
   BUILDINGS,
@@ -64,17 +66,18 @@ import {
   clampSetup,
   loadSetup,
   lobbyBlock,
+  normalBotDefaults,
   saveSetup,
   toNewGame,
   trainOffered,
   randomSetup,
+  warnSkirmishDefaults,
   type SkirmishSetup,
 } from "@/game/lobby";
 import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
-import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, palmPoster, placeChrome, sheetLong } from "@/game/render";
+import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetLong } from "@/game/render";
 import { ensureIso, iso } from "@/game/iso";
-import { Sim, footprintOrigin, ghostPlaceReason, traceTiles, type Building, type SimSave } from "@/game/sim";
 import { SheetBody, SheetHead } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
@@ -87,8 +90,7 @@ import { lobbySize, offersNavy } from "@/game/editor";
 import { NetPlay, parseRoomCode } from "@/game/netplay";
 import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
-import { aiHeat } from "@/game/ai";
-import { clampCamera, fitZoom, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, viewPitch, worldToScreen, zoomAbout, type Camera, type View } from "@/game/view";
+import { clampCamera, minimapHit, openingZoom, screenToWorld, seekZoom, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 
 const SAVE_KEY = "viridite-last-match";
 
@@ -105,8 +107,19 @@ function liftedWorld(cam: Camera, view: View, sx: number, sy: number, lift: bool
   return screenToWorld(cam, sx, lift ? sy - FINGER_LIFT : sy, view);
 }
 
-function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number) {
-  const world = screenToWorld(cam, sx, sy, view);
+/** Enemy hall under a finger. A touch also samples above the contact, where the picture sits. */
+function pickStrike(sim: Sim, cam: Camera, view: View, sx: number, sy: number, touch: boolean, viewer: 0) {
+  const lifts = touch ? [0, 44, 72] : [0];
+  for (const lift of lifts) {
+    const at = screenToWorld(cam, sx, sy - lift, view);
+    const b = sim.pickBuilding(at.x, at.y, cam.zoom, viewer);
+    if (b && b.hp > 0 && b.rubble <= 0) return b;
+  }
+  return null;
+}
+
+function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number, lift = false) {
+  const world = liftedWorld(cam, view, sx, sy, lift);
   return footprintOrigin(kind, world.x, world.y);
 }
 
@@ -175,7 +188,7 @@ function WarStrip({
       <div className={`steel-inset flex shrink-0 items-center px-2 font-display uppercase text-crystal tabular-nums ${h} ${compact ? "text-[10px]" : "text-xs"}`}>
         +{per}/s
       </div>
-      <div className={`steel-inset flex shrink-0 items-center px-2 font-display uppercase text-brass ${h} ${compact ? "text-[10px]" : "text-xs"}`}>
+      <div className={`steel-inset flex shrink-0 items-center px-2 font-display tracking-wide text-brass ${h} text-[13px]`}>
         {climbLabel(sim)}
       </div>
       {haulIn > 0 && (
@@ -217,17 +230,69 @@ function clock(sec: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** How much of the canvas the HUD, host banner, or command bar is covering. */
+function battleChrome(canvas: HTMLCanvasElement): { top: number; bottom: number } {
+  const c = canvas.getBoundingClientRect();
+  let top = 0;
+  let bottom = 0;
+  const takeTop = (el: Element | null) => {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.bottom <= c.top + 0.5 || r.top >= c.bottom) return;
+    top = Math.max(top, r.bottom - c.top);
+  };
+  const takeBottom = (el: Element | null) => {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.top >= c.bottom - 0.5 || r.bottom <= c.top) return;
+    bottom = Math.max(bottom, c.bottom - r.top);
+  };
+  takeTop(document.querySelector("[data-testid='resource-bar']"));
+  takeTop(document.querySelector("[data-testid='seat-pings']"));
+  takeBottom(document.querySelector("[data-testid='battle-footer']"));
+  for (const el of Array.from(document.body.children)) {
+    if (!(el instanceof HTMLElement) || el.contains(canvas)) continue;
+    const pos = getComputedStyle(el).position;
+    if (pos !== "fixed" && pos !== "sticky") continue;
+    const r = el.getBoundingClientRect();
+    if (r.height < 6 || r.height > c.height * 0.45 || r.width < 24) continue;
+    const wide = r.width > c.width * 0.55;
+    const hitsMinimap = r.right > c.right - 180 && r.left < c.right;
+    if (!wide && !hitsMinimap) continue;
+    if (r.bottom > c.top + 1 && r.top < c.top + 96) top = Math.max(top, r.bottom - c.top);
+  }
+  return { top: Math.max(0, top), bottom: Math.max(0, bottom) };
+}
+
+function botBrief(sim: Sim): string {
+  const rows: string[] = [];
+  for (let t = 1; t <= sim.opponents; t++) {
+    if (!sim.cpu[t]) continue;
+    const who = SEAT_NAME[t] ?? "Bot";
+    const diff = sim.difficultyOf(t as Team);
+    const stance = sim.stanceOf(t as Team);
+    const d = diff === "hard" ? "Hard" : diff === "easy" ? "Easy" : "Normal";
+    const s = stance === "raider" ? "Raider" : stance === "passive" ? "Passive" : "Builder";
+    rows.push(`${who} · ${d} · ${s}`);
+  }
+  return rows.length ? rows.join(" · ") : "No bot in this match";
+}
+
 function climbLabel(sim: Sim): string {
-  let best = 0;
+  const minute = Math.floor(sim.time / 60);
+  let rank = -1;
+  let name = "";
   for (let t = 1; t <= sim.opponents; t++) {
     if (!sim.cpu[t] || sim.eliminated[t]) continue;
-    const seat = t === 2 || t === 3 ? t : 1;
-    const heat = aiHeat(sim.difficultyOf(seat), sim.time);
-    best = Math.max(best, heat === "hard" ? 2 : heat === "normal" ? 1 : 0);
+    const seat = (t === 2 || t === 3 ? t : 1) as 0 | 1 | 2 | 3;
+    const d = sim.difficultyOf(seat);
+    const r = d === "hard" ? 2 : d === "normal" ? 1 : 0;
+    if (r < rank) continue;
+    rank = r;
+    name = d === "hard" ? "Hard" : d === "normal" ? "Normal" : "Easy";
   }
-  if (best >= 2) return "Bots hard";
-  if (best === 1) return "Bots pressing";
-  return "Bots easy";
+  if (!name) return `${minute}m`;
+  return `${name} · ${minute}m`;
 }
 
 const SPEED_STEPS = [0.75, 1, 1.5, 2, 3, 4, 5, 6, 8, 10];
@@ -270,17 +335,13 @@ function hintFor(sim: Sim, team: Team = 0): string {
   if (!has("factory")) return "War Factory for armor. Tanks cost more command points than rifles.";
   if (sim.commandUsed(team) >= sim.commandCap(team) - 2) return "The field is full. Spend what you have before you train more.";
   if (sim.mode === "survive") return "Hold the clock, or flatten their Construction Yard.";
-  return "Infantry in woods are hidden from vehicles. Spot them with your own rifles.";
+  return "Infantry in the woods stay hidden until a ground unit walks up beside them. Your own troops show a leaf mark.";
 }
 
 export function GameScreen() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<Sim | null>(null);
   const sheetRef = useRef<{ small: HTMLCanvasElement; mid: HTMLCanvasElement | null; full: HTMLCanvasElement | null; key: string } | null>(null);
-  const groundRef = useRef<HTMLCanvasElement | null>(null);
-  const detailRef = useRef<SatPatch | null>(null);
-  const satKey = useRef("");
-  const stillRef = useRef({ x: 0, y: 0, z: 0, at: 0 });
   const camRef = useRef<Camera>({ x: 32, y: 32, zoom: 48 });
   const viewRef = useRef<View>({ w: 1, h: 1 });
   const phaseRef = useRef<Phase>("menu");
@@ -293,11 +354,10 @@ export function GameScreen() {
   const fittedRef = useRef(false);
   const fittedH = useRef(0);
   const fittedW = useRef(0);
-  const zoomWish = useRef(0);
   const lastSave = useRef(0);
   const speedRef = useRef(1);
   const optsRef = useRef<SkirmishSetup>(DEFAULT_SETUP);
-  const draftRef = useRef<PointerDraft>({ box: null, hoverX: 0, hoverY: 0, hovering: false, wallPts: [] });
+  const draftRef = useRef<PointerDraft>({ box: null, hoverX: 0, hoverY: 0, hovering: false, wallPts: [], lift: false });
   const touchPlaceRef = useRef(false);
   const shiftPlaceRef = useRef(false);
   const netRef = useRef<NetPlay | null>(null);
@@ -317,6 +377,8 @@ export function GameScreen() {
   const [paused, setPaused] = useState(false);
   const [portrait, setPortrait] = useState(false);
   const [phone, setPhone] = useState(false);
+  const [short, setShort] = useState(false);
+  const [trayUp, setTrayUp] = useState(false);
   const [hasSave, setHasSave] = useState(false);
   const [muted, setMutedUi] = useState(() => isMuted());
   const [soundGate, setSoundGate] = useState(false);
@@ -337,17 +399,20 @@ export function GameScreen() {
   const [rejoinNote, setRejoinNote] = useState("");
   const [chat, setChat] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
+  const [strike, setStrike] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [buildOpen, setBuildOpen] = useState(false);
   const [prodTab, setProdTab] = useState<ProdTab>("build");
   const [remixId, setRemixId] = useState("");
   const [squadOn, setSquadOn] = useState<[boolean, boolean, boolean, boolean]>([false, false, false, false]);
   const groupsRef = useRef<number[][]>([[], [], [], []]);
+  const alarmTap = useRef(0);
   const saveGroupRef = useRef<(i: number) => void>(() => {});
   const recallGroupRef = useRef<(i: number) => void>(() => {});
   const [prep, setPrep] = useState({ on: false, map: false, figs: false });
   const prepRun = useRef(0);
   const armRef = useRef(false);
+  const strikeRef = useRef(false);
   const selectRef = useRef(false);
   const samePick = useRef({ kind: "", t: 0 });
 
@@ -394,10 +459,20 @@ export function GameScreen() {
   viewerRef.current = viewer;
   chatRef.current = chat;
   armRef.current = arming;
+  strikeRef.current = strike;
   selectRef.current = selecting;
 
   useEffect(() => {
+    if (!arming && strike) setStrike(false);
+  }, [arming, strike]);
+
+  useEffect(() => {
+    if (sel.length > 0 || selB != null || placing) setTrayUp(false);
+  }, [sel, selB, placing]);
+
+  useEffect(() => {
     setHasSave(!!readSave());
+    warnSkirmishDefaults();
     const rules = loadSetup();
     if (rules) {
       setSetup(rules);
@@ -425,6 +500,7 @@ export function GameScreen() {
       document.documentElement.style.setProperty("--app-top", `${Math.round(top)}px`);
       setPortrait(h > w + 40);
       setPhone(Math.min(w, h) < 520 || w < 800);
+      setShort(h < 500);
     };
     onResize();
     window.addEventListener("resize", onResize);
@@ -452,16 +528,13 @@ export function GameScreen() {
     const started = performance.now();
     const step = () => {
       if (prepRun.current !== run) return;
-      const live = simRef.current;
       const figs = !!iso();
-      const site = live ? earthOf(live.mapId) : null;
-      const poster = live?.mapId === "palm" ? palmPoster() : null;
-      const map = live?.mapId === "palm" ? !!poster : site?.bounds ? !!groundRef.current : !!sheetRef.current?.full;
-      const settled = live?.mapId === "palm" ? true : groundSettled();
+      const map = !!sheetRef.current?.full;
+      const settled = groundSettled();
       const waited = performance.now() - started;
       setPrep((prev) => (prev.on && prev.map === map && prev.figs === figs ? prev : { on: true, map, figs }));
       const ready = figs && map && settled;
-      if (ready || waited > 7000 || phaseRef.current !== "play") {
+      if (ready || waited > 8000 || phaseRef.current !== "play") {
         setPrep({ on: false, map, figs });
         if (phaseRef.current === "play" && prepRun.current === run) {
           pausedRef.current = false;
@@ -480,7 +553,6 @@ export function GameScreen() {
     sim.onCue = handleCue;
     simRef.current = sim;
     sheetRef.current = null;
-    stillRef.current = { x: 0, y: 0, z: 0, at: 0 };
     camRef.current = cam ?? {
       x: sim.starts.player.x,
       y: sim.starts.player.y - 1,
@@ -490,7 +562,6 @@ export function GameScreen() {
     fittedRef.current = !!cam;
     fittedH.current = 0;
     fittedW.current = 0;
-    zoomWish.current = 0;
     lastSave.current = sim.time;
     const mcv = sim.units.find((u) => u.team === viewerRef.current && u.kind === "mcv" && u.hp > 0);
     setSel(mcv ? [mcv.id] : []);
@@ -517,6 +588,10 @@ export function GameScreen() {
   const patchSetup = (partial: Partial<SkirmishSetup>) => {
     setSetup((prev) => {
       const next = clampSetup({ ...prev, ...partial });
+      if (partial.opponents == null && partial.teams == null) {
+        next.opponents = prev.opponents;
+        next.teams = prev.teams;
+      }
       saveSetup(next);
       return next;
     });
@@ -730,27 +805,30 @@ export function GameScreen() {
         canvas.width = bw;
         canvas.height = bh;
       }
-      viewRef.current = { w, h };
+      const chrome = battleChrome(canvas);
+      viewRef.current = { w, h, chromeTop: chrome.top, chromeBottom: chrome.bottom };
       const nowLand = w > h + 40;
       const wasLand = fittedW.current > fittedH.current + 40;
       if (h > 40 && (fittedH.current === 0 || (fittedW.current > 0 && nowLand !== wasLand))) {
         const palm = sim.mapId === "palm";
         setViewPitch(palm ? 1 : 0.68);
-        if (palm) {
+        if (palm && fittedH.current === 0) {
           const home = sim.starts.slots[viewerRef.current] ?? sim.starts.player;
           camRef.current.x = home.x;
           camRef.current.y = home.y;
         }
-        const turning = fittedW.current > 0 && nowLand !== wasLand;
-        const preferred = palm
-          ? Math.min(w / 22, h / 16)
-          : turning || !fittedRef.current
-            ? openingZoom(sim.mapSize)
-            : camRef.current.zoom;
-        const z = palm ? preferred : fitZoom(h, turning ? Math.min(preferred, h / 14) : preferred, w);
-        zoomWish.current = z;
-        camRef.current.zoom = z;
-        clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current);
+        const view = viewRef.current;
+        if (fittedH.current === 0 && !fittedRef.current) {
+          camRef.current.zoom = tacticalHome(view);
+        } else if (fittedH.current === 0) {
+          camRef.current.zoom = zoomAtBias(view, zoomBias(camRef.current.zoom, { w: 915, h: 412 }));
+        } else {
+          const bias = zoomBias(camRef.current.zoom, { w: fittedW.current, h: fittedH.current });
+          camRef.current.zoom = zoomAtBias(view, bias);
+        }
+        camRef.current.aim = camRef.current.zoom;
+        clampCamera(camRef.current, sim.gw, sim.gh, view, wideField(sim.mapSize));
+        camRef.current.aim = camRef.current.zoom;
         fittedRef.current = true;
         fittedH.current = h;
         fittedW.current = w;
@@ -758,11 +836,7 @@ export function GameScreen() {
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
       setViewPitch(sim.mapId === "palm" ? 1 : 0.68);
-      const wish = zoomWish.current;
-      if (wish > 0 && Math.abs(camRef.current.zoom - wish) > 0.03) {
-        const next = camRef.current.zoom + (wish - camRef.current.zoom) * Math.min(1, dt * 10);
-        zoomAbout(camRef.current, w / 2, h / 2, viewRef.current, next, sim.gw, sim.gh, wideField(sim.mapSize));
-      }
+      stepZoom(camRef.current, dt, viewRef.current, sim.gw, sim.gh, wideField(sim.mapSize));
       stepInertia(camRef.current, dt, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
       if (!pausedRef.current && phaseRef.current === "play" && sim.outcome === "playing") {
         const net = netRef.current;
@@ -813,23 +887,23 @@ export function GameScreen() {
       }
       shakeRef.current = Math.max(0, shakeRef.current * 0.86) + sim.impulse;
       sim.impulse = 0;
+      const fingerX = draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2;
+      const fingerY = draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2;
       const hover = placingRef.current
-        ? aimedCell(
-            sim,
-            camRef.current,
-            viewRef.current,
-            placingRef.current,
-            draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2,
-            draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2,
-          )
+        ? aimedCell(sim, camRef.current, viewRef.current, placingRef.current, fingerX, fingerY, false)
         : null;
+      const ghost =
+        placingRef.current && draftRef.current.lift
+          ? aimedCell(sim, camRef.current, viewRef.current, placingRef.current, fingerX, fingerY, true)
+          : hover;
       let wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null = null;
       if (placingRef.current && isFence(placingRef.current)) {
         const dragged = draftRef.current.wallPts;
         const kind = placingRef.current;
         const me = viewerRef.current as 0;
+        const liftWall = dragged.length > 1;
         let tiles = dragged.length
-          ? traceTiles(dragged.map((p) => liftedWorld(camRef.current, viewRef.current, p.x, p.y, true)))
+          ? traceTiles(dragged.map((p) => liftedWorld(camRef.current, viewRef.current, p.x, p.y, liftWall)))
           : hover
             ? [hover]
             : [];
@@ -846,41 +920,11 @@ export function GameScreen() {
         wallRun = tiles.length ? sim.previewFence(me, kind, tiles) : null;
       }
       const alpha = pausedRef.current ? 1 : Math.max(0, Math.min(1, acc / 0.1));
-      const camNow = camRef.current;
-      const still = stillRef.current;
-      const moved = Math.abs(camNow.x - still.x) > 0.4 || Math.abs(camNow.y - still.y) > 0.4 || Math.abs(camNow.zoom - still.z) > 0.4;
-      if (moved) stillRef.current = { x: camNow.x, y: camNow.y, z: camNow.zoom, at: now };
-      const quiet = !moved && now - still.at > 420;
-      const site = earthOf(sim.mapId);
-      if (site?.bounds) {
-        if (satKey.current !== sim.mapId) {
-          satKey.current = sim.mapId;
-          groundRef.current = null;
-          detailRef.current = null;
-          const id = sim.mapId;
-          void loadRegion(id, site).then((canvas) => {
-            if (satKey.current === id && canvas) groundRef.current = canvas;
-          });
-        }
-        if (moved) detailRef.current = null;
-        if (quiet && camNow.zoom >= 16) {
-          const id = sim.mapId;
-          void loadDetail(id, site, camNow.x, camNow.y, sim.gw, sim.gh).then((patch) => {
-            if (satKey.current === id && patch) detailRef.current = patch;
-          });
-        }
-      } else if (satKey.current) {
-        satKey.current = "";
-        groundRef.current = null;
-        detailRef.current = null;
-      }
-      const sat = site?.bounds ? groundRef.current : null;
-      const poster = sim.mapId === "palm" ? palmPoster() : null;
-      const sheetKey = `b26:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
+      const sheetKey = `b31:${sim.mapId}:${sim.gw}x${sim.gh}:${sim.theater}:${sim.groundRev}`;
       const had = sheetRef.current?.key === sheetKey;
       let pack = sheetRef.current;
       const big = Math.max(sim.gw, sim.gh);
-      if (!sat && !poster && !had) {
+      if (!had) {
         const full = bakeTerrain(
           sim.terrain,
           sim.gw,
@@ -892,8 +936,7 @@ export function GameScreen() {
         sheetRef.current = pack;
       }
       const image = pack?.full ?? pack?.small ?? null;
-      const sheet = !sat && !poster && image ? { image, tw: image.width, th: image.height } : null;
-      const field = poster ?? sat;
+      const sheet = image ? { image, tw: image.width, th: image.height } : null;
       drawGame(
         ctx,
         sim,
@@ -904,6 +947,7 @@ export function GameScreen() {
           buildingId: selBRef.current,
           placing: placingRef.current,
           hover,
+          ghost,
           wallRun,
           box: draftRef.current.box,
           shake: shakeRef.current,
@@ -912,10 +956,10 @@ export function GameScreen() {
           touchPlace: touchPlaceRef.current,
         },
         alpha,
-        field,
-        field && !poster ? detailRef.current : null,
+        null,
+        null,
         sheet,
-        field ? null : image,
+        image,
       );
       if (now - lastHud > 200) {
         lastHud = now;
@@ -924,7 +968,9 @@ export function GameScreen() {
         if (selBRef.current && !sim.buildingById(selBRef.current)) setSelB(null);
         if (sim.outcome !== "playing" && phaseRef.current === "play") {
           writeSave(sim, camRef.current);
-          setPhase("over");
+          window.setTimeout(() => {
+            if (phaseRef.current === "play") setPhase("over");
+          }, 2000);
         }
         setFrame((n) => (n + 1) % 100000);
       }
@@ -944,9 +990,8 @@ export function GameScreen() {
       grid: () => ({ w: simRef.current?.gw ?? 64, h: simRef.current?.gh ?? 64 }),
       warzone: () => wideField(simRef.current?.mapSize ?? "skirmish"),
       selectMode: () => selectRef.current,
-      onZoom: (z) => {
-        zoomWish.current = z;
-      },
+      suppressBox: () => armRef.current,
+      onZoom: () => {},
       classify: (sx, sy) => {
         const sim = simRef.current;
         if (!sim || placingRef.current || rallyRef.current) return "immediate";
@@ -961,7 +1006,21 @@ export function GameScreen() {
         camRef.current.y = wy;
         camRef.current.vx = 0;
         camRef.current.vy = 0;
-        clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64, viewRef.current);
+        clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64, viewRef.current, wideField(simRef.current?.mapSize ?? "skirmish"));
+      },
+      onMinimapTap: (wx, wy) => {
+        const sim = simRef.current;
+        if (!sim || !armRef.current || pausedRef.current) return;
+        const ids = selRef.current.filter((id) => {
+          const u = sim.unitById(id);
+          return !!u && u.hp > 0 && u.team === viewerRef.current && u.damage > 0;
+        });
+        if (!ids.length) return;
+        const x = quant(wx);
+        const y = quant(wy);
+        setArming(false);
+        actRef.current("attackMove", { ids, x, y }, () => sim.issueMove(ids, x, y, true));
+        setFrame((n) => n + 1);
       },
       onJumpBase: () => {
         const sim = simRef.current;
@@ -982,8 +1041,16 @@ export function GameScreen() {
         const sim = simRef.current;
         const kind = placingRef.current;
         if (!sim || !kind || isFence(kind) || !touchPlaceRef.current || !draftRef.current.hovering) return null;
-        const origin = aimedCell(sim, camRef.current, viewRef.current, kind, draftRef.current.hoverX, draftRef.current.hoverY);
-        const box = placeChrome(camRef.current, viewRef.current, origin.tx, origin.ty, BUILDINGS[kind].w);
+        const show = aimedCell(
+          sim,
+          camRef.current,
+          viewRef.current,
+          kind,
+          draftRef.current.hoverX,
+          draftRef.current.hoverY,
+          draftRef.current.lift,
+        );
+        const box = placeChrome(camRef.current, viewRef.current, show.tx, show.ty, BUILDINGS[kind].w);
         const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
         if (hit(box.confirm)) return "confirm";
         if (hit(box.cancel)) return "cancel";
@@ -1018,7 +1085,7 @@ export function GameScreen() {
         if (!sim || !kind || pausedRef.current) return;
         unlockAudio();
         const me = viewerRef.current as 0;
-        let tiles = traceTiles(screenPts.map((p) => liftedWorld(camRef.current, viewRef.current, p.x, p.y, true)));
+        let tiles = traceTiles(screenPts.map((p) => liftedWorld(camRef.current, viewRef.current, p.x, p.y, false)));
         if (kind === "gate") {
           const stuck: { tx: number; ty: number }[] = [];
           for (const t of tiles) {
@@ -1037,7 +1104,7 @@ export function GameScreen() {
       },
       onBox: (box) => {
         const sim = simRef.current;
-        if (!sim || pausedRef.current || placingRef.current) return;
+        if (!sim || pausedRef.current || placingRef.current || armRef.current) return;
         const a = screenToWorld(camRef.current, box.x0, box.y0, viewRef.current);
         const b = screenToWorld(camRef.current, box.x1, box.y1, viewRef.current);
         const ids = sim.unitsInRect(a.x, a.y, b.x, b.y, viewerRef.current as 0);
@@ -1088,11 +1155,26 @@ export function GameScreen() {
           setFrame((n) => n + 1);
           return;
         }
+        const strike = pickStrike(sim, camRef.current, viewRef.current, sx, sy, touchPlaceRef.current, me);
+        if (selRef.current.length && strike && strike.hp > 0 && strike.rubble <= 0 && (strike.neutral || !sim.allied(me, strike.team))) {
+          const ids = selRef.current.slice();
+          const id = sim.strikeTarget(me, strike.id, world.x, world.y);
+          armRef.current = false;
+          strikeRef.current = false;
+          selectRef.current = false;
+          setArming(false);
+          setSelecting(false);
+          actRef.current("attack", { ids, id }, () => sim.issueAttack(ids, id));
+          setFrame((n) => n + 1);
+          return;
+        }
         const hit = sim.pickAt(world.x, world.y, camRef.current.zoom, me);
         if (hit?.kind === "unit") {
           const unit = sim.unitById(hit.id);
           if (unit && !sim.allied(me, unit.team) && selRef.current.length) {
             const ids = selRef.current.slice();
+            setArming(false);
+            setSelecting(false);
             actRef.current("attack", { ids, id: hit.id }, () => sim.issueAttack(ids, hit.id));
             setFrame((n) => n + 1);
             return;
@@ -1100,8 +1182,14 @@ export function GameScreen() {
           if (unit && unit.team === me) {
             const now = performance.now();
             if (samePick.current.kind === unit.kind && now - samePick.current.t < 320) {
+              const cam = camRef.current;
+              const view = viewRef.current;
               const ids = sim.units
-                .filter((u) => u.team === me && u.hp > 0 && u.kind === unit.kind && !u.aboard)
+                .filter((u) => {
+                  if (u.team !== me || u.hp <= 0 || u.kind !== unit.kind || u.aboard) return false;
+                  const at = worldToScreen(cam, u.x, u.y, view);
+                  return at.x >= 0 && at.y >= 0 && at.x <= view.w && at.y <= view.h;
+                })
                 .map((u) => u.id);
               setSel(ids.length ? ids : [unit.id]);
               samePick.current = { kind: "", t: 0 };
@@ -1120,9 +1208,20 @@ export function GameScreen() {
         }
         if (hit?.kind === "building") {
           const b = sim.buildingById(hit.id);
+          const eng = selRef.current.map((id) => sim.unitById(id)).find((u) => u && u.kind === "engineer" && u.hp > 0);
+          if (b && eng && (b.neutral || !sim.allied(me, b.team)) && b.hp > 0 && b.rubble <= 0) {
+            const ids = [eng.id];
+            setArming(false);
+            setSelecting(false);
+            actRef.current("attack", { ids, id: b.id }, () => sim.issueAttack(ids, b.id));
+            setFrame((n) => n + 1);
+            return;
+          }
           if (b && !sim.allied(me, b.team) && !b.neutral && selRef.current.length) {
             const ids = selRef.current.slice();
             const id = sim.strikeTarget(me, b.id, world.x, world.y);
+            setArming(false);
+            setSelecting(false);
             actRef.current("attack", { ids, id }, () => sim.issueAttack(ids, id));
             setFrame((n) => n + 1);
             return;
@@ -1143,16 +1242,27 @@ export function GameScreen() {
           }
         }
         if (selRef.current.length) {
+          if (armRef.current && strikeRef.current) return;
           const ids = selRef.current.slice();
           const x = quant(world.x);
           const y = quant(world.y);
           const attackMove = isDouble || armRef.current;
+          armRef.current = false;
+          strikeRef.current = false;
+          selectRef.current = false;
           setArming(false);
+          setStrike(false);
+          setSelecting(false);
           actRef.current(attackMove ? "attackMove" : "move", { ids, x, y }, () => sim.issueMove(ids, world.x, world.y, attackMove));
           setFrame((n) => n + 1);
           return;
         }
+        armRef.current = false;
+        strikeRef.current = false;
+        selectRef.current = false;
         setArming(false);
+        setStrike(false);
+        setSelecting(false);
         setSel([]);
         setSelB(null);
       },
@@ -1200,18 +1310,12 @@ export function GameScreen() {
     setSelB(null);
     setRally(false);
     setArming(false);
-    setSelecting(false);
     setBuildOpen(false);
     sfx("select");
   };
   const trainAt = (kind: BuildingId, unit: UnitId) => {
-    if (!sim) return;
-    const selected = selB ? sim.buildingById(selB) : undefined;
-    const building =
-      selected && selected.team === viewer && selected.kind === kind && selected.complete && selected.hp > 0 && selected.rubble <= 0
-        ? selected
-        : sim.buildings.find((b) => b.team === viewer && b.kind === kind && b.complete && b.hp > 0 && b.rubble <= 0);
-    if (!building) return;
+    const building = producerBuilding(kind);
+    if (!building || !sim) return;
     setSel([]);
     setSelB(building.id);
     unlockAudio();
@@ -1220,29 +1324,78 @@ export function GameScreen() {
     });
     setFrame((n) => n + 1);
   };
+  const cancelOne = (kind: BuildingId, unit: UnitId) => {
+    const building = producerBuilding(kind);
+    if (!building || !sim) return;
+    const id = building.id;
+    act("cancel", { id, unit }, () => sim.cancelQueued(id, viewer as 0, unit));
+    setFrame((n) => n + 1);
+  };
+  const sellSelected = () => {
+    if (!sim || selB == null) return;
+    const id = selB;
+    act("sell", { id }, () => sim.sellBuilding(id, viewer as 0));
+    setSelB(null);
+    setFrame((n) => n + 1);
+  };
+  const producerBuilding = (kind: BuildingId) => {
+    if (!sim) return undefined;
+    const selected = selB ? sim.buildingById(selB) : undefined;
+    if (selected && selected.team === viewer && selected.kind === kind && selected.complete && selected.hp > 0 && selected.rubble <= 0) {
+      return selected;
+    }
+    return sim.buildings.find((b) => b.team === viewer && b.kind === kind && b.complete && b.hp > 0 && b.rubble <= 0);
+  };
   const orderStop = () => {
     const ids = sel.slice();
     act("stop", { ids }, () => sim?.issueStop(ids));
+    selectRef.current = false;
+    armRef.current = false;
+    strikeRef.current = false;
+    setSelecting(false);
     setArming(false);
+    setStrike(false);
     sfx("select");
   };
   const orderAttack = () => {
     if (!sim) return;
-    const ids = sel.filter((id) => {
+    const ids = selRef.current.filter((id) => {
       const u = sim.unitById(id);
       return !!u && u.hp > 0 && u.damage > 0 && !u.aboard;
     });
-    if (!ids.length) return;
-    const at = sim.pushTarget(viewer as 0);
-    act("attackMove", { ids, x: quant(at.x), y: quant(at.y) }, () => sim.issueMove(ids, at.x, at.y, true));
-    setArming(false);
-    sfx("move");
+    const engineers = selRef.current.some((id) => {
+      const u = sim.unitById(id);
+      return !!u && u.hp > 0 && u.kind === "engineer";
+    });
+    if (!ids.length && !engineers) return;
+    const next = !(armRef.current && strikeRef.current);
+    strikeRef.current = next;
+    armRef.current = next;
+    selectRef.current = false;
+    setStrike(next);
+    setSelecting(false);
+    setArming(next);
+    sfx("select");
     setFrame((n) => n + 1);
+  };
+  const orderAttackMove = () => {
+    const next = !(armRef.current && !strikeRef.current);
+    strikeRef.current = false;
+    armRef.current = next;
+    selectRef.current = false;
+    setStrike(false);
+    setSelecting(false);
+    setArming(next);
   };
   const orderGuard = () => {
     const ids = sel.slice();
     act("guard", { ids }, () => sim?.issueGuard(ids));
+    selectRef.current = false;
+    armRef.current = false;
+    strikeRef.current = false;
+    setSelecting(false);
     setArming(false);
+    setStrike(false);
   };
   const orderScatter = () => {
     const ids = sel.slice();
@@ -1304,7 +1457,12 @@ export function GameScreen() {
     setSel(ids);
     setSelB(null);
     setPlacing(null);
+    selectRef.current = false;
+    armRef.current = false;
+    strikeRef.current = false;
+    setSelecting(false);
     setArming(false);
+    setStrike(false);
     const units = ids.map((id) => live.unitById(id)!);
     const x = units.reduce((sum, u) => sum + u.x, 0) / units.length;
     const y = units.reduce((sum, u) => sum + u.y, 0) / units.length;
@@ -1325,10 +1483,69 @@ export function GameScreen() {
   saveGroupRef.current = saveGroup;
   recallGroupRef.current = recallGroup;
 
+  const selectArmy = () => {
+    const live = simRef.current;
+    if (!live) return;
+    const me = viewerRef.current;
+    const ids = live.units
+      .filter((u) => u.team === me && u.hp > 0 && !u.aboard && u.kind !== "harvester" && u.kind !== "mcv")
+      .map((u) => u.id);
+    setSel(ids);
+    setSelB(null);
+    setPlacing(null);
+    selectRef.current = false;
+    armRef.current = false;
+    strikeRef.current = false;
+    setSelecting(false);
+    setArming(false);
+    setStrike(false);
+    if (ids.length) {
+      sfx("select");
+      const u = live.unitById(ids[0]!);
+      if (u) bark(barkClass(u.kind), "select");
+    }
+    setFrame((n) => n + 1);
+  };
+  const openBuild = () => {
+    const id = selBRef.current;
+    const live = simRef.current;
+    const b = id != null && live ? live.buildingById(id) : undefined;
+    if (b && b.team === viewerRef.current && isTrainHall(b.kind) && selRef.current.length === 0 && !placingRef.current) {
+      setBuildOpen(false);
+      const kind = b.kind;
+      requestAnimationFrame(() => {
+        document.querySelector(`[data-roster-group="${kind}"]`)?.scrollIntoView({ inline: "start", block: "nearest", behavior: "auto" });
+      });
+      return;
+    }
+    setBuildOpen((v) => !v);
+    setProdTab("build");
+  };
+
+  const nudgeZoom = (factor: number) => {
+    const sim = simRef.current;
+    const view = viewRef.current;
+    if (!sim || view.w < 8 || view.h < 8) return;
+    const cam = camRef.current;
+    seekZoom(cam, view.w / 2, view.h / 2, view, factor, sim.gw, sim.gh, wideField(sim.mapSize));
+    cam.vx = 0;
+    cam.vy = 0;
+  };
+
+  const land = short && !portrait;
+  const trainHallOnly = (() => {
+    if (!sim || placing || buildOpen || sel.length > 0 || selB == null) return false;
+    const b = sim.buildingById(selB);
+    return !!b && b.team === viewer && isTrainHall(b.kind);
+  })();
+
   return (
     <div
       className="fixed inset-x-0 z-0 flex flex-col bg-field text-ink"
-      style={{ top: "var(--app-top, 0px)", height: "var(--app-h, 100dvh)" }}
+      style={{
+        top: "var(--grok-banner-h, var(--app-top, 0px))",
+        height: "calc(var(--app-h, 100dvh) - var(--grok-banner-h, 0px))",
+      }}
     >
       {soundGate && !muted && (
         <button
@@ -1361,11 +1578,16 @@ export function GameScreen() {
           onChange={patchSetup}
           onBack={() => setReady(false)}
           onStart={startFresh}
+          onPractice={() => {
+            const sim = new Sim(toNewGame(setup));
+            sim.startPractice();
+            boot(sim);
+          }}
           onRandomize={rollSetup}
           onFriends={() => setPhase("net")}
         />
       ) : phase === "menu" ? (
-        <div className="flex h-dvh flex-col bg-field">
+        <div className="flex h-full min-h-0 flex-col bg-field">
           <SheetHead tab={menuTab} onTab={setMenuTab} />
           <div className="min-h-0 flex-1 overflow-y-auto">
             {menuTab === "game" ? (
@@ -1410,28 +1632,53 @@ export function GameScreen() {
         />
       ) : (
         sim && (
-          <>
+          <div className="flex min-h-0 flex-1 flex-col" style={{ WebkitTouchCallout: "none", userSelect: "none" }} onContextMenu={(e) => e.preventDefault()} data-testid="battle-shell">
             <header
-              className={`flex items-center gap-1 bg-field/92 px-1 ${portrait ? "h-11 shrink-0" : "absolute top-0 left-0 z-30 h-8 overflow-x-auto"}`}
-              style={portrait ? undefined : { right: "7.5rem" }}
+              className={`flex items-center gap-1 bg-field/90 px-1 ${
+                portrait
+                  ? "h-11 shrink-0"
+                  : short
+                    ? "z-30 h-8 shrink-0 overflow-x-auto"
+                    : "absolute top-0 left-0 z-30 h-8 overflow-x-auto"
+              }`}
+              style={portrait || short ? undefined : { right: "7.5rem" }}
               data-testid="resource-bar"
             >
               <ResourcePill
                 label="Credits"
                 value={String(Math.floor(sim.credits[viewer] ?? 0))}
                 tone="text-gold"
+                compact={!portrait}
               >
                 <Box className="size-3.5 text-gold" />
               </ResourcePill>
-              <PowerPill sim={sim} team={viewer} />
+              <PowerPill sim={sim} team={viewer} compact={!portrait} />
+              {short && !portrait && (
+                <ResourcePill
+                  label="Command points"
+                  value={`${Math.floor(sim.commandLoad(viewer as 0, false))}/${sim.commandCap(viewer as 0)}`}
+                  tone="text-ink"
+                  compact
+                >
+                  <span className="font-display text-xs text-brass">CP</span>
+                </ResourcePill>
+              )}
               <ResourcePill
                 label="Time"
                 value={sim.mode === "survive" ? clock(SURVIVE_SECONDS - sim.time) : clock(sim.time)}
                 tone="text-crystal"
+                compact={!portrait}
               >
                 <Timer className="size-3.5 text-crystal" />
               </ResourcePill>
+              <span
+                data-testid="pace-label"
+                className="shrink-0 font-display text-[13px] leading-none tracking-wide text-brass"
+              >
+                {climbLabel(sim)}
+              </span>
               <div className="ml-auto flex shrink-0 items-center gap-1">
+                <ZoomControl compact onIn={() => nudgeZoom(1.25)} onOut={() => nudgeZoom(0.8)} />
                 {online ? null : <SpeedControl speed={speed} onChange={setSpeed} compact />}
                 <IconButton
                   label={muted ? "Unmute" : "Mute"}
@@ -1463,25 +1710,35 @@ export function GameScreen() {
                 className="flex items-center justify-between gap-2 border-b border-brass-dim bg-field px-2 py-1"
                 data-testid="seat-pings"
               >
-                <p className="min-w-0 flex-1 truncate font-display text-[10px] uppercase tracking-wide text-gold">
+                <p className="min-w-0 flex-1 truncate font-display text-xs uppercase tracking-wide text-gold">
                   {pingLine || "Seats"}
                 </p>
-                <p className="shrink-0 font-display text-[10px] uppercase text-brass" data-testid="match-delay">
+                <p className="shrink-0 font-display text-xs uppercase text-brass" data-testid="match-delay">
                   Delay {delayTicks}
                 </p>
-              </div>
-            )}
-            {sim.powerOf(viewer as 0).low && (
-              <div
-                data-testid="low-power"
-                className={`pulse flex shrink-0 items-center justify-center bg-danger font-display uppercase tracking-widest text-ink ${portrait ? "h-8 text-xs" : "h-6 text-[10px]"}`}
-              >
-                Low power — supply stopped, defenses off
               </div>
             )}
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
               <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
+              {sim.powerOf(viewer as 0).low && (
+                <div
+                  data-testid="low-power"
+                  className="pulse pointer-events-none absolute top-1 left-1 z-20 flex h-11 max-w-[58%] items-center bg-danger px-2 font-display text-xs uppercase tracking-wide text-ink"
+                >
+                  Low power — supply stopped
+                </div>
+              )}
+              {land && buildOpen && phase === "play" && (
+                <BuildColumn
+                  sim={sim}
+                  team={viewer}
+                  placing={placing}
+                  onPlace={placeKind}
+                  onCancel={() => setPlacing(null)}
+                  onClose={() => setBuildOpen(false)}
+                />
+              )}
               {prep.on && phase === "play" && (
                 <div
                   className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-field/94 px-6 text-center"
@@ -1500,29 +1757,60 @@ export function GameScreen() {
                   buildOn={buildOpen || !!placing}
                   moveOn={sel.length > 0 && !selecting}
                   selecting={selecting}
+                  armed={arming}
+                  strike={strike && arming}
                   raised={!portrait}
+                  dock={land ? "bottom-2" : undefined}
+                  onArmy={selectArmy}
                   onBuild={() => {
                     setBuildOpen((v) => !v);
-                    setSelecting(false);
+                    setProdTab("build");
                   }}
                   onMove={() => {
+                    selectRef.current = false;
+                    armRef.current = false;
+                    strikeRef.current = false;
                     setSelecting(false);
                     setArming(false);
+                    setStrike(false);
                   }}
-                  onSelect={() => setSelecting((v) => !v)}
+                  onAttackMove={orderAttackMove}
+                  onSelect={() => {
+                    const next = !selectRef.current;
+                    selectRef.current = next;
+                    if (next) {
+                      armRef.current = false;
+                      strikeRef.current = false;
+                      setArming(false);
+                      setStrike(false);
+                    }
+                    setSelecting(next);
+                  }}
                 />
+              )}
+              {phase === "play" && sim.time < DEPLOY_SECS && (
+                <p
+                  data-testid="deploy-countdown"
+                  className={`pointer-events-none absolute left-2 z-20 border border-brass-dim bg-field/92 px-3 py-1 font-display text-sm tracking-wide text-gold ${land ? "top-1 max-w-[58%]" : "top-2"}`}
+                >
+                  Deployment {clock(DEPLOY_SECS - sim.time)} — hold fire
+                </p>
               )}
               {sim.alarm[viewer] && sim.time < sim.alarm[viewer]!.until && phase === "play" && (
                 <button
                   type="button"
                   data-testid="base-alarm"
-                  className="pulse absolute top-2 left-1/2 z-10 h-11 -translate-x-1/2 steel px-3 font-display text-xs uppercase tracking-wide text-danger"
+                  className={`pulse absolute left-2 z-20 flex h-11 max-w-[58%] items-center steel px-3 font-display text-xs uppercase tracking-wide text-danger ${
+                    land ? (sim.time < DEPLOY_SECS || sim.powerOf(viewer as 0).low ? "top-12" : "top-1") : "top-2"
+                  }`}
                   onClick={() => {
                     const at = sim.alarm[viewer];
                     if (!at) return;
                     camRef.current.x = at.x;
                     camRef.current.y = at.y;
-                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current);
+                    camRef.current.vx = 0;
+                    camRef.current.vy = 0;
+                    clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
                     setFrame((n) => n + 1);
                   }}
                 >
@@ -1570,7 +1858,7 @@ export function GameScreen() {
                 </p>
               )}
               {!portrait && (
-                <p className="pointer-events-none absolute bottom-1 left-1 z-10 max-w-[70%] truncate steel-inset px-1.5 py-0.5 text-[10px] text-gold">
+                <p className="pointer-events-none absolute bottom-1 left-16 z-10 max-w-[62%] truncate steel-inset px-1.5 py-0.5 text-xs text-gold">
                   {stall || sim.logs[sim.logs.length - 1] || hintFor(sim, viewer as Team)}
                 </p>
               )}
@@ -1578,6 +1866,9 @@ export function GameScreen() {
                 <Overlay title="Paused">
                   <p className="max-w-xs text-center text-sm text-pretty text-muted">
                     The room is paused. Switching apps does not pause anyone. Only Pause does.
+                  </p>
+                  <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
+                    {botBrief(sim)}
                   </p>
                   <PauseSound />
                   <BarButton
@@ -1609,6 +1900,9 @@ export function GameScreen() {
               {paused && phase === "play" && !pauseSheet && (
                 <Overlay title="Paused">
                   <PauseSound />
+                  <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
+                    {botBrief(sim)}
+                  </p>
                   <BarButton
                     label="Resume"
                     onClick={() => {
@@ -1667,27 +1961,36 @@ export function GameScreen() {
                 >
                   <Scoreboard sim={sim} viewer={viewer} />
                   <p className="max-w-xs text-center text-sm text-pretty text-muted">{sim.reason}</p>
-                  <BarButton
-                    label="Rematch"
-                    testId="rematch"
-                    onClick={() => {
-                      if (netRef.current) netRef.current.rematch();
-                      else restartSame();
-                    }}
-                  >
-                    <RotateCcw className="size-5" /> Rematch
-                  </BarButton>
-                  <BarButton
-                    label="Menu"
-                    onClick={() => {
-                      netRef.current?.leave();
-                      netRef.current = null;
-                      setOnline(false);
-                      setPhase("menu");
-                    }}
-                  >
-                    Menu
-                  </BarButton>
+                  <div className="flex w-full shrink-0 gap-2">
+                    <BarButton
+                      label="Rematch"
+                      testId="rematch"
+                      block
+                      onClick={() => {
+                        if (netRef.current) netRef.current.rematch();
+                        else {
+                          const next = { ...optsRef.current, ...normalBotDefaults() };
+                          optsRef.current = next;
+                          setSetup(next);
+                          restartSame();
+                        }
+                      }}
+                    >
+                      <RotateCcw className="size-5" /> Rematch
+                    </BarButton>
+                    <BarButton
+                      label="Menu"
+                      block
+                      onClick={() => {
+                        netRef.current?.leave();
+                        netRef.current = null;
+                        setOnline(false);
+                        setPhase("menu");
+                      }}
+                    >
+                      Menu
+                    </BarButton>
+                  </div>
                 </Overlay>
               )}
             </div>
@@ -1705,13 +2008,7 @@ export function GameScreen() {
                 onTrain={trainAt}
                 onCancelPlace={() => setPlacing(null)}
                 onRally={() => setRally((v) => !v)}
-                onSell={() => {
-                  if (!selB || !sim) return;
-                  const id = selB;
-                  act("sell", { id }, () => sim.sellBuilding(id, viewer as 0));
-                  setSelB(null);
-                  setFrame((n) => n + 1);
-                }}
+                onSell={sellSelected}
                 onCancel={() => {
                   if (!selB || !sim) return;
                   const id = selB;
@@ -1722,7 +2019,71 @@ export function GameScreen() {
               />
             )}
             </div>
-            <footer className={`steel ${portrait ? "shrink-0 px-2 pt-1 pb-[max(8px,env(safe-area-inset-bottom))]" : "absolute inset-x-0 bottom-0 z-30 bg-field/94 px-1 py-0.5 pb-[max(2px,env(safe-area-inset-bottom))]"}`}>
+            {phase !== "over" && (
+            <footer data-testid="battle-footer" className={`steel ${portrait ? "shrink-0 px-2 pt-1 pb-[max(8px,env(safe-area-inset-bottom))]" : short ? "cmd-dock z-30 shrink-0" : "absolute inset-x-0 bottom-0 z-30 bg-field/94 px-1 py-0.5 pb-[max(2px,env(safe-area-inset-bottom))]"}`}>
+              {short && !portrait ? (
+                <ShortDock
+                  open={buildOpen}
+                  onToggle={() => setBuildOpen((v) => !v)}
+                  busy={sel.length > 0 || selB != null || !!placing}
+                  sim={sim}
+                  team={viewer}
+                  sel={sel}
+                  selB={selB}
+                  placing={placing}
+                  rally={rally}
+                  armed={arming}
+                  placeReason={ghostReason}
+                  squadOn={squadOn}
+                  onSave={saveGroup}
+                  onRecall={recallGroup}
+                  onPlace={placeKind}
+                  onCancelPlace={() => setPlacing(null)}
+                  onTrain={trainAt}
+                  onCancelOne={cancelOne}
+                  onStop={orderStop}
+                  onAttack={orderAttack}
+                  onGuard={orderGuard}
+                  onAttackMove={orderAttackMove}
+                  onScatter={orderScatter}
+                  onHarvest={orderHarvest}
+                  onReturn={orderReturn}
+                  onDeploy={orderDeploy}
+                  onRally={() => setRally((v) => !v)}
+                  onRepair={orderRepair}
+                  onClear={() => {
+                    setSel([]);
+                    setSelB(null);
+                    setPlacing(null);
+                    setArming(false);
+                  }}
+                  onOpenBuild={openBuild}
+                  onSell={sellSelected}
+                  onToggleGate={() => {
+                    if (!selB) return;
+                    const id = selB;
+                    act("gate", { id }, () => sim.toggleGate(id, viewer as 0));
+                    setFrame((n) => n + 1);
+                  }}
+                  onLoad={() => {
+                    const ids = sel.slice();
+                    act("load", { ids }, () => sim.issueLoad(ids));
+                    setFrame((n) => n + 1);
+                  }}
+                  onUnload={() => {
+                    const ids = sel.slice();
+                    act("unload", { ids }, () => sim.issueUnload(ids));
+                    setFrame((n) => n + 1);
+                  }}
+                  onCancel={() => {
+                    if (!selB) return;
+                    const id = selB;
+                    act("cancel", { id }, () => sim.cancelTrain(id, viewer as 0));
+                    setFrame((n) => n + 1);
+                  }}
+                />
+              ) : (
+              <>
               {portrait && (
                 <p className="truncate px-1 text-xs text-gold">
                   {stall || sim.logs[sim.logs.length - 1] || hintFor(sim, viewer as Team)}
@@ -1753,13 +2114,13 @@ export function GameScreen() {
                   ))}
                 </div>
               )}
-              {phone && (buildOpen || !!placing || sel.length > 0 || selB != null) ? (
+              {phone && !trainHallOnly && (buildOpen || !!placing || sel.length > 0 || selB != null) ? (
               <div className="mt-1 flex gap-2 overflow-x-auto" data-testid="portrait-drawer" data-frame={frame}>
                 <CommandBar
                   sim={sim}
                   team={viewer}
-                  sel={sel}
-                  selB={selB}
+                  sel={buildOpen ? [] : sel}
+                  selB={buildOpen ? null : selB}
                   placing={placing}
                   rally={rally}
                   armed={arming}
@@ -1774,7 +2135,7 @@ export function GameScreen() {
                   onStop={orderStop}
                   onAttack={orderAttack}
                   onGuard={orderGuard}
-                  onAttackMove={() => setArming((v) => !v)}
+                  onAttackMove={orderAttackMove}
                   onScatter={orderScatter}
                   onHarvest={orderHarvest}
                   onReturn={orderReturn}
@@ -1787,13 +2148,8 @@ export function GameScreen() {
                     setPlacing(null);
                     setArming(false);
                   }}
-                  onSell={() => {
-                    if (!selB) return;
-                    const id = selB;
-                    act("sell", { id }, () => sim.sellBuilding(id, viewer as 0));
-                    setSelB(null);
-                    setFrame((n) => n + 1);
-                  }}
+                  onOpenBuild={openBuild}
+                  onSell={sellSelected}
                   onToggleGate={() => {
                     if (!selB) return;
                     const id = selB;
@@ -1831,7 +2187,7 @@ export function GameScreen() {
                   onStop={orderStop}
                   onAttack={orderAttack}
                   onGuard={orderGuard}
-                  onAttackMove={() => setArming((v) => !v)}
+                  onAttackMove={orderAttackMove}
                   onScatter={orderScatter}
                   onHarvest={orderHarvest}
                   onReturn={orderReturn}
@@ -1859,14 +2215,32 @@ export function GameScreen() {
               ) : null}
               <div className={portrait ? "mt-1 flex flex-col gap-1" : "flex items-center gap-1 overflow-x-auto"}>
                 <SquadKeys tight={!portrait} marks={squadOn} onSave={saveGroup} onRecall={recallGroup} />
-                <TroopRoster tight={!portrait} sim={sim} team={viewer} onTrain={trainAt} />
+                <TroopRoster tight={!portrait} sim={sim} team={viewer} selB={selB} onTrain={trainAt} onCancelOne={cancelOne} />
+                {(portrait || phone) && (
+                  <SellButton
+                    buildingId={selB}
+                    disabled={(() => {
+                      if (selB == null) return true;
+                      const b = sim.buildingById(selB);
+                      return !b || b.team !== viewer || b.rubble > 0 || !b.complete || b.kind === "span";
+                    })()}
+                    onConfirm={sellSelected}
+                  />
+                )}
               </div>
+              </>
+              )}
             </footer>
-          </>
+            )}
+          </div>
         )
       )}
     </div>
   );
+}
+
+function isTrainHall(kind: string | undefined): kind is TrainAt {
+  return kind === "barracks" || kind === "factory" || kind === "dock" || kind === "helipad";
 }
 
 function producerOf(sim: Sim, team: number, kind: BuildingId, selB: number | null): Building | undefined {
@@ -1934,7 +2308,7 @@ function ProductionColumn({
   return (
     <aside
       data-testid="rts-column"
-      className="steel flex w-36 shrink-0 flex-col"
+      className="steel flex w-32 shrink-0 flex-col"
       style={{ paddingRight: "env(safe-area-inset-right)" }}
     >
       <div className="flex min-h-0 flex-1">
@@ -2013,7 +2387,7 @@ function ProductionColumn({
                       <TrainButton key={id} sim={sim} team={team} building={hall} unitId={id} onTrain={(unit) => onTrain(active, unit)} />
                     ))}
                 </div>
-                <div className="flex gap-1">
+                <div className="flex flex-wrap gap-1">
                   <BarButton label={rally ? "Tap the field" : "Set rally"} onClick={onRally}>
                     {rally ? "Tap" : "Rally"}
                   </BarButton>
@@ -2022,9 +2396,7 @@ function ProductionColumn({
                       <X className="size-4" />
                     </BarButton>
                   )}
-                  <BarButton label="Sell for half" onClick={onSell}>
-                    Sell
-                  </BarButton>
+                  <SellButton buildingId={selB} onConfirm={onSell} />
                 </div>
               </div>
             ) : (
@@ -2093,7 +2465,7 @@ function CommandStrip({
   const harvester = units.find((u) => u.kind === "harvester");
   const building = selB ? sim.buildingById(selB) : undefined;
   const idle = units.length === 0;
-  const fighters = units.some((u) => u.hp > 0 && u.damage > 0 && !u.aboard);
+  const fighters = units.some((u) => u.hp > 0 && (u.damage > 0 || u.kind === "engineer") && !u.aboard);
   const cargo =
     harvester && harvester.cargoMax > 0
       ? `${Math.min(100, Math.round((harvester.cargo / harvester.cargoMax) * 100))}%`
@@ -2108,14 +2480,14 @@ function CommandStrip({
           <p className="shrink-0 text-xs text-muted">{placeReason}</p>
         </>
       )}
-      <BarButton label="Attack their base" testId="cmd-attack" dense disabled={!fighters} onClick={onAttack}>
-        <Crosshair className="size-4" /> Attack
+      <BarButton label={armed ? "Tap an enemy building" : "Attack"} testId="cmd-attack" dense disabled={!fighters} onClick={onAttack}>
+        <Crosshair className="size-4" /> {armed ? "Tap" : "Attack"}
       </BarButton>
-      <BarButton label="Stop" testId="cmd-stop" dense disabled={idle} onClick={onStop}>
+      <BarButton label="Stop" testId="cmd-stop" disabled={idle} onClick={onStop}>
         <Square className="size-4" /> Stop
       </BarButton>
-      <BarButton label="Guard" testId="cmd-guard" dense disabled={idle} onClick={onGuard}>
-        <Shield className="size-4" /> Guard
+      <BarButton label="Hold position" testId="cmd-guard" disabled={idle} onClick={onGuard}>
+        <Shield className="size-4" /> Hold
       </BarButton>
       <BarButton label={armed ? "Tap ground to attack-move" : "Attack-move"} testId="cmd-attack-move" dense disabled={idle} onClick={onAttackMove}>
         <Crosshair className="size-4" /> {armed ? "Armed" : "A-Move"}
@@ -2186,7 +2558,7 @@ function SquadKeys({
           type="button"
           data-testid={`squad-${i + 1}`}
           aria-label={marks[i] ? `Recall group ${i + 1}. Hold to replace it.` : `Group ${i + 1}. Hold to save the selection.`}
-          className={`grid place-items-center border font-display ${tight ? "h-9 w-9 text-xs" : "h-11 w-11 text-sm"} ${
+      className={`grid place-items-center border font-display text-sm ${tight ? "h-11 w-11" : "h-11 w-11"} ${
             marks[i] ? "border-gold text-gold" : "border-brass-dim text-muted"
           }`}
           onContextMenu={(e) => e.preventDefault()}
@@ -2214,16 +2586,193 @@ function SquadKeys({
   );
 }
 
+function ShortDock({
+  open,
+  onToggle,
+  busy,
+  sim,
+  team,
+  sel,
+  selB,
+  placing,
+  rally,
+  armed,
+  placeReason,
+  squadOn,
+  onSave,
+  onRecall,
+  onPlace,
+  onCancelPlace,
+  onTrain,
+  onCancelOne,
+  onStop,
+  onAttack,
+  onGuard,
+  onAttackMove,
+  onScatter,
+  onHarvest,
+  onReturn,
+  onDeploy,
+  onRally,
+  onRepair,
+  onClear,
+  onOpenBuild,
+  onSell,
+  onToggleGate,
+  onLoad,
+  onUnload,
+  onCancel,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  busy: boolean;
+  sim: Sim;
+  team: number;
+  sel: number[];
+  selB: number | null;
+  placing: BuildingId | null;
+  rally: boolean;
+  armed: boolean;
+  placeReason: string;
+  squadOn: [boolean, boolean, boolean, boolean];
+  onSave: (i: number) => void;
+  onRecall: (i: number) => void;
+  onPlace: (k: BuildingId) => void;
+  onCancelPlace: () => void;
+  onTrain: (kind: BuildingId, unit: UnitId) => void;
+  onCancelOne: (kind: BuildingId, unit: UnitId) => void;
+  onStop: () => void;
+  onAttack: () => void;
+  onGuard: () => void;
+  onAttackMove: () => void;
+  onScatter: () => void;
+  onHarvest: () => void;
+  onReturn: () => void;
+  onDeploy: () => void;
+  onRally: () => void;
+  onRepair: () => void;
+  onClear: () => void;
+  onOpenBuild: () => void;
+  onSell: () => void;
+  onToggleGate: () => void;
+  onLoad: () => void;
+  onUnload: () => void;
+  onCancel: () => void;
+}) {
+  const commands = (
+    <CommandBar
+      sim={sim}
+      team={team}
+      sel={sel}
+      selB={selB}
+      placing={placing}
+      rally={rally}
+      armed={armed}
+      placeReason={placeReason}
+      onPlace={onPlace}
+      onCancelPlace={onCancelPlace}
+      onTrain={(id) => {
+        const building = selB ? sim.buildingById(selB) : undefined;
+        if (!building) return;
+        onTrain(building.kind, id);
+      }}
+      onStop={onStop}
+      onAttack={onAttack}
+      onGuard={onGuard}
+      onAttackMove={onAttackMove}
+      onScatter={onScatter}
+      onHarvest={onHarvest}
+      onReturn={onReturn}
+      onDeploy={onDeploy}
+      onRally={onRally}
+      onRepair={onRepair}
+      onClear={onClear}
+      onOpenBuild={onOpenBuild}
+      onSell={onSell}
+      onToggleGate={onToggleGate}
+      onLoad={onLoad}
+      onUnload={onUnload}
+      onCancel={onCancel}
+    />
+  );
+  const building = selB != null ? sim.buildingById(selB) : undefined;
+  const unitOrders = sel.length > 0 && selB == null;
+  const ownBuilding =
+    building && building.team === team && building.hp > 0 && building.rubble <= 0 && building.kind !== "span" && building.complete
+      ? building
+      : undefined;
+  const producer = !!ownBuilding && isTrainHall(ownBuilding.kind);
+  const hurt = !!ownBuilding && (ownBuilding.mending || ownBuilding.hp < ownBuilding.maxHp);
+  const gate = !!ownBuilding && ownBuilding.kind === "gate";
+  const slot = "bevel-btn grid h-11 w-14 shrink-0 place-items-center font-display text-[11px] uppercase leading-none disabled:text-muted";
+  return (
+    <div
+      className="flex h-16 items-center gap-1 px-1"
+      data-testid="short-dock"
+      onContextMenu={(e) => e.preventDefault()}
+      style={{ WebkitTouchCallout: "none", userSelect: "none" }}
+    >
+      <SquadKeys tight marks={squadOn} onSave={onSave} onRecall={onRecall} />
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" style={{ touchAction: "pan-x" }}>
+        {unitOrders ? (
+          commands
+        ) : (
+          <TroopRoster tight sim={sim} team={team} selB={selB} onTrain={onTrain} onCancelOne={onCancelOne} />
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-1" data-testid="dock-utility">
+        <button
+          type="button"
+          data-testid="tray-toggle"
+          aria-pressed={producer ? false : open}
+          aria-label={producer ? `Show ${ownBuilding.kind} units` : open ? "Hide build list" : "Show build list"}
+          onClick={onOpenBuild}
+          className={`${slot} ${!producer && open ? "bg-crystal text-crystal-ink" : "text-gold"}`}
+        >
+          Build
+        </button>
+        <button
+          type="button"
+          data-testid={gate ? "cmd-gate" : "cmd-rally"}
+          disabled={!producer && !gate}
+          aria-label={gate ? (ownBuilding.open ? "Lock gate" : "Open gate") : rally ? "Tap the field" : "Set rally"}
+          onClick={gate ? onToggleGate : onRally}
+          className={`${slot} ${producer || gate ? "" : "invisible"}`}
+        >
+          {gate ? (ownBuilding.open ? "Lock" : "Open") : rally ? "Tap" : "Rally"}
+        </button>
+        <button
+          type="button"
+          data-testid="cmd-repair"
+          disabled={!hurt}
+          aria-label={ownBuilding?.mending ? "Stop repair" : "Repair"}
+          onClick={onRepair}
+          className={`${slot} ${hurt ? "" : "invisible"}`}
+        >
+          {ownBuilding?.mending ? "Stop" : "Repair"}
+        </button>
+        <SellButton buildingId={selB} disabled={!ownBuilding} onConfirm={onSell} />
+      </div>
+    </div>
+  );
+}
+
 function TroopRoster({
   sim,
   team,
   onTrain,
+  onCancelOne,
+  selB = null,
   tight = false,
+  icons = false,
 }: {
   sim: Sim;
   team: number;
   onTrain: (kind: BuildingId, unit: UnitId) => void;
+  onCancelOne?: (kind: BuildingId, unit: UnitId) => void;
+  selB?: number | null;
   tight?: boolean;
+  icons?: boolean;
 }) {
   const faction = sim.factionOf(team as 0);
   const hasDock = sim.buildings.some((b) => b.team === team && b.kind === "dock" && b.complete && b.hp > 0 && b.rubble <= 0);
@@ -2233,20 +2782,43 @@ function TroopRoster({
   ];
   if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn)) groups.push({ id: "dock", label: "Navy" });
   if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn)) groups.push({ id: "helipad", label: "Air" });
+  const picked = selB != null ? sim.buildingById(selB) : undefined;
   return (
-    <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto" data-testid="troop-roster">
+    <div
+      className={`flex min-w-0 flex-1 items-center overflow-x-auto ${icons ? "gap-1" : "gap-2"}`}
+      data-testid="troop-roster"
+      onContextMenu={(e) => e.preventDefault()}
+      style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "pan-x" }}
+    >
       {groups.map((group) => {
         const list = trainedList(group.id, faction).filter((id) => trainOffered(sim.mapId, faction, id, hasDock || group.id !== "dock"));
         if (!list.length) return null;
-        const hall = producerOf(sim, team, group.id, null);
+        const hall = producerOf(sim, team, group.id, selB);
+        const hot = !!picked && picked.kind === group.id && picked.team === team;
         return (
-          <div key={group.id} className="flex shrink-0 items-stretch gap-1">
-            <span className="flex w-5 items-center justify-center bg-well font-display text-[9px] uppercase tracking-wide text-gold [writing-mode:vertical-rl]">
-              {group.label}
-            </span>
+          <div
+            key={group.id}
+            data-roster-group={group.id}
+            className={`flex shrink-0 items-center gap-1 ${hot ? "outline outline-1 outline-gold" : ""}`}
+          >
+            {icons ? null : (
+              <span className="shrink-0 whitespace-nowrap px-1 font-display text-[11px] uppercase leading-none tracking-wide text-gold">
+                {group.label}
+              </span>
+            )}
             {list.map((id) =>
               hall ? (
-                <TrainButton key={id} tight={tight} sim={sim} team={team} building={hall} unitId={id} onTrain={(unit) => onTrain(group.id, unit)} />
+                <TrainButton
+                  key={id}
+                  tight={tight}
+                  icons={icons}
+                  sim={sim}
+                  team={team}
+                  building={hall}
+                  unitId={id}
+                  onTrain={(unit) => onTrain(group.id, unit)}
+                  onCancelOne={onCancelOne ? () => onCancelOne(group.id, id) : undefined}
+                />
               ) : (
                 <button
                   key={id}
@@ -2254,10 +2826,13 @@ function TroopRoster({
                   disabled
                   data-testid={`train-${id}`}
                   aria-label={`${resolveUnit(id, faction).name}. Build a ${BUILDINGS[group.id].name} first.`}
-                  className={`bevel-btn flex shrink-0 flex-col items-center justify-center px-1 text-muted ${tight ? "h-11 w-14" : "h-16 w-16"}`}
+                  onContextMenu={(e) => e.preventDefault()}
+                  className={`bevel-btn flex shrink-0 items-center justify-center gap-1 px-1.5 text-muted ${
+                    icons ? "h-11 min-w-11" : tight ? "h-12 min-h-11 min-w-[8.75rem] flex-row" : "h-16 w-16 flex-col"
+                  }`}
                 >
-                  <span className="max-w-full truncate font-display text-[10px] uppercase leading-none">{resolveUnit(id, faction).short}</span>
-                  <span className="text-[9px] text-muted">Locked</span>
+                  <span className="whitespace-nowrap font-display text-[11px] uppercase leading-none">{resolveUnit(id, faction).short}</span>
+                  {icons ? null : <span className="whitespace-nowrap text-[11px] leading-none text-muted">Locked</span>}
                 </button>
               ),
             )}
@@ -2278,7 +2853,10 @@ function QueueStrip({ sim, team }: { sim: Sim; team: number }) {
   return (
     <div className="mt-1 flex gap-2 overflow-x-auto" data-testid="queue-strip">
       {rows.map((b) => {
-        const rate = low && b.kind !== "power" && b.kind !== "advpower" ? 0.5 : 1;
+        const plant = b.kind === "power" || b.kind === "advpower";
+        const brown = !low ? 1 : plant ? 0.8 : 0.5;
+        const works = sim.worksLeft[team]! > 0 ? 1.65 : 1;
+        const rate = !b.complete ? brown * 1.25 * works : brown * works;
         let label = b.name;
         let p = 0;
         if (!b.complete) {
@@ -2312,25 +2890,30 @@ function ResourcePill({
   value,
   tone,
   children,
+  compact = false,
 }: {
   label: string;
   value: string;
   tone: string;
   children: ReactNode;
+  compact?: boolean;
 }) {
   return (
-    <div className="flex h-9 min-w-0 items-center gap-1 border border-brass-dim bg-field px-1.5" aria-label={label}>
+    <div
+      className={`flex min-w-0 items-center gap-1 border border-brass-dim bg-field ${compact ? "h-7 px-1" : "h-9 px-1.5"}`}
+      aria-label={label}
+    >
       {children}
-      <span className={`truncate font-display text-xs tabular-nums ${tone}`}>{value}</span>
+      <span className={`truncate font-display tabular-nums ${tone} text-xs`}>{value}</span>
     </div>
   );
 }
 
-function PowerPill({ sim, team }: { sim: Sim; team: number }) {
+function PowerPill({ sim, team, compact = false }: { sim: Sim; team: number; compact?: boolean }) {
   const p = sim.powerOf((team === 1 || team === 2 || team === 3 ? team : 0) as 0);
   return (
-    <ResourcePill label="Power" value={`${p.supply}/${p.use}`} tone={p.low ? "text-danger" : "text-crystal"}>
-      <Zap className={`size-3.5 ${p.low ? "text-danger" : "text-crystal"}`} />
+    <ResourcePill label="Power" value={`${p.supply}/${p.use}`} tone={p.low ? "text-danger" : "text-crystal"} compact={compact}>
+      <Zap className={`${compact ? "size-3" : "size-3.5"} ${p.low ? "text-danger" : "text-crystal"}`} />
     </ResourcePill>
   );
 }
@@ -2343,48 +2926,194 @@ function CraneMark() {
   );
 }
 
+function BuildColumn({
+  sim,
+  team,
+  placing,
+  onPlace,
+  onCancel,
+  onClose,
+}: {
+  sim: Sim;
+  team: number;
+  placing: BuildingId | null;
+  onPlace: (kind: BuildingId) => void;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const faction = sim.factionOf(team as 0);
+  const power = sim.powerOf(team as 0);
+  const yard = sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
+  const scroller = useRef<HTMLDivElement>(null);
+  const drag = useRef({ y: 0, top: 0, moved: false, active: false, swallow: false, kind: "" as BuildingId | "" });
+  return (
+    <aside
+      data-testid="build-column"
+      className={`absolute top-1 right-[104px] z-30 flex w-44 flex-col border border-brass-dim bg-field/94 ${placing ? "bottom-[108px]" : "bottom-1"}`}
+    >
+      <div className="flex h-11 shrink-0 items-center justify-between px-1">
+        <p className="font-display text-[11px] uppercase tracking-wide text-gold">Build</p>
+        <button type="button" aria-label="Close build list" className="bevel-btn h-11 min-w-11 font-display text-[11px] uppercase" onClick={onClose}>
+          Close
+        </button>
+      </div>
+      <div
+        ref={scroller}
+        data-testid="build-scroll"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1"
+        style={{ touchAction: "none", WebkitTouchCallout: "none", minHeight: placing ? undefined : 144 }}
+        onContextMenu={(e) => e.preventDefault()}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          const el = scroller.current;
+          if (!el) return;
+          el.setPointerCapture(e.pointerId);
+          const hit = (e.target as HTMLElement).closest("[data-build]");
+          drag.current = {
+            y: e.clientY,
+            top: el.scrollTop,
+            moved: false,
+            active: true,
+            swallow: false,
+            kind: (hit?.getAttribute("data-build") ?? "") as BuildingId | "",
+          };
+        }}
+        onPointerMove={(e) => {
+          const el = scroller.current;
+          const d = drag.current;
+          if (!el || !d.active) return;
+          const dy = e.clientY - d.y;
+          if (Math.abs(dy) > 8) d.moved = true;
+          el.scrollTop = d.top - dy;
+        }}
+        onPointerUp={() => {
+          const d = drag.current;
+          d.active = false;
+          d.swallow = true;
+          if (!d.moved && d.kind) onPlace(d.kind);
+        }}
+        onPointerCancel={() => {
+          drag.current.active = false;
+        }}
+      >
+        {!yard && (
+          <p className="px-1 py-2 text-[11px] text-muted">No Construction Yard.</p>
+        )}
+        {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
+          const def = BUILDINGS[id];
+          const broke = sim.credits[team] < def.cost;
+          const low = power.low && !isFence(id) && id !== "power" && id !== "advpower";
+          const Icon = BUILD_ICON[id];
+          return (
+            <button
+              key={id}
+              type="button"
+              data-testid={`build-${id}`}
+              data-build={id}
+              onClick={() => {
+                if (drag.current.swallow || drag.current.moved) {
+                  drag.current.swallow = false;
+                  drag.current.moved = false;
+                  return;
+                }
+                onPlace(id);
+              }}
+              className={`bevel-btn mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${broke || low ? "text-muted" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
+            >
+              <Icon className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1 whitespace-normal text-left text-[11px] leading-tight">{def.short}</span>
+              <span className="shrink-0 text-[11px] tabular-nums text-gold">{def.cost}</span>
+            </button>
+          );
+        })}
+      </div>
+      {placing && (
+        <button type="button" onClick={onCancel} className="bevel-btn m-1 h-11 shrink-0 font-display text-[11px] uppercase">
+          Cancel place
+        </button>
+      )}
+    </aside>
+  );
+}
+
 function FieldPad({
   buildOn,
   moveOn,
   selecting,
+  armed,
+  strike = false,
   raised = false,
+  dock,
+  edge,
   onBuild,
   onMove,
+  onAttackMove,
   onSelect,
+  onArmy,
 }: {
   buildOn: boolean;
   moveOn: boolean;
   selecting: boolean;
+  armed: boolean;
+  strike?: boolean;
   raised?: boolean;
+  dock?: string;
+  edge?: string;
   onBuild: () => void;
   onMove: () => void;
+  onAttackMove: () => void;
   onSelect: () => void;
+  onArmy?: () => void;
 }) {
-  const key = "grid size-12 place-items-center border border-crystal/80 bg-field/85 text-crystal";
-  const dock = raised ? "bottom-16" : "bottom-3";
+  const spot = dock ?? (raised ? "bottom-16" : "bottom-3");
+  const key = "grid size-11 min-h-11 min-w-11 place-items-center border border-crystal/80 bg-field/85 text-xs text-crystal";
+  const right = edge ?? "right-2";
   return (
     <div className="pointer-events-none absolute inset-0 z-20" data-testid="field-pad">
-      {selecting && (
-        <p className={`pointer-events-none absolute left-1/2 max-w-[70%] -translate-x-1/2 bg-field/80 px-3 py-1 text-center text-sm text-pretty text-ink ${raised ? "bottom-28" : "bottom-16"}`}>
-          Select units with a rectangle.
+      {selecting && !armed && (
+        <p className="pointer-events-none absolute top-14 left-1/2 max-w-[70%] -translate-x-1/2 bg-field/80 px-3 py-1 text-center text-xs text-pretty text-ink">
+          Drag a rectangle to select.
         </p>
       )}
-      {!selecting && moveOn && (
-        <p className={`pointer-events-none absolute left-1/2 -translate-x-1/2 bg-field/80 px-3 py-1 text-center text-sm text-ink ${raised ? "bottom-28" : "bottom-16"}`}>
-          Tap the ground to move.
+      {armed && (
+        <p className="pointer-events-none absolute top-14 left-1/2 max-w-[80%] -translate-x-1/2 bg-field/90 px-3 py-1 text-center text-xs text-pretty text-gold">
+          {strike ? "Tap an enemy building." : "Tap the ground to attack-move."}
         </p>
       )}
-      <button
-        type="button"
-        data-testid="pad-build"
-        aria-pressed={buildOn}
-        aria-label="Build"
-        className={`pointer-events-auto absolute left-2 ${dock} ${key} ${buildOn ? "bg-crystal text-crystal-ink" : ""}`}
-        onClick={onBuild}
-      >
-        <CraneMark />
-      </button>
-      <div className={`pointer-events-auto absolute right-2 flex flex-col gap-2 ${dock}`}>
+      <div className={`pointer-events-auto absolute left-2 flex flex-col gap-2 ${spot}`}>
+        {onArmy && (
+          <button
+            type="button"
+            data-testid="select-army"
+            aria-label="Select all army"
+            className={`${key} px-2 font-display text-xs uppercase`}
+            onClick={onArmy}
+          >
+            Army
+          </button>
+        )}
+        <button
+          type="button"
+          data-testid="pad-build"
+          aria-pressed={buildOn}
+          aria-label="Build"
+          className={`${key} ${buildOn ? "bg-crystal text-crystal-ink" : ""}`}
+          onClick={onBuild}
+        >
+          <CraneMark />
+        </button>
+      </div>
+      <div className={`pointer-events-auto absolute flex flex-col gap-2 ${right} ${spot}`}>
+        <button
+          type="button"
+          data-testid="pad-attack-move"
+          aria-pressed={armed}
+          aria-label={armed ? "Tap the map or minimap to attack-move" : "Attack-move"}
+          className={`${key} px-1 font-display text-[10px] uppercase leading-none ${armed ? "border-danger bg-danger text-ink" : ""}`}
+          onClick={onAttackMove}
+        >
+          {armed ? "Tap" : "A-Move"}
+        </button>
         <button
           type="button"
           data-testid="pad-move"
@@ -2433,11 +3162,13 @@ function CommandBar({
   onRally,
   onRepair,
   onClear,
+  onOpenBuild,
   onSell,
   onToggleGate,
   onLoad,
   onUnload,
   onCancel,
+  list = false,
 }: {
   sim: Sim;
   team: number;
@@ -2461,6 +3192,8 @@ function CommandBar({
   onRally: () => void;
   onRepair: () => void;
   onClear: () => void;
+  onOpenBuild?: () => void;
+  list?: boolean;
   onSell: () => void;
   onToggleGate: () => void;
   onLoad: () => void;
@@ -2501,7 +3234,7 @@ function CommandBar({
     );
   }
 
-  if (selectedUnits.length) {
+  if (!list && selectedUnits.length) {
     const harvester = selectedUnits.find((u) => u.kind === "harvester");
     const cargoNote =
       harvester && harvester.cargoMax > 0
@@ -2520,71 +3253,70 @@ function CommandBar({
       selectedUnits.length === 1
         ? `${selectedUnits[0].name}${airNote}${cargoNote}`
         : `${selectedUnits.length} units${airNote}${cargoNote}`;
+    const fighters = selectedUnits.some((u) => u.hp > 0 && (u.damage > 0 || u.kind === "engineer") && !u.aboard);
     return (
       <>
-        <p className="flex items-center px-1 text-sm whitespace-nowrap text-ink">{label}</p>
-        {selectedUnits.some((u) => u.hp > 0 && u.damage > 0 && !u.aboard) && (
-          <button
-            type="button"
-            data-testid="cmd-attack"
-            aria-label="Attack their base"
-            onClick={onAttack}
-            className="flex h-16 min-w-16 shrink-0 flex-col items-center justify-center bg-danger px-2 font-display text-[10px] uppercase text-ink"
-          >
-            <Crosshair className="size-5" />
-            Attack
-          </button>
+        <span className="cmd-count" title={label}>
+          {selectedUnits.length}
+        </span>
+        {fighters && (
+          <CmdTile label={armed ? "Tap an enemy building" : "Attack"} testId="cmd-attack" armed={armed} onClick={onAttack}>
+            <Crosshair />
+          </CmdTile>
         )}
-        <BarButton tile label="Stop" testId="cmd-stop" onClick={onStop}>
-          <Square className="size-5" /> Stop
-        </BarButton>
-        <BarButton tile label="Guard" testId="cmd-guard" onClick={onGuard}>
-          <Shield className="size-5" /> Guard
-        </BarButton>
-        <BarButton tile label={armed ? "Tap ground to attack-move" : "Attack-move"} testId="cmd-attack-move" onClick={onAttackMove}>
-          <Crosshair className="size-5" /> {armed ? "Armed" : "A-Move"}
-        </BarButton>
-        <BarButton tile label="Scatter" testId="cmd-scatter" onClick={onScatter}>
-          <UnfoldHorizontal className="size-5" /> Scatter
-        </BarButton>
+        <CmdTile label="Stop" testId="cmd-stop" onClick={onStop}>
+          <Ban className="text-[#ff6b5a]" />
+        </CmdTile>
+        <CmdTile label="Hold position" testId="cmd-guard" onClick={onGuard}>
+          <Hand />
+        </CmdTile>
+        <CmdTile label={armed ? "Tap ground to attack-move" : "Attack-move"} testId="cmd-attack-move" armed={armed} onClick={onAttackMove}>
+          <Route />
+        </CmdTile>
+        <CmdTile label="Scatter" testId="cmd-scatter" onClick={onScatter}>
+          <UnfoldHorizontal />
+        </CmdTile>
         {harvester && (
           <>
-            <BarButton tile label="Harvest" testId="cmd-harvest" onClick={onHarvest}>
-              <Gem className="size-5" /> Harvest
-            </BarButton>
-            <BarButton tile label="Return to refinery" testId="cmd-return" onClick={onReturn}>
-              Return
-            </BarButton>
+            <CmdTile label="Harvest" testId="cmd-harvest" onClick={onHarvest}>
+              <Gem />
+            </CmdTile>
+            <CmdTile label="Return to refinery" testId="cmd-return" onClick={onReturn}>
+              <Warehouse />
+            </CmdTile>
           </>
         )}
         {selectedUnits.some((u) => u.capInf + u.capLight > 0) && (
           <>
-            <BarButton tile label="Load nearby" onClick={onLoad}>
-              Load
-            </BarButton>
-            <BarButton tile label="Unload" onClick={onUnload}>
-              Unload
-            </BarButton>
+            <CmdTile label="Load nearby" onClick={onLoad}>
+              <Package />
+            </CmdTile>
+            <CmdTile label="Unload" onClick={onUnload}>
+              <ArrowDownToLine />
+            </CmdTile>
           </>
         )}
         {deployable && (
-          <BarButton tile label="Deploy" onClick={onDeploy}>
-            <ArrowDownToLine className="size-5" /> Deploy
-          </BarButton>
+          <CmdTile label="Deploy" onClick={onDeploy}>
+            <ArrowDownToLine />
+          </CmdTile>
         )}
-        {yard && (
-          <BarButton tile label="Build menu" onClick={onClear}>
-            Build
-          </BarButton>
-        )}
+        <CmdTile label="Clear selection" testId="cmd-clear" hot onClick={onClear}>
+          <X />
+        </CmdTile>
       </>
     );
   }
 
-  if (building && (building.kind === "barracks" || building.kind === "factory" || building.kind === "dock" || building.kind === "helipad")) {
+  if (!list && building && (building.kind === "barracks" || building.kind === "factory" || building.kind === "dock" || building.kind === "helipad")) {
     return (
       <>
         <TrainProgress sim={sim} team={team} building={building} faction={faction} />
+        {building.hp < building.maxHp && (
+          <p className="flex items-center px-2 text-sm whitespace-nowrap text-ink">
+            {Math.ceil(building.hp)}/{Math.ceil(building.maxHp)}
+          </p>
+        )}
         {building.queue.length > 0 && (
           <BarButton tile label="Cancel last order" onClick={onCancel}>
             <X className="size-5" /> Cancel
@@ -2598,24 +3330,23 @@ function CommandBar({
         <BarButton tile label={rally ? "Tap the field" : "Set rally"} onClick={onRally}>
           {rally ? "Tap field" : "Rally"}
         </BarButton>
-        <BarButton tile label="Build menu" onClick={onClear}>
+        <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
         </BarButton>
         {building.team === team && (
-          <BarButton tile label="Sell for half" onClick={onSell}>
-            Sell
-          </BarButton>
+          <SellButton tile buildingId={building.id} onConfirm={onSell} />
         )}
       </>
     );
   }
 
-  if (building && building.team === team && building.kind !== "span") {
+  if (!list && building && building.team === team && building.kind !== "span") {
     const rubble = building.rubble > 0;
     return (
       <>
         <p className="flex items-center px-2 text-sm whitespace-nowrap text-ink">
           {rubble ? "Rubble" : building.name}
+          {!rubble && building.hp < building.maxHp ? ` · ${Math.ceil(building.hp)}/${Math.ceil(building.maxHp)}` : ""}
         </p>
         {building.kind === "gate" && building.complete && !rubble && (
           <BarButton tile label={building.open ? "Lock gate" : "Open gate"} testId="cmd-gate" onClick={onToggleGate}>
@@ -2628,11 +3359,9 @@ function CommandBar({
           </BarButton>
         )}
         {!rubble && (
-          <BarButton tile label="Sell for half" onClick={onSell}>
-            Sell
-          </BarButton>
+          <SellButton tile buildingId={building.id} onConfirm={onSell} />
         )}
-        <BarButton tile label="Build menu" onClick={onClear}>
+        <BarButton tile label="Build menu" onClick={() => (onOpenBuild ?? onClear)()}>
           Build
         </BarButton>
       </>
@@ -2661,8 +3390,8 @@ function CommandBar({
             }`}
           >
             <Icon className="size-6" />
-            <span className="max-w-full truncate font-display text-[10px] uppercase leading-none">{def.short}</span>
-            <span className="text-[10px] text-gold tabular-nums">
+            <span className="max-w-full whitespace-normal text-center font-display text-[11px] uppercase leading-tight">{def.short}</span>
+            <span className="text-xs text-gold tabular-nums">
               {def.cost}
               {def.powerOut > 0 ? ` +${def.powerOut}` : def.powerUse > 0 ? ` −${def.powerUse}` : ""}
             </span>
@@ -2684,12 +3413,15 @@ function TrainProgress({
   building: Building;
   faction: FactionId;
 }) {
-  const lowBuild = sim.powerOf(team as 0).low && building.kind !== "power" && building.kind !== "advpower";
+  const low = sim.powerOf(team as 0).low;
+  const plant = building.kind === "power" || building.kind === "advpower";
+  const brown = !low ? 1 : plant ? 0.8 : 0.5;
   const rush = sim.worksLeft[team]! > 0 ? 1.65 : 1;
-  const rate = (lowBuild ? 0.5 : 1) * rush;
+  const buildRate = brown * 1.25 * rush;
+  const trainRate = brown * rush;
   if (!building.complete) {
     const p = Math.max(0, Math.min(1, 1 - building.buildLeft / Math.max(0.01, building.buildTotal)));
-    const left = Math.ceil(Math.max(0, building.buildLeft) / rate);
+    const left = Math.ceil(Math.max(0, building.buildLeft) / buildRate);
     return (
       <div className="flex h-12 min-w-36 flex-col justify-center px-2" data-testid="build-progress">
         <div className="flex justify-between text-xs text-muted">
@@ -2706,7 +3438,7 @@ function TrainProgress({
   const id = building.queue[0];
   const spec = resolveUnit(id, faction);
   const p = Math.max(0, Math.min(1, building.prod / Math.max(0.01, spec.time)));
-  const left = Math.ceil(Math.max(0, spec.time - building.prod) / rate);
+  const left = Math.ceil(Math.max(0, spec.time - building.prod) / trainRate);
   const rest = building.queue
     .slice(1)
     .map((q) => resolveUnit(q, faction).short)
@@ -2716,38 +3448,41 @@ function TrainProgress({
       <div className="flex justify-between gap-2 text-xs text-crystal">
         <span className="truncate">
           {spec.short}
-          {lowBuild ? " · half speed" : ""}
+          {low && !plant ? " · half speed" : low ? " · slower" : ""}
         </span>
         <span className="tabular-nums">{left}s</span>
       </div>
       <div className="mt-1 h-2 bg-field">
-        <div className={`h-full ${lowBuild ? "bg-danger" : "bg-crystal"}`} style={{ width: `${Math.floor(p * 100)}%` }} />
+        <div className={`h-full ${low ? "bg-danger" : "bg-crystal"}`} style={{ width: `${Math.floor(p * 100)}%` }} />
       </div>
-      {rest ? <span className="truncate text-[10px] text-muted">{rest}</span> : null}
+      {rest ? <span className="truncate text-xs text-muted">{rest}</span> : null}
     </div>
   );
 }
 
 const UNIT_MARK: Partial<Record<UnitId, string>> = {
-  rifle: "/art/infantry.png",
-  rocket: "/art/rocket.png",
-  scout: "/art/infantry.png",
-  engineer: "/art/infantry.png",
-  tank: "/art/turret.png",
-  medium: "/art/hull.png",
-  artillery: "/art/hull.png",
-  vanguard: "/art/hull.png",
-  razor: "/art/hull.png",
-  mcv: "/art/yard.png",
-  apc: "/art/hull.png",
-  harvester: "/art/harvester.png",
+  rifle: "/art/iso/rifle.png",
+  rocket: "/art/iso/rocket.png",
+  marksman: "/art/iso/marksman.png",
+  wader: "/art/iso/wader.png",
+  scout: "/art/iso/scout.png",
+  engineer: "/art/iso/engineer.png",
+  tank: "/art/iso/tank.png",
+  medium: "/art/iso/medium.png",
+  scatter: "/art/iso/scatter.png",
+  artillery: "/art/iso/artillery.png",
+  vanguard: "/art/iso/vanguard.png",
+  razor: "/art/iso/razor.png",
+  apc: "/art/iso/apc.png",
+  harvester: "/art/iso/harvester.png",
+  mcv: "/art/iso/yard.png",
   gunboat: "/art/boat.png",
   frigate: "/art/boat.png",
   missile: "/art/boat.png",
   transport: "/art/boat.png",
-  chinook: "/art/heli.png",
-  attackheli: "/art/heli.png",
-  bomber: "/art/heli.png",
+  chinook: "/art/iso/chinook.png",
+  attackheli: "/art/iso/attackheli.png",
+  bomber: "/art/iso/bomber.png",
 };
 
 function TrainButton({
@@ -2756,47 +3491,194 @@ function TrainButton({
   building,
   unitId,
   onTrain,
+  onCancelOne,
   tight = false,
+  icons = false,
 }: {
   sim: Sim;
   team: number;
   building: Building;
   unitId: UnitId;
   onTrain: (id: UnitId) => void;
+  onCancelOne?: () => void;
   tight?: boolean;
+  icons?: boolean;
 }) {
   const spec = resolveUnit(unitId, sim.factionOf(team as 0));
   const need = unitRequires(unitId);
   const unlocked = !need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
   const afford = unlocked && sim.credits[team] >= spec.cost && building.queue.length < 5;
   const mark = UNIT_MARK[unitId];
+  const queued = building.queue.filter((id) => id === unitId).length;
+  const head = building.queue[0] === unitId;
+  const p = head && spec.time > 0 ? Math.max(0, Math.min(1, building.prod / spec.time)) : 0;
+  const trainRef = useRef(onTrain);
+  trainRef.current = onTrain;
+  const hold = useRef<{ timer: number; fired: boolean; x: number; y: number; id: number } | null>(null);
+  const skipClick = useRef(false);
+  useEffect(() => () => {
+    if (hold.current) window.clearTimeout(hold.current.timer);
+  }, []);
+  const queue = (n: number) => {
+    if (!building.complete || !unlocked) return;
+    for (let i = 0; i < n; i++) trainRef.current(unitId);
+  };
+  return (
+    <div className="relative w-max shrink-0" style={{ WebkitTouchCallout: "none", userSelect: "none" }}>
+      <button
+        type="button"
+        data-testid={`train-${unitId}`}
+        aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
+        disabled={!building.complete || !unlocked}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "manipulation" }}
+        onPointerDown={(e) => {
+          if (e.button !== 0 || !building.complete || !unlocked) return;
+          const timer = window.setTimeout(() => {
+            if (!hold.current) return;
+            hold.current.fired = true;
+            queue(5);
+          }, 500);
+          hold.current = { timer, fired: false, x: e.clientX, y: e.clientY, id: e.pointerId };
+        }}
+        onPointerMove={(e) => {
+          const s = hold.current;
+          if (!s || s.id !== e.pointerId || s.fired) return;
+          if (Math.hypot(e.clientX - s.x, e.clientY - s.y) > 10) {
+            window.clearTimeout(s.timer);
+            s.fired = true;
+          }
+        }}
+        onPointerUp={(e) => {
+          const s = hold.current;
+          if (!s || s.id !== e.pointerId) return;
+          window.clearTimeout(s.timer);
+          hold.current = null;
+          skipClick.current = true;
+          if (!s.fired) queue(1);
+        }}
+        onPointerCancel={() => {
+          if (hold.current) window.clearTimeout(hold.current.timer);
+          hold.current = null;
+        }}
+        onClick={() => {
+          if (skipClick.current) {
+            skipClick.current = false;
+            return;
+          }
+          queue(1);
+        }}
+        className={`bevel-btn relative flex shrink-0 items-center px-1.5 ${
+          icons ? "h-11 min-h-11 min-w-11 justify-center" : tight ? "h-12 min-h-11 w-max min-w-[8.75rem] flex-row gap-1 pr-12" : "h-16 w-20 flex-col justify-center gap-0.5 pr-8"
+        } ${afford ? "text-ink" : "text-muted"}`}
+      >
+        {mark ? (
+          <img src={mark} alt="" draggable={false} className={`${icons ? "size-6" : tight ? "size-7" : "size-8"} shrink-0 object-contain`} />
+        ) : (
+          <span className={`grid shrink-0 place-items-center bg-well font-display uppercase text-gold ${icons ? "size-6 text-xs" : "size-7 text-[11px]"}`}>
+            {spec.short.slice(0, 2)}
+          </span>
+        )}
+        {icons ? null : (
+          <span className={`flex min-w-0 flex-col leading-none ${tight ? "items-start" : "items-center"}`}>
+            <span className="whitespace-nowrap font-display text-[11px] uppercase">{spec.short}</span>
+            <span className="whitespace-nowrap text-[11px] tabular-nums text-gold">
+              {unlocked ? (
+                <>
+                  {spec.cost}
+                  <span className="text-brass"> · {commandCost(spec)}</span>
+                </>
+              ) : (
+                BUILDINGS[need!].short
+              )}
+            </span>
+          </span>
+        )}
+        {head && (
+          <span className="pointer-events-none absolute right-11 bottom-0 left-0 h-1 bg-well">
+            <span className="block h-full bg-crystal" style={{ width: `${Math.floor(p * 100)}%` }} />
+          </span>
+        )}
+      </button>
+      {!icons && queued > 0 && (
+        <span
+          role="button"
+          tabIndex={0}
+          data-testid={`queue-badge-${unitId}`}
+          aria-label={`Cancel one ${spec.short}. ${queued} queued.`}
+          onContextMenu={(e) => e.preventDefault()}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onCancelOne?.();
+          }}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter" && e.key !== " ") return;
+            e.preventDefault();
+            onCancelOne?.();
+          }}
+          className={`absolute top-0 right-0 z-10 flex w-11 flex-col items-center justify-center bg-field/92 font-display text-[11px] leading-none text-gold tabular-nums ${
+            tight ? "bottom-0" : "h-11"
+          }`}
+          style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "manipulation" }}
+        >
+          {queued}
+          {head ? (
+            <span className="mt-0.5 h-1 w-8 bg-well">
+              <span className="block h-full bg-crystal" style={{ width: `${Math.floor(p * 100)}%` }} />
+            </span>
+          ) : null}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SellButton({
+  disabled,
+  onConfirm,
+  buildingId,
+  tile = false,
+}: {
+  disabled?: boolean;
+  onConfirm: () => void;
+  buildingId: number | null;
+  tile?: boolean;
+}) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef(0);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  useEffect(() => {
+    setArmed(false);
+    window.clearTimeout(timer.current);
+  }, [buildingId, disabled]);
+  const press = () => {
+    if (disabled) return;
+    if (armed) {
+      window.clearTimeout(timer.current);
+      setArmed(false);
+      onConfirm();
+      return;
+    }
+    setArmed(true);
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setArmed(false), 2000);
+  };
   return (
     <button
       type="button"
-      data-testid={`train-${unitId}`}
-      aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
-      disabled={!building.complete || !unlocked}
-      onClick={() => onTrain(unitId)}
-      className={`bevel-btn flex shrink-0 flex-col items-center justify-center gap-0.5 px-1 ${tight ? "h-11 w-14" : "h-16 w-16"} ${
-        afford ? "text-ink" : "text-muted"
-      }`}
+      data-testid="cmd-sell"
+      disabled={disabled}
+      aria-label={armed ? "Confirm sell" : "Sell for half. Tap again to confirm."}
+      onClick={press}
+      onContextMenu={(e) => e.preventDefault()}
+      className={`bevel-btn shrink-0 font-display text-[11px] uppercase leading-none disabled:text-muted ${
+        tile ? "h-12 min-h-11 min-w-12 px-2" : "grid h-11 w-14 place-items-center"
+      } ${armed ? "bg-danger text-ink" : ""}`}
     >
-      {mark ? (
-        <img src={mark} alt="" className="size-7 object-contain" style={{ imageRendering: "pixelated" }} />
-      ) : (
-        <span className="grid size-7 place-items-center bg-well font-display text-[10px] uppercase text-gold">{spec.short.slice(0, 2)}</span>
-      )}
-      <span className="max-w-full truncate font-display text-[10px] uppercase leading-none">{spec.short}</span>
-      <span className="text-[10px] tabular-nums text-gold">
-        {unlocked ? (
-          <>
-            {spec.cost}
-            <span className="text-brass"> · {commandCost(spec)}</span>
-          </>
-        ) : (
-          BUILDINGS[need!].short
-        )}
-      </span>
+      {armed ? "Sell?" : "Sell"}
     </button>
   );
 }
@@ -2833,11 +3715,40 @@ function PlantPlate({
       data-testid="plant-plate"
     >
       <div className="bg-field/90 px-2 py-1 text-center shadow-none">
-        <p className="font-display text-[10px] uppercase tracking-wide text-ink">{b.name}</p>
+        <p className="font-display text-xs uppercase tracking-wide text-ink">{b.name}</p>
         {timer ? <p className="font-display text-sm tabular-nums text-gold">{timer}</p> : null}
-        {b.queue.length > 1 ? <p className="text-[10px] text-muted">+{b.queue.length - 1} in line</p> : null}
+        {b.queue.length > 1 ? <p className="text-xs text-muted">+{b.queue.length - 1} in line</p> : null}
       </div>
     </div>
+  );
+}
+
+function CmdTile({
+  children,
+  label,
+  onClick,
+  testId,
+  armed = false,
+  hot = false,
+}: {
+  children: ReactNode;
+  label: string;
+  onClick: () => void;
+  testId?: string;
+  armed?: boolean;
+  hot?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      data-testid={testId}
+      onClick={onClick}
+      className={`cmd-tile${armed ? " cmd-tile-armed" : ""}${hot ? " cmd-tile-hot" : ""}`}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -2849,6 +3760,7 @@ function BarButton({
   disabled,
   dense = false,
   tile = false,
+  block = false,
 }: {
   children: ReactNode;
   label: string;
@@ -2857,6 +3769,7 @@ function BarButton({
   disabled?: boolean;
   dense?: boolean;
   tile?: boolean;
+  block?: boolean;
 }) {
   return (
     <button
@@ -2866,11 +3779,11 @@ function BarButton({
       disabled={disabled}
       onClick={onClick}
       className={`bevel-btn flex shrink-0 items-center justify-center font-display uppercase tracking-wide disabled:text-muted ${
-        dense
-          ? "h-11 min-w-11 gap-1 px-2 text-[10px]"
+        block ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs" : dense
+          ? "h-11 min-h-11 min-w-11 gap-1 px-2 text-xs"
           : tile
-            ? "h-16 min-w-14 flex-col gap-0.5 px-1.5 text-[10px]"
-            : "h-12 min-w-14 gap-1 px-3 text-xs"
+            ? "h-12 min-h-12 min-w-12 gap-1.5 px-2.5 text-sm"
+            : "h-11 min-h-11 min-w-11 gap-1 px-3 text-xs"
       }`}
     >
       {children}
@@ -2906,9 +3819,9 @@ function IconButton({
 
 function Overlay({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) {
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-field/80 p-3">
-      <div className={`steel flex max-h-[92dvh] w-full flex-col items-center gap-3 overflow-y-auto p-4 ${wide ? "max-w-lg" : "max-w-sm"}`}>
-        <h2 className="font-display text-3xl uppercase tracking-widest text-gold">{title}</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2">
+      <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+        <h2 className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
     </div>
@@ -2928,11 +3841,11 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
     );
   return (
     <div className="w-full" data-testid="scoreboard">
-      <p className="mb-2 text-center font-display text-[10px] uppercase tracking-widest text-brass">
+      <p className="mb-2 text-center font-display text-xs uppercase tracking-widest text-brass">
         {sim.mapName} · {sim.mode === "survive" ? "Survive" : "Skirmish"}
       </p>
-      <div className="grid grid-cols-[1.5fr_0.7fr_0.8fr_0.8fr_0.55fr] items-center gap-x-1 px-1 text-muted">
-        <span className="font-display text-[9px] uppercase">Commander</span>
+      <div className="grid grid-cols-[1.5fr_0.7fr_0.8fr_0.8fr_0.55fr] items-center gap-x-1 px-1 text-xs text-muted">
+        <span className="font-display text-xs uppercase">Commander</span>
         <span className="text-center" title="Time lasted">
           <Timer className="mx-auto size-3.5" />
         </span>
@@ -2958,20 +3871,20 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
             <div className="flex min-w-0 items-center gap-1">
               <span className="h-7 w-1 shrink-0" style={{ background: sim.seatColor(row.t) }} />
               {champ ? <Star className="size-3.5 shrink-0 text-gold" aria-label="Winner" /> : null}
-              <span className="truncate font-display text-[11px] uppercase text-ink">{you ? "You" : (SEAT_NAME[row.t] ?? "Bot")}</span>
+              <span className="truncate font-display text-xs uppercase text-ink">{you ? "You" : (SEAT_NAME[row.t] ?? "Bot")}</span>
             </div>
-            <span className="text-center font-display text-[11px] tabular-nums text-ink">{clock(row.card.lasted)}</span>
-            <span className="text-center font-display text-[11px] tabular-nums text-ink">
+            <span className="text-center font-display text-xs tabular-nums text-ink">{clock(row.card.lasted)}</span>
+            <span className="text-center font-display text-xs tabular-nums text-ink">
               {row.card.kills}/{row.card.lost}
             </span>
-            <span className="text-center font-display text-[11px] tabular-nums text-ink">
+            <span className="text-center font-display text-xs tabular-nums text-ink">
               {row.card.razed}/{row.card.plants}
             </span>
-            <span className="text-center font-display text-[11px] tabular-nums text-gold">{row.card.power}%</span>
+            <span className="text-center font-display text-xs tabular-nums text-gold">{row.card.power}%</span>
           </div>
         );
       })}
-      <p className="mt-1 text-center text-[10px] text-pretty text-muted">
+      <p className="mt-1 text-center text-xs text-pretty text-muted">
         Units and buildings are destroyed / lost. The bolt is how long power stayed on.
       </p>
     </div>
@@ -2992,7 +3905,7 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
   const i = Math.max(0, SPEED_STEPS.findIndex((n) => Math.abs(n - speed) < 0.01));
   const label = Number.isInteger(speed) ? `${speed}×` : `${speed}×`;
   return (
-    <div className="steel-inset flex items-center" data-testid="game-speed">
+    <div className="steel-inset flex shrink-0 items-center" data-testid="game-speed">
       <button
         type="button"
         aria-label="Slower"
@@ -3003,7 +3916,9 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
       >
         −
       </button>
-      <span className={`text-center font-display tabular-nums text-gold ${compact ? "w-8 text-xs" : "w-12 text-sm"}`}>{label}</span>
+      <span className={`whitespace-nowrap text-center font-display tabular-nums text-gold ${compact ? "px-1 text-[11px]" : "px-2 text-sm"}`}>
+        Speed {label}
+      </span>
       <button
         type="button"
         aria-label="Faster"
@@ -3012,6 +3927,21 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
         onClick={() => onChange(SPEED_STEPS[Math.min(SPEED_STEPS.length - 1, i + 1)])}
         className={`flex items-center justify-center font-display text-ink disabled:text-brass-dim ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`}
       >
+        +
+      </button>
+    </div>
+  );
+}
+
+function ZoomControl({ onIn, onOut, compact = false }: { onIn: () => void; onOut: () => void; compact?: boolean }) {
+  const btn = `flex items-center justify-center font-display text-ink ${compact ? "h-8 w-7 text-base" : "h-11 w-11 text-xl"}`;
+  return (
+    <div className="steel-inset flex shrink-0 items-center" data-testid="zoom-controls">
+      <button type="button" aria-label="Zoom out" data-testid="zoom-out" onClick={onOut} className={btn}>
+        −
+      </button>
+      <span className={`whitespace-nowrap text-center font-display text-brass ${compact ? "px-0.5 text-[11px]" : "px-1 text-xs"}`}>Zoom</span>
+      <button type="button" aria-label="Zoom in" data-testid="zoom-in" onClick={onIn} className={btn}>
         +
       </button>
     </div>

@@ -1,20 +1,28 @@
 import {
   MAP_H,
   MAP_W,
+  TILE_BARN,
   TILE_BRIDGE,
+  TILE_CLEAR,
   TILE_CLIFF,
   TILE_CRYSTAL,
   TILE_DEEP,
   TILE_FORD,
+  TILE_HIGH,
+  TILE_HUT,
+  TILE_PUMP,
+  TILE_RAMP,
   TILE_ROCK,
   TILE_ROAD,
+  TILE_ROUGH,
   TILE_SAND,
   TILE_SCRUB,
   TILE_SHALLOW,
   TILE_SHORE,
   TILE_SPENT,
-  TILE_HUT,
+  TILE_STUMP,
   TILE_VALLEY,
+  TILE_WRECK,
   type CornerId,
   type MapId,
 } from "./data.ts";
@@ -968,6 +976,658 @@ export function stampCamp(
       crystal[i] = 0;
     }
   }
+}
+
+export interface FieldProp {
+  x: number;
+  y: number;
+  kind: "wreck" | "fence" | "crate";
+}
+
+function dressHash(x: number, y: number, salt: number): number {
+  let n = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(salt, 1442695041);
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+
+function nearPad(pads: { x: number; y: number }[], x: number, y: number, r: number): boolean {
+  const px = x + 0.5;
+  const py = y + 0.5;
+  for (const p of pads) {
+    if ((px - p.x) * (px - p.x) + (py - p.y) * (py - p.y) < r * r) return true;
+  }
+  return false;
+}
+
+function stampMesa(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  cx: number,
+  cy: number,
+  pads: { x: number; y: number }[],
+) {
+  const r = 3.7;
+  const cells: number[] = [];
+  for (let y = Math.max(2, Math.floor(cy - r)); y <= Math.min(gh - 3, Math.ceil(cy + r)); y++) {
+    for (let x = Math.max(2, Math.floor(cx - r)); x <= Math.min(gw - 3, Math.ceil(cx + r)); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      if (dx * dx + dy * dy > r * r) continue;
+      if (nearPad(pads, x, y, 8)) continue;
+      const i = y * gw + x;
+      const t = terrain[i] ?? 0;
+      if ((crystal[i] ?? 0) > 0) continue;
+      if (
+        t === TILE_DEEP ||
+        t === TILE_SHALLOW ||
+        t === TILE_FORD ||
+        t === TILE_BRIDGE ||
+        t === TILE_WRECK ||
+        t === TILE_ROCK ||
+        t === TILE_CLIFF ||
+        t === TILE_CRYSTAL
+      ) {
+        continue;
+      }
+      cells.push(i);
+    }
+  }
+  if (cells.length < 8) return;
+  for (const i of cells) terrain[i] = TILE_HIGH;
+  for (const i of cells) {
+    const x = i % gw;
+    const y = (i / gw) | 0;
+    const edge = [terrain[i - 1], terrain[i + 1], terrain[i - gw], terrain[i + gw]].some(
+      (n) => n !== TILE_HIGH && n !== TILE_CLIFF && n !== TILE_RAMP,
+    );
+    if (edge) terrain[i] = TILE_CLIFF;
+  }
+}
+
+function dryDisk(terrain: Uint8Array, gw: number, gh: number, cx: number, cy: number, pads: { x: number; y: number }[]): number {
+  const r = 3.4;
+  let n = 0;
+  for (let y = Math.max(1, Math.floor(cy - r)); y <= Math.min(gh - 2, Math.ceil(cy + r)); y++) {
+    for (let x = Math.max(1, Math.floor(cx - r)); x <= Math.min(gw - 2, Math.ceil(cx + r)); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      if (dx * dx + dy * dy > r * r) continue;
+      if (nearPad(pads, x, y, 8)) continue;
+      const t = terrain[y * gw + x] ?? 0;
+      if (t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH || t === TILE_SCRUB || t === TILE_ROAD) n++;
+    }
+  }
+  return n;
+}
+
+/** One mesa beside each camp-to-center line, on dry ground, so both sides share the high ground. */
+function layFairMesas(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  let raised = 0;
+  for (const t of terrain) if (t === TILE_HIGH || t === TILE_CLIFF) raised++;
+  if (raised > 10) return;
+  const cx = gw / 2;
+  const cy = gh / 2;
+  for (const p of pads) {
+    const dx = cx - p.x;
+    const dy = cy - p.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const along = Math.min(10, len * 0.28);
+    const px = -dy / len;
+    const py = dx / len;
+    const ax = p.x + (dx / len) * along;
+    const ay = p.y + (dy / len) * along;
+    const a = { x: ax + px * 7, y: ay + py * 7 };
+    const b = { x: ax - px * 7, y: ay - py * 7 };
+    const spot = dryDisk(terrain, gw, gh, a.x, a.y, pads) >= dryDisk(terrain, gw, gh, b.x, b.y, pads) ? a : b;
+    stampMesa(terrain, crystal, gw, gh, spot.x, spot.y, pads);
+  }
+}
+
+/** Push each ramp two more tiles downhill so the slope is two or three tiles, not a step. */
+function lengthenRamps(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  const extra: number[] = [];
+  const dirs = [
+    [0, -1],
+    [0, 1],
+    [-1, 0],
+    [1, 0],
+  ] as const;
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if ((terrain[y * gw + x] ?? 0) !== TILE_RAMP) continue;
+      let dx = 0;
+      let dy = 0;
+      for (const [sx, sy] of dirs) {
+        const n = terrain[(y + sy) * gw + (x + sx)] ?? 0;
+        if (n === TILE_HIGH || n === TILE_CLIFF) {
+          dx = -sx;
+          dy = -sy;
+          break;
+        }
+      }
+      if (!dx && !dy) continue;
+      for (let s = 1; s <= 2; s++) {
+        const nx = x + dx * s;
+        const ny = y + dy * s;
+        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) break;
+        if (nearPad(pads, nx, ny, 7)) break;
+        const i = ny * gw + nx;
+        const t = terrain[i] ?? 0;
+        if (t === TILE_RAMP || t === TILE_HIGH || t === TILE_CLIFF) continue;
+        if ((crystal[i] ?? 0) > 0) break;
+        if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH && t !== TILE_SHORE && t !== TILE_ROAD && t !== TILE_SCRUB) break;
+        extra.push(i);
+      }
+    }
+  }
+  for (const i of extra) terrain[i] = TILE_RAMP;
+}
+
+function linkBridges(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  const mouths: { x: number; y: number }[] = [];
+  const bank = (t: number) =>
+    t === TILE_SAND ||
+    t === TILE_CLEAR ||
+    t === TILE_ROUGH ||
+    t === TILE_SHORE ||
+    t === TILE_ROAD ||
+    t === TILE_HIGH ||
+    t === TILE_SCRUB ||
+    t === TILE_STUMP;
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      if ((terrain[y * gw + x] ?? 0) !== TILE_BRIDGE) continue;
+      const touch =
+        bank(terrain[y * gw + x - 1] ?? 0) ||
+        bank(terrain[y * gw + x + 1] ?? 0) ||
+        bank(terrain[(y - 1) * gw + x] ?? 0) ||
+        bank(terrain[(y + 1) * gw + x] ?? 0);
+      if (touch) mouths.push({ x: x + 0.5, y: y + 0.5 });
+    }
+  }
+  if (!mouths.length) return;
+  for (const p of pads) {
+    let best = mouths[0]!;
+    let bestD = Infinity;
+    for (const b of mouths) {
+      const d = (b.x - p.x) * (b.x - p.x) + (b.y - p.y) * (b.y - p.y);
+      if (d < bestD) {
+        bestD = d;
+        best = b;
+      }
+    }
+    stampLane(terrain, crystal, gw, gh, p.x, p.y, best.x, best.y, 0);
+  }
+  for (const b of mouths) {
+    const x = b.x | 0;
+    const y = b.y | 0;
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+      if (nearPad(pads, nx, ny, 7)) continue;
+      const i = ny * gw + nx;
+      if (!roadOk(terrain[i] ?? 0, crystal[i] ?? 0)) continue;
+      terrain[i] = TILE_ROAD;
+    }
+  }
+}
+
+function nearSegment(x: number, y: number, x0: number, y0: number, x1: number, y1: number, r: number): boolean {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const l2 = dx * dx + dy * dy || 1;
+  let t = ((x - x0) * dx + (y - y0) * dy) / l2;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  const px = x0 + dx * t;
+  const py = y0 + dy * t;
+  return (x - px) * (x - px) + (y - py) * (y - py) < r * r;
+}
+
+/** A few mirrored rocks that do not sit on a camp, a bridge, or the road into the middle. */
+function seedFairRocks(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  salt: number,
+) {
+  const cx = gw / 2;
+  const cy = gh / 2;
+  const place = (x: number, y: number) => {
+    if (x < 3 || y < 3 || x >= gw - 3 || y >= gh - 3) return;
+    if (nearPad(pads, x, y, 9)) return;
+    for (const p of pads) {
+      if (nearSegment(x + 0.5, y + 0.5, p.x, p.y, cx, cy, 2.2)) return;
+    }
+    const i = y * gw + x;
+    if ((crystal[i] ?? 0) > 0) return;
+    const t = terrain[i] ?? 0;
+    if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH) return;
+    for (const [dx, dy] of [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ] as const) {
+      const n = terrain[(y + dy) * gw + (x + dx)] ?? 0;
+      if (n === TILE_BRIDGE || n === TILE_DEEP || n === TILE_SHALLOW || n === TILE_FORD || n === TILE_CLIFF) return;
+    }
+    terrain[i] = TILE_ROCK;
+  };
+  for (let n = 0; n < 3; n++) {
+    const x = 6 + ((dressHash(n, 4, salt) * (gw * 0.3)) | 0);
+    const y = 6 + ((dressHash(7, n, salt) * (gh - 14)) | 0);
+    place(x, y);
+    place(gw - 1 - x, gh - 1 - y);
+  }
+}
+
+/** Craters are marks, not tiles, so both sides of a 1v1 get the same scars. */
+export function seedScars(
+  craters: Uint8Array,
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  id: string,
+) {
+  const salt = saltOf(id);
+  const drop = (x: number, y: number) => {
+    if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) return;
+    if (nearPad(pads, x, y, 8)) return;
+    const i = y * gw + x;
+    if ((crystal[i] ?? 0) > 0 || (craters[i] ?? 0) > 0) return;
+    const t = terrain[i] ?? 0;
+    if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH && t !== TILE_HIGH) return;
+    craters[i] = 2;
+  };
+  for (let n = 0; n < 4; n++) {
+    const x = 8 + ((dressHash(n, 2, salt) * (gw * 0.34)) | 0);
+    const y = 8 + ((dressHash(n, 9, salt) * (gh - 16)) | 0);
+    drop(x, y);
+    drop(gw - 1 - x, gh - 1 - y);
+  }
+}
+
+function roadOk(t: number, ore: number): boolean {
+  if (ore > 0) return false;
+  return (
+    t === TILE_SAND ||
+    t === TILE_CLEAR ||
+    t === TILE_ROUGH ||
+    t === TILE_SCRUB ||
+    t === TILE_STUMP ||
+    t === TILE_SPENT ||
+    t === TILE_SHORE ||
+    t === TILE_HIGH ||
+    t === TILE_ROAD ||
+    t === TILE_VALLEY ||
+    t === TILE_HUT ||
+    t === TILE_BARN ||
+    t === TILE_PUMP
+  );
+}
+
+/** Plateaus, forest clumps, and a dirt lane from each camp to the middle. Crystal and camps stay put. */
+export function dressBattlefield(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  id = "map",
+): FieldProp[] {
+  const salt = saltOf(id);
+  raisePlateaus(terrain, crystal, gw, gh, pads);
+  layFairMesas(terrain, crystal, gw, gh, pads);
+  cutRamps(terrain, crystal, gw, gh, pads);
+  lengthenRamps(terrain, crystal, gw, gh, pads);
+  clumpForests(terrain, crystal, gw, gh, pads, salt);
+  seedFairRocks(terrain, crystal, gw, gh, pads, salt);
+  const cx = gw / 2;
+  const cy = gh / 2;
+  for (const p of pads) stampLane(terrain, crystal, gw, gh, p.x, p.y, cx, cy, 1);
+  linkBridges(terrain, crystal, gw, gh, pads);
+  const props = placeHamlets(terrain, crystal, gw, gh, pads, cx, cy, salt);
+  return props;
+}
+
+function raisePlateaus(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  const seen = new Uint8Array(gw * gh);
+  const mass = (t: number) => t === TILE_ROCK || t === TILE_CLIFF;
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const start = y * gw + x;
+      if (seen[start] || !mass(terrain[start] ?? 0)) continue;
+      const blob: number[] = [];
+      const stack = [start];
+      seen[start] = 1;
+      while (stack.length) {
+        const i = stack.pop() as number;
+        blob.push(i);
+        const bx = i % gw;
+        const by = (i / gw) | 0;
+        const push = (nx: number, ny: number) => {
+          if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) return;
+          const ni = ny * gw + nx;
+          if (seen[ni] || !mass(terrain[ni] ?? 0)) return;
+          seen[ni] = 1;
+          stack.push(ni);
+        };
+        push(bx + 1, by);
+        push(bx - 1, by);
+        push(bx, by + 1);
+        push(bx, by - 1);
+      }
+      let interior = 0;
+      const set = new Set(blob);
+      const inside = (nx: number, ny: number) => nx >= 0 && ny >= 0 && nx < gw && ny < gh && set.has(ny * gw + nx);
+      for (const i of blob) {
+        const x0 = i % gw;
+        const y0 = (i / gw) | 0;
+        if (inside(x0 - 1, y0) && inside(x0 + 1, y0) && inside(x0, y0 - 1) && inside(x0, y0 + 1)) interior++;
+      }
+      if (interior < 4) continue;
+      for (const i of blob) {
+        if ((crystal[i] ?? 0) > 0) continue;
+        const x0 = i % gw;
+        const y0 = (i / gw) | 0;
+        if (nearPad(pads, x0, y0, 8)) continue;
+        const edge = !inside(x0 - 1, y0) || !inside(x0 + 1, y0) || !inside(x0, y0 - 1) || !inside(x0, y0 + 1);
+        terrain[i] = edge ? TILE_CLIFF : TILE_HIGH;
+      }
+    }
+  }
+}
+
+function lowWalk(t: number): boolean {
+  return (
+    t === TILE_SAND ||
+    t === TILE_CLEAR ||
+    t === TILE_ROUGH ||
+    t === TILE_ROAD ||
+    t === TILE_SCRUB ||
+    t === TILE_SHORE ||
+    t === TILE_STUMP ||
+    t === TILE_SPENT ||
+    t === TILE_CRYSTAL ||
+    t === TILE_VALLEY ||
+    t === TILE_HIGH
+  );
+}
+
+function cutRamps(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  const dirs = [
+    [0, -1],
+    [0, 1],
+    [-1, 0],
+    [1, 0],
+  ] as const;
+  const taken = new Set<number>();
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      const i = y * gw + x;
+      if ((terrain[i] ?? 0) !== TILE_CLIFF) continue;
+      if (nearPad(pads, x, y, 9) || (crystal[i] ?? 0) > 0) continue;
+      let dx = 0;
+      let dy = 0;
+      for (const [sx, sy] of dirs) {
+        const n = terrain[(y + sy) * gw + (x + sx)] ?? 0;
+        if (lowWalk(n) && n !== TILE_HIGH) {
+          dx = sx;
+          dy = sy;
+          break;
+        }
+      }
+      if (!dx && !dy) continue;
+      const key = ((x / 7) | 0) * 4096 + ((y / 7) | 0);
+      if (taken.has(key)) continue;
+      const px = -dy;
+      const py = dx;
+      const cells: number[] = [];
+      for (const o of [-1, 0, 1]) {
+        const nx = x + px * o;
+        const ny = y + py * o;
+        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+        const ni = ny * gw + nx;
+        if ((terrain[ni] ?? 0) !== TILE_CLIFF || (crystal[ni] ?? 0) > 0 || nearPad(pads, nx, ny, 9)) continue;
+        cells.push(ni);
+      }
+      if (cells.length < 2) continue;
+      for (const ni of cells) terrain[ni] = TILE_RAMP;
+      taken.add(key);
+    }
+  }
+}
+
+function clumpForests(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  salt: number,
+) {
+  const seeds: number[] = [];
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      const i = y * gw + x;
+      if ((terrain[i] ?? 0) !== TILE_SCRUB) continue;
+      if (nearPad(pads, x, y, 8) || (crystal[i] ?? 0) > 0) continue;
+      seeds.push(i);
+    }
+  }
+  if (seeds.length < 12) {
+    for (let n = 0; n < 90 && seeds.length < 14; n++) {
+      const x = 3 + ((dressHash(n, salt, 3) * (gw - 6)) | 0);
+      const y = 3 + ((dressHash(salt, n, 5) * (gh - 6)) | 0);
+      if (nearPad(pads, x, y, 10)) continue;
+      const i = y * gw + x;
+      const t = terrain[i] ?? 0;
+      if ((t !== TILE_SAND && t !== TILE_CLEAR) || (crystal[i] ?? 0) > 0) continue;
+      terrain[i] = TILE_SCRUB;
+      seeds.push(i);
+    }
+  }
+  const next = new Uint8Array(terrain);
+  for (const seed of seeds) {
+    const sx = seed % gw;
+    const sy = (seed / gw) | 0;
+    const r = 2 + (dressHash(sx, sy, salt) > 0.55 ? 1 : 0);
+    const r2 = r * r;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r2) continue;
+        const x = sx + dx;
+        const y = sy + dy;
+        if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) continue;
+        if (dressHash(x + salt, y, sx + sy) > 0.58) continue;
+        const i = y * gw + x;
+        if (nearPad(pads, x, y, 8) || (crystal[i] ?? 0) > 0) continue;
+        const t = terrain[i] ?? 0;
+        if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH && t !== TILE_SCRUB) continue;
+        next[i] = TILE_SCRUB;
+      }
+    }
+  }
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const i = y * gw + x;
+      if ((next[i] ?? 0) !== TILE_SCRUB) continue;
+      let n = 0;
+      if (next[i - 1] === TILE_SCRUB) n++;
+      if (next[i + 1] === TILE_SCRUB) n++;
+      if (next[i - gw] === TILE_SCRUB) n++;
+      if (next[i + gw] === TILE_SCRUB) n++;
+      if (n === 0) next[i] = TILE_SAND;
+    }
+  }
+  terrain.set(next);
+}
+
+function stampLane(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  endGap = 3,
+) {
+  let x = Math.round(x0);
+  let y = Math.round(y0);
+  const tx = Math.round(x1);
+  const ty = Math.round(y1);
+  const dx = Math.abs(tx - x);
+  const sx = x < tx ? 1 : -1;
+  const dy = -Math.abs(ty - y);
+  const sy = y < ty ? 1 : -1;
+  let err = dx + dy;
+  const horiz = Math.abs(tx - Math.round(x0)) >= Math.abs(ty - Math.round(y0));
+  const ox = horiz ? 0 : 1;
+  const oy = horiz ? 1 : 0;
+  for (let guard = 0; guard < gw + gh; guard++) {
+    const distS = Math.hypot(x + 0.5 - x0, y + 0.5 - y0);
+    const distE = Math.hypot(x + 0.5 - x1, y + 0.5 - y1);
+    if (distS >= 8 && distE >= endGap) {
+      for (const o of [0, 1]) {
+        const nx = x + ox * o;
+        const ny = y + oy * o;
+        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+        const i = ny * gw + nx;
+        if (!roadOk(terrain[i] ?? 0, crystal[i] ?? 0)) continue;
+        terrain[i] = TILE_ROAD;
+      }
+    }
+    if (x === tx && y === ty) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y += sy;
+    }
+  }
+}
+
+function openPlot(terrain: Uint8Array, crystal: Uint16Array, gw: number, gh: number, x: number, y: number): boolean {
+  if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) return false;
+  const i = y * gw + x;
+  const t = terrain[i] ?? 0;
+  if ((crystal[i] ?? 0) > 0) return false;
+  return t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH || t === TILE_STUMP || t === TILE_HIGH;
+}
+
+function placeHamlets(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  cx: number,
+  cy: number,
+  salt: number,
+): FieldProp[] {
+  const props: FieldProp[] = [];
+  const spots: { x: number; y: number }[] = [];
+  pads.forEach((p, n) => {
+    const mx = (p.x + cx) / 2;
+    const my = (p.y + cy) / 2;
+    const ang = Math.atan2(cy - p.y, cx - p.x) + (n % 2 === 0 ? 1 : -1) * Math.PI * 0.5;
+    spots.push({ x: mx + Math.cos(ang) * 6.5, y: my + Math.sin(ang) * 6.5 });
+  });
+  spots.push({ x: cx + 7, y: cy - 4 });
+  let hamlets = 0;
+  for (const s of spots) {
+    if (hamlets >= 5 || props.length >= 22) break;
+    const x = Math.round(s.x);
+    const y = Math.round(s.y);
+    if (nearPad(pads, x, y, 12)) continue;
+    if (Math.hypot(x + 0.5 - cx, y + 0.5 - cy) < 5) continue;
+    const tiles = [
+      [x, y, TILE_HUT],
+      [x + 1, y, TILE_BARN],
+      [x, y + 1, TILE_HUT],
+      [x + 2, y + 1, TILE_PUMP],
+    ] as const;
+    const ok = tiles.every(([tx, ty]) => openPlot(terrain, crystal, gw, gh, tx, ty));
+    if (!ok) continue;
+    for (const [tx, ty, tile] of tiles) {
+      if (tile === TILE_PUMP && dressHash(tx, ty, salt) > 0.5) continue;
+      terrain[ty * gw + tx] = tile;
+    }
+    hamlets++;
+    props.push({ x: x + 1.6, y: y + 2.2, kind: "wreck" });
+    props.push({ x: x - 0.4, y: y + 0.4, kind: "fence" });
+    props.push({ x: x + 2.3, y: y - 0.2, kind: "crate" });
+  }
+  return props.slice(0, 24);
+}
+
+/** Wrecks and fences for a hand-painted island. They do not block movement. */
+export function dressProps(
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+): FieldProp[] {
+  const props: FieldProp[] = [];
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if (props.length >= 16) return props;
+      const h = dressHash(x, y, 11);
+      if (h < 0.984) continue;
+      const t = terrain[y * gw + x] ?? 0;
+      if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_SHORE && t !== TILE_HIGH && t !== TILE_ROAD) continue;
+      if (nearPad(pads, x, y, 9)) continue;
+      props.push({ x: x + 0.45, y: y + 0.55, kind: h > 0.993 ? "fence" : "wreck" });
+    }
+  }
+  return props;
 }
 
 /** Nearest-neighbor scale of an authored 64² field. Bridge cells are welded so a thin span stays crossable. */

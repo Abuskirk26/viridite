@@ -158,10 +158,20 @@ export function SheetBody({
         />
       )}
       {tab === "video" && (
-        <Note
-          title="Video"
-          lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe."]}
-        />
+        <>
+          <Note
+            title="Video"
+            lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe."]}
+          />
+          <label className="flex items-center gap-2 px-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              defaultChecked={localStorage.getItem("viridite-dmg-numbers") === "1"}
+              onChange={(e) => localStorage.setItem("viridite-dmg-numbers", e.target.checked ? "1" : "0")}
+            />
+            Floating damage numbers
+          </label>
+        </>
       )}
       {tab === "sound" && (
         <section className="flex flex-col gap-3" data-testid="sound-settings">

@@ -25,8 +25,8 @@ export interface Painted {
   supply: HTMLImageElement;
   jungle: HTMLImageElement[];
   cliff: HTMLImageElement;
-  boom: HTMLImageElement[];
-  scaffold: HTMLImageElement[];
+  boom: CanvasImageSource[];
+  scaffold: CanvasImageSource[];
 }
 
 let painted: Painted | null = null;
@@ -40,6 +40,53 @@ function load(src: string): Promise<HTMLImageElement | null> {
     img.onerror = () => resolve(null);
     img.src = src;
   });
+}
+
+/** #C90485 plates on the boom and scaffold sheets. About 40 per channel. */
+const KEY_R = 0xc9;
+const KEY_G = 0x04;
+const KEY_B = 0x85;
+const KEY_TOL = 40;
+
+function nearKey(r: number, g: number, b: number): boolean {
+  return Math.abs(r - KEY_R) <= KEY_TOL && Math.abs(g - KEY_G) <= KEY_TOL && Math.abs(b - KEY_B) <= KEY_TOL;
+}
+
+/** Drop the magenta plate so drawImage does not flash a pink square. */
+function punchKey(img: HTMLImageElement, label: string): CanvasImageSource {
+  if (typeof document === "undefined") return img;
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) return img;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) {
+    console.warn(`VIRIDITE: could not key ${label}. The magenta plate lives in art.ts punchKey.`);
+    return img;
+  }
+  ctx.drawImage(img, 0, 0);
+  let data: ImageData;
+  try {
+    data = ctx.getImageData(0, 0, w, h);
+  } catch {
+    console.warn(`VIRIDITE: could not read ${label}. The magenta plate lives in art.ts punchKey.`);
+    return img;
+  }
+  const px = data.data;
+  for (let i = 0; i < px.length; i += 4) {
+    if (px[i + 3] === 0) continue;
+    if (nearKey(px[i]!, px[i + 1]!, px[i + 2]!)) px[i + 3] = 0;
+  }
+  ctx.putImageData(data, 0, 0);
+  let left = 0;
+  const after = ctx.getImageData(0, 0, w, h).data;
+  for (let i = 0; i < after.length; i += 4) {
+    if (after[i + 3]! > 0 && nearKey(after[i]!, after[i + 1]!, after[i + 2]!)) left++;
+  }
+  if (left > 0) console.warn(`VIRIDITE: ${label} still has a magenta plate (#C90485). Key lives in art.ts punchKey.`);
+  return canvas;
 }
 
 export function art(): Painted | null {
@@ -149,8 +196,8 @@ export function ensureArt(): void {
       supply,
       jungle,
       cliff,
-      boom,
-      scaffold,
+      boom: boom.map((frame, i) => punchKey(frame, `boom-${i + 1}`)),
+      scaffold: scaffold.map((frame, i) => punchKey(frame, `scaffold-${i + 1}`)),
     };
     const wait = ready.splice(0, ready.length);
     for (const fn of wait) fn();

@@ -12,6 +12,7 @@ import {
   normalizeTeams,
   otherFaction,
   spareFaction,
+  BUILD_ORDER,
   type AiDifficulty,
   type AiProfile,
   type BuildingId,
@@ -239,7 +240,7 @@ export const DEFAULT_SETUP: SkirmishSetup = {
   enemy: "syndicate",
   credits: 5000,
   ai: "builder",
-  difficulty: "hard",
+  difficulty: "normal",
   showAi: false,
   fog: true,
   crates: true,
@@ -255,7 +256,7 @@ export const DEFAULT_SETUP: SkirmishSetup = {
   walls: true,
   customId: "",
   bots: ["syndicate", "steel", "prism"],
-  skills: ["hard", "hard", "hard"],
+  skills: ["normal", "normal", "normal"],
 };
 
 /** The friends room should open on the skirmish the host already set. */
@@ -331,7 +332,7 @@ export function lobbyBlock(
 }
 
 export function buildingOffered(mapId: MapId, faction: FactionId, id: BuildingId, walls = true): boolean {
-  if (id === "span") return false;
+  if (id === "span" || id === "silo") return false;
   if (!walls && (id === "sandbag" || id === "wall" || id === "gate")) return false;
   if (!canBuild(id, faction)) return false;
   if (id === "dock" && navyHidden(mapId)) return false;
@@ -397,6 +398,42 @@ function stanceOf(v: unknown, fallback: AiProfile): AiProfile {
   return v === "passive" || v === "raider" || v === "builder" ? v : fallback;
 }
 
+/** Newly opened bot slots are Normal. Slots already on screen keep the skill the player set. */
+export function withNewBotSkill(setup: SkirmishSetup, next: OpponentCount): Pick<SkirmishSetup, "skills" | "difficulty"> {
+  const prev = aiCount(setup);
+  const skills = setup.skills.slice() as SkirmishSetup["skills"];
+  if (prev < 1 && next >= 1) skills[0] = "normal";
+  if (prev < 2 && next >= 2) skills[1] = "normal";
+  if (prev < 3 && next >= 3) skills[2] = "normal";
+  return { skills, difficulty: skills[0] };
+}
+
+/** Every bot slot opens on Normal. The last pick is not the next default. */
+export function normalBotDefaults(): Pick<SkirmishSetup, "difficulty" | "skills"> {
+  return { difficulty: "normal", skills: ["normal", "normal", "normal"] };
+}
+
+/** Loud if the three skirmish defaults drift. Lives next to DEFAULT_SETUP and BUILD_ORDER. */
+export function warnSkirmishDefaults(): void {
+  if (DEFAULT_SETUP.difficulty !== "normal" || DEFAULT_SETUP.skills.some((s) => s !== "normal")) {
+    console.warn("VIRIDITE: bot default is not Normal. It lives in lobby.ts DEFAULT_SETUP.skills.");
+  }
+  if ((BUILD_ORDER as readonly string[]).includes("silo")) {
+    console.warn("VIRIDITE: Silo is on the build list (data.ts BUILD_ORDER). Skirmish credits are not capped in sim.ts haul().");
+  }
+}
+export function applyDifficulty(setup: SkirmishSetup, difficulty: AiDifficulty): Partial<SkirmishSetup> {
+  const skills: SkirmishSetup["skills"] = [difficulty, difficulty, difficulty];
+  if (difficulty === "hard") return { difficulty, skills };
+  const ai: AiProfile = setup.ai === "raider" ? "builder" : setup.ai;
+  const stances: SkirmishSetup["stances"] = [
+    setup.stances[0] === "raider" ? "builder" : setup.stances[0],
+    setup.stances[1] === "raider" ? "builder" : setup.stances[1],
+    setup.stances[2] === "raider" ? "builder" : setup.stances[2],
+  ];
+  return { difficulty, skills, ai, stances };
+}
+
 /** Drops opponent counts the map cannot host, and keeps 2v2 as you + ally vs two. */
 export function clampSetup(setup: SkirmishSetup): SkirmishSetup {
   const doc = setup.customId ? resolveMyMap(setup.customId) : null;
@@ -444,13 +481,15 @@ export function chooseOpponents(
 export function randomSetup(rng: () => number = Math.random): SkirmishSetup {
   for (let i = 0; i < 24; i++) {
     const enemy = pick(rng, FACTIONS);
+    const difficulty = pick(rng, DIFFICULTY_CHOICES);
+    const ai: AiProfile = difficulty === "hard" ? pick(rng, AI_CHOICES) : "builder";
     const setup: SkirmishSetup = {
       mapId: pick(rng, LOBBY_MAPS).id,
       player: pick(rng, FACTIONS),
       enemy,
       credits: pick(rng, CREDIT_CHOICES),
-      ai: pick(rng, AI_CHOICES),
-      difficulty: pick(rng, DIFFICULTY_CHOICES),
+      ai,
+      difficulty,
       showAi: false,
       fog: rng() > 0.3,
       crates: rng() > 0.45,
@@ -462,11 +501,11 @@ export function randomSetup(rng: () => number = Math.random): SkirmishSetup {
       start: pick(rng, START_CHOICES),
       shared: rng() > 0.35,
       stanceMode: rng() > 0.5 ? "seat" : "global",
-      stances: [pick(rng, AI_CHOICES), pick(rng, AI_CHOICES), pick(rng, AI_CHOICES)],
+      stances: difficulty === "hard" ? [pick(rng, AI_CHOICES), pick(rng, AI_CHOICES), pick(rng, AI_CHOICES)] : ["builder", "builder", "builder"],
       walls: rng() > 0.25,
       customId: "",
       bots: [enemy, pick(rng, FACTIONS), pick(rng, FACTIONS)],
-      skills: [pick(rng, DIFFICULTY_CHOICES), pick(rng, DIFFICULTY_CHOICES), pick(rng, DIFFICULTY_CHOICES)],
+      skills: [difficulty, difficulty, difficulty],
     };
     if (!lobbyBlock(setup)) return clampSetup(setup);
   }
@@ -539,11 +578,12 @@ export function parseSetup(raw: unknown): SkirmishSetup | null {
     stanceOf(rawStances[2], ai),
   ];
   const rawSkills = Array.isArray(data.skills) ? data.skills : [];
-  const base = normalizeDifficulty(data.difficulty);
+  const named = rawSkills.length > 0;
+  const base = named ? normalizeDifficulty(rawSkills[0] ?? "normal") : normalizeDifficulty(data.difficulty);
   const skills: [AiDifficulty, AiDifficulty, AiDifficulty] = [
-    normalizeDifficulty(rawSkills[0] ?? base),
-    normalizeDifficulty(rawSkills[1] ?? base),
-    normalizeDifficulty(rawSkills[2] ?? base),
+    base,
+    named ? normalizeDifficulty(rawSkills[1] ?? "normal") : "normal",
+    named ? normalizeDifficulty(rawSkills[2] ?? "normal") : "normal",
   ];
   return clampSetup({
     mapId: data.mapId,
@@ -575,7 +615,10 @@ export function loadSetup(): SkirmishSetup | null {
   try {
     const raw = localStorage.getItem(RULES_KEY);
     if (!raw) return null;
-    return parseSetup(JSON.parse(raw));
+    const parsed = parseSetup(JSON.parse(raw));
+    if (!parsed) return null;
+    warnSkirmishDefaults();
+    return { ...parsed, ...normalBotDefaults() };
   } catch {
     return null;
   }
@@ -583,7 +626,7 @@ export function loadSetup(): SkirmishSetup | null {
 
 export function saveSetup(setup: SkirmishSetup) {
   try {
-    localStorage.setItem(RULES_KEY, JSON.stringify({ ...setup, faction: setup.player }));
+    localStorage.setItem(RULES_KEY, JSON.stringify({ ...setup, faction: setup.player, ...normalBotDefaults() }));
   } catch {
     /* private mode — the next match still starts */
   }
@@ -602,7 +645,7 @@ export function toNewGame(setup: SkirmishSetup) {
     mode: setup.mode,
     credits: setup.credits,
     ai: setup.ai,
-    difficulty: setup.skills[0],
+    difficulty: normalizeDifficulty(setup.skills?.[0] ?? "normal"),
     fog: setup.fog,
     crates: setup.crates,
     mapSize: doc ? lobbySize(doc) : setup.size,
@@ -613,7 +656,11 @@ export function toNewGame(setup: SkirmishSetup) {
     shared: setup.shared,
     stanceEach: setup.stanceMode === "seat",
     stances: setup.stances,
-    skills: setup.skills,
+    skills: [
+      normalizeDifficulty(setup.skills?.[0] ?? "normal"),
+      normalizeDifficulty(setup.skills?.[1] ?? "normal"),
+      normalizeDifficulty(setup.skills?.[2] ?? "normal"),
+    ],
     custom: doc ? pack(doc) : undefined,
     seatFactions: [setup.player, setup.bots[0], setup.bots[1], setup.bots[2]],
   };

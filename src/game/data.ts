@@ -78,6 +78,60 @@ export type BuildingId =
 
 export type Armor = "infantry" | "vehicle" | "light" | "heavy" | "building";
 export type ShotKind = "hit" | "shell" | "rocket";
+/** What a weapon cares about. Infantry and buggies are light. A light tank is medium. A medium tank is heavy. */
+export type Plate = "light" | "medium" | "heavy" | "building";
+
+export function plateOf(kind: string, armor: Armor): Plate {
+  if (armor === "infantry") return "light";
+  if (armor === "heavy") return "heavy";
+  if (armor === "light") return "light";
+  if (kind === "scout" || kind === "razor") return "light";
+  if (kind === "tank" || kind === "scatter" || kind === "harvester" || kind === "mcv") return "medium";
+  if (armor === "vehicle") return "medium";
+  return "medium";
+}
+
+/**
+ * Extra multiplier on top of vsInf / vsVeh / vsBld.
+ * Rifles chew light armor and bounce off heavy. Rockets want vehicles and buildings.
+ * Artillery and bombers are the building breakers.
+ */
+export function counterMul(kind: string, plate: Plate): number {
+  const rifle =
+    kind === "rifle" ||
+    kind === "marksman" ||
+    kind === "wader" ||
+    kind === "vanguard" ||
+    kind === "scout" ||
+    kind === "apc" ||
+    kind === "gunboat";
+  const rocket = kind === "rocket" || kind === "missile" || kind === "attackheli";
+  const siege = kind === "artillery" || kind === "bomber";
+  if (plate === "building") {
+    if (siege) return 1.7;
+    if (rocket) return 1.45;
+    if (rifle) return 0.42;
+    return 1;
+  }
+  if (rifle) {
+    if (plate === "light") return 1.22;
+    if (plate === "medium") return 0.58;
+    return 0.28;
+  }
+  if (rocket) {
+    if (plate === "light") return 0.78;
+    if (plate === "medium") return 1.38;
+    return 1.55;
+  }
+  if (siege) {
+    if (plate === "heavy") return 0.7;
+    if (plate === "medium") return 0.88;
+    return 1.05;
+  }
+  if (plate === "heavy") return 1.18;
+  if (plate === "medium") return 1.06;
+  return 1;
+}
 
 export interface UnitDef {
   id: UnitId;
@@ -93,6 +147,8 @@ export interface UnitDef {
   sight: number;
   damage: number;
   range: number;
+  /** Closest this weapon can fire. Artillery only. */
+  minRange?: number;
   rof: number;
   radius: number;
   armor: Armor;
@@ -164,6 +220,8 @@ export const START_STORAGE = 5000;
 export const SUPPLY_DRIP = 8;
 /** Credits per second from a powered Construction Yard. */
 export const YARD_DRIP = 2;
+/** Credits per second from a completed Silo. A bonus only — never a storage cap. */
+export const SILO_DRIP = 3;
 /** Starting command points. Each yard upgrade adds CP_STEP, up to CP_MAX times. */
 export const CP_BASE = 22;
 export const CP_STEP = 8;
@@ -213,6 +271,8 @@ export const TILE_BARN = 18;
 export const TILE_PUMP = 19;
 /** A span that fell. Boats cross it until an engineer repairs the bridge. */
 export const TILE_WRECK = 20;
+/** Walkable high ground. The rim stays cliff; ramps are the way up. */
+export const TILE_HIGH = 21;
 
 export type Theater = "desert" | "temperate" | "snow";
 
@@ -238,11 +298,85 @@ export const FACTION_BLURB: Record<FactionId, string> = {
 };
 
 export const FACTION_COLOR: Record<FactionId, string> = {
-  concord: "#7d8f3a",
-  syndicate: "#c45c32",
-  steel: "#5b86b0",
-  prism: "#2ec4d6",
+  concord: "#d2f04a",
+  syndicate: "#ff5c2e",
+  steel: "#2b8bff",
+  prism: "#12e6ff",
 };
+
+/** Battlefield sides. The local player is always blue. Not the faction chip colors. */
+export const SIDE_BLUE = "#2F7DF6";
+export const SIDE_RED = "#E5483B";
+export const SIDE_GREEN = "#3FBF5A";
+export const SIDE_YELLOW = "#F2C230";
+
+/** Olive plates in the unit art. Spin is how far a seat sits from that green. */
+const PLATE_HUE = 78;
+
+/** Troops stay lighter and hotter. Halls stay a step darker so a base is not the same paint as a tank. */
+export function unitInk(hex: string): string {
+  return shiftInk(hex, 0, 1.45, 1.12, true);
+}
+
+export function hallInk(hex: string): string {
+  return shiftInk(hex, -8, 1.35, 0.82, true);
+}
+
+/** Degrees to swing olive art toward this seat. Gray eliminated seats do not spin. */
+export function plateSpin(hex: string): number {
+  const hsl = hslOf(hex);
+  if (!hsl || hsl.s < 0.18) return 0;
+  return ((hsl.h - PLATE_HUE + 540) % 360) - 180;
+}
+
+function hslOf(hex: string): { h: number; s: number; l: number } | null {
+  const raw = hex.replace("#", "");
+  const n = parseInt(raw.length === 3 ? raw.split("").map((c) => c + c).join("") : raw, 16);
+  if (!Number.isFinite(n)) return null;
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0;
+  let s = 0;
+  const d = max - min;
+  if (d > 0.0001) {
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  return { h, s, l };
+}
+
+function shiftInk(hex: string, hue: number, sat: number, light: number, punch = false): string {
+  const hsl = hslOf(hex);
+  if (!hsl) return hex;
+  let { h, s, l } = hsl;
+  h = (h + hue + 360) % 360;
+  s = Math.max(0, Math.min(1, s * sat));
+  if (punch && hsl.s > 0.2) s = Math.max(0.78, s);
+  const nl = Math.max(punch ? 0.42 : 0.34, Math.min(punch ? 0.66 : 0.78, l * light));
+  const c = (1 - Math.abs(2 * nl - 1)) * s;
+  const hp = h / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let rr = 0;
+  let gg = 0;
+  let bb = 0;
+  if (hp < 1) [rr, gg, bb] = [c, x, 0];
+  else if (hp < 2) [rr, gg, bb] = [x, c, 0];
+  else if (hp < 3) [rr, gg, bb] = [0, c, x];
+  else if (hp < 4) [rr, gg, bb] = [0, x, c];
+  else if (hp < 5) [rr, gg, bb] = [x, 0, c];
+  else [rr, gg, bb] = [c, 0, x];
+  const m = nl - c / 2;
+  const byte = (v: number) => Math.max(0, Math.min(255, Math.round((v + m) * 255))).toString(16).padStart(2, "0");
+  return `#${byte(rr)}${byte(gg)}${byte(bb)}`;
+}
 
 export const FACTION_IDS: FactionId[] = ["concord", "syndicate", "steel", "prism"];
 
@@ -622,6 +756,7 @@ export const UNITS: Record<UnitId, UnitDef> = {
     sight: 7,
     damage: 52,
     range: 8.4,
+    minRange: 3.15,
     rof: 2.4,
     radius: 0.5,
     armor: "light",
@@ -1248,7 +1383,6 @@ export const BUILD_ORDER: BuildingId[] = [
   "sandbag",
   "wall",
   "gate",
-  "silo",
 ];
 
 export const UNIT_ORDER: UnitId[] = [
@@ -1364,14 +1498,9 @@ export function canTrain(id: UnitId, faction: FactionId): boolean {
   return f === faction || f === rosterOf(faction);
 }
 
-/** Opening guns are free. The rest wait on a finished building. */
+/** Rifle and the barracks squad are free once the hall stands. Vehicles step up with advanced power. */
 export function unitRequires(id: UnitId): BuildingId | null {
   switch (id) {
-    case "rocket":
-    case "marksman":
-    case "vanguard":
-    case "wader":
-      return "supply";
     case "medium":
     case "artillery":
     case "apc":
