@@ -12,7 +12,9 @@ import {
   clampSetup,
   chooseOpponents,
   DEFAULT_SETUP,
+  RULES_KEY,
   listMyMaps,
+  loadSetup,
   lobbyBlock,
   LOBBY_MAPS,
   maxOpponents,
@@ -367,4 +369,34 @@ test("four factions keep their colors, rosters, and spare seats", () => {
   assert.equal(teams.seatColor(2), "#3FBF5A");
   assert.equal(teams.seatColor(1), "#E5483B");
   assert.equal(teams.seatColor(3), "#F27A30");
+});
+
+test("loading viridite-skirmish-rules always starts every bot at Normal", () => {
+  const mem = new Map<string, string>();
+  const store = {
+    getItem: (key: string) => mem.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      mem.set(key, value);
+    },
+    removeItem: (key: string) => {
+      mem.delete(key);
+    },
+    clear: () => mem.clear(),
+    key: () => null,
+    length: 0,
+  };
+  const prev = globalThis.localStorage;
+  globalThis.localStorage = store as unknown as Storage;
+  try {
+    localStorage.setItem(
+      RULES_KEY,
+      JSON.stringify({ ...DEFAULT_SETUP, difficulty: "easy", skills: ["easy", "hard", "easy"] }),
+    );
+    const loaded = loadSetup();
+    assert.equal(loaded?.difficulty, "normal");
+    assert.deepEqual(loaded?.skills, ["normal", "normal", "normal"]);
+  } finally {
+    if (prev) globalThis.localStorage = prev;
+    else delete (globalThis as { localStorage?: Storage }).localStorage;
+  }
 });
