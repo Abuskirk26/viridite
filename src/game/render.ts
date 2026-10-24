@@ -2526,7 +2526,7 @@ function rockTone(n: number, snow: boolean): string {
   return n > 0.72 ? "#d2bba0" : n > 0.4 ? "#9a7d64" : "#5a483c";
 }
 
-/** Jagged rock columns. The crest and the foot overlap the ground so the edge is not a box. */
+/** A continuous rock wall along a high-ground edge. Lit lip, textured face, one soft shadow. */
 function paintRockFace(
   ctx: CanvasRenderingContext2D,
   x0: number,
@@ -2540,36 +2540,27 @@ function paintRockFace(
   seed: number,
 ) {
   const span = Math.max(0.2, alongX ? x1 - x0 : y1 - y0);
-  const cols = 4 + ((hash(seed, alongX ? 3 : 9) * 3) | 0);
-  const strata = snow ? "rgba(18, 26, 32, 0.3)" : "rgba(20, 14, 10, 0.34)";
-  for (let i = 0; i < cols; i++) {
-    const u0 = i / cols;
-    const u1 = Math.min(1, (i + 1) / cols + (hash(seed + i, 2) - 0.5) * 0.08);
-    const jag = (k: number) => (hash(seed + i * 5 + k, 6) - 0.5) * 0.22;
-    const top0 = (hash(seed + i, 11) - 0.42) * 0.2;
-    const top1 = (hash(seed + i + 1, 13) - 0.42) * 0.2;
-    const bot0 = hash(seed + i, 19) * 0.22;
-    const bot1 = hash(seed + i + 1, 23) * 0.22;
-    const n = hash(seed + i * 9, 29);
-    const color = rockTone(n, snow);
+  const steps = Math.max(4, Math.round(span * 5));
+  const lip = snow ? "#e7eef4" : "#e4d2bc";
+  const strata = snow ? "rgba(18, 26, 32, 0.35)" : "rgba(24, 16, 12, 0.4)";
+  ctx.fillStyle = snow ? "rgba(8, 12, 16, 0.2)" : "rgba(12, 8, 6, 0.22)";
+  ctx.beginPath();
+  if (alongX) ctx.ellipse((x0 + x1) / 2, y1 + 0.16, span * 0.46, 0.11, 0, 0, Math.PI * 2);
+  else ctx.ellipse(x1 + 0.14, (y0 + y1) / 2, 0.1, span * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+  for (let i = 0; i < steps; i++) {
+    const u0 = i / steps;
+    const u1 = (i + 1) / steps;
+    const n = hash(seed + i * 3, 17);
+    const color = rockTone(0.22 + n * 0.28, snow);
+    const top0 = (hash(seed + i, 11) - 0.5) * 0.06;
+    const top1 = (hash(seed + i + 1, 13) - 0.5) * 0.06;
     if (alongX) {
-      const ax0 = x0 + span * u0 + jag(1);
-      const ax1 = x0 + span * u1 + jag(2);
-      volumeQuad(ctx, ax0, y1 + bot0, ax1, y1 + bot1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
-      volumeQuad(
-        ctx,
-        ax0 + shear * 0.72,
-        y1 - rise * 0.15,
-        ax0 + (ax1 - ax0) * 0.45 + shear * 0.72,
-        y1 - rise * 0.15,
-        ax0 + (ax1 - ax0) * 0.45 + shear * 0.92,
-        y1 - rise * 0.72,
-        ax0 + shear * 0.92,
-        y1 - rise * 0.72,
-        n > 0.5 ? "rgba(232, 214, 188, 0.28)" : "rgba(20, 14, 10, 0.28)",
-      );
-      if (n > 0.48) {
-        const band = 0.28 + hash(seed + i, 31) * 0.4;
+      const ax0 = x0 + span * u0;
+      const ax1 = x0 + span * u1;
+      volumeQuad(ctx, ax0, y1, ax1, y1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
+      if (n > 0.4) {
+        const band = 0.32 + hash(seed + i, 31) * 0.28;
         volumeQuad(
           ctx,
           ax0,
@@ -2577,40 +2568,41 @@ function paintRockFace(
           ax1,
           y1 - rise * band,
           ax1 + shear * (1 - band),
-          y1 - rise * (band + 0.1),
+          y1 - rise * (band + 0.07),
           ax0 + shear * (1 - band),
-          y1 - rise * (band + 0.1),
+          y1 - rise * (band + 0.07),
           strata,
         );
       }
-      if (hash(seed + i, 41) > 0.28) {
-        ctx.fillStyle = snow && hash(seed + i, 43) > 0.72 ? "rgba(236, 244, 248, 0.55)" : rockTone(0.8, snow);
-        ctx.beginPath();
-        ctx.ellipse(
-          ax0 + shear * 0.92,
-          y1 - rise + top0 * 0.4,
-          0.08 + hash(seed + i, 47) * 0.1,
-          0.045 + hash(seed + i, 53) * 0.04,
-          0.3,
-          0,
-          Math.PI * 2,
-        );
-        ctx.fill();
-      }
+      volumeQuad(
+        ctx,
+        ax0 + shear * 0.92,
+        y1 - rise + top0 + 0.02,
+        ax1 + shear * 0.92,
+        y1 - rise + top1 + 0.02,
+        ax1 + shear,
+        y1 - rise + top1 - 0.045,
+        ax0 + shear,
+        y1 - rise + top0 - 0.045,
+        lip,
+      );
     } else {
-      const ay0 = y0 + span * u0 + jag(1);
-      const ay1 = y0 + span * u1 + jag(2);
-      volumeQuad(ctx, x1, ay0 + bot0 * 0.3, x1, ay1 + bot1 * 0.3, x1 + shear, ay1 - rise + top1, x1 + shear, ay0 - rise + top0, color);
+      const ay0 = y0 + span * u0;
+      const ay1 = y0 + span * u1;
+      volumeQuad(ctx, x1, ay0, x1, ay1, x1 + shear, ay1 - rise + top1, x1 + shear, ay0 - rise + top0, color);
+      volumeQuad(
+        ctx,
+        x1 + shear * 0.9,
+        ay0 - rise + top0,
+        x1 + shear * 0.9,
+        ay1 - rise + top1,
+        x1 + shear,
+        ay1 - rise + top1 - 0.04,
+        x1 + shear,
+        ay0 - rise + top0 - 0.04,
+        lip,
+      );
     }
-  }
-  ctx.fillStyle = snow ? "rgba(16, 22, 26, 0.28)" : "rgba(10, 8, 6, 0.3)";
-  const pebbles = alongX ? 3 : 2;
-  for (let i = 0; i < pebbles; i++) {
-    const h = hash(seed + i * 3, 77);
-    ctx.beginPath();
-    if (alongX) ctx.ellipse(x0 + span * (0.12 + h * 0.76), y1 + 0.12 + h * 0.1, 0.16 + h * 0.22, 0.055, 0.15, 0, Math.PI * 2);
-    else ctx.ellipse(x1 + 0.12 + h * 0.1, y0 + span * (0.18 + h * 0.64), 0.07, 0.14 + h * 0.12, 0.2, 0, Math.PI * 2);
-    ctx.fill();
   }
 }
 
