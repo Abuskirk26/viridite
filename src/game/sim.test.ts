@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
+import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
 import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import { DEPLOY_SECS, NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
+import { findPath } from "./path.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, viewPitch, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
 import { buildFeatured } from "./featured.ts";
@@ -1678,6 +1679,128 @@ test("every skirmish map bakes grass, sand, or water instead of a flat fill", ()
       rgb[i * 3 + 2] = pixels[i * 4 + 2] ?? 0;
     }
     assert.equal(terrainFieldAlive(rgb), true, mapId);
+  }
+});
+
+test("skirmish maps connect both seats, with an expansion and a fair march", () => {
+  const ids = ["palm", "michigan", "plates", "links", "coast", "river", "isles", "dry"] as const;
+  const march = (sim: Sim, from: { x: number; y: number }, path: { x: number; y: number }[]) => {
+    let n = 0;
+    let px = from.x;
+    let py = from.y;
+    let bridge = false;
+    const pts = [{ x: from.x | 0, y: from.y | 0 }, ...path];
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      n += Math.hypot(b.x + 0.5 - px, b.y + 0.5 - py);
+      px = b.x + 0.5;
+      py = b.y + 0.5;
+      let x = a.x;
+      let y = a.y;
+      const dx = Math.abs(b.x - a.x);
+      const sx = a.x < b.x ? 1 : -1;
+      const dy = -Math.abs(b.y - a.y);
+      const sy = a.y < b.y ? 1 : -1;
+      let err = dx + dy;
+      for (let guard = 0; guard < sim.gw + sim.gh; guard++) {
+        const t = sim.terrain[y * sim.gw + x];
+        assert.notEqual(t, TILE_DEEP, "stepped in deep water");
+        assert.notEqual(t, TILE_SHALLOW, "stepped in shallow water");
+        if (t === TILE_BRIDGE) bridge = true;
+        if (x === b.x && y === b.y) break;
+        const e2 = 2 * err;
+        if (e2 >= dy) {
+          err += dy;
+          x += sx;
+        }
+        if (e2 <= dx) {
+          err += dx;
+          y += sy;
+        }
+      }
+    }
+    return { n, bridge };
+  };
+  for (const mapId of ids) {
+    const sim = new Sim({
+      mapId,
+      faction: "concord",
+      mode: "destroy",
+      fog: false,
+      crates: false,
+      cpu: [false, false, false, false],
+      seed: 1,
+      opponents: 1,
+    });
+    const home = sim.starts.player;
+    const far = sim.starts.enemy;
+    const blocked = (x: number, y: number) => {
+      if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+      const t = sim.terrain[y * sim.gw + x];
+      return t === TILE_ROCK || t === TILE_CLIFF || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK || t === TILE_SCRUB;
+    };
+    const goPath = findPath(blocked, home.x | 0, home.y | 0, far.x | 0, far.y | 0, sim.gw, sim.gh);
+    const backPath = findPath(blocked, far.x | 0, far.y | 0, home.x | 0, home.y | 0, sim.gw, sim.gh);
+    assert.ok(goPath && goPath.length >= 2, `${mapId} no path out`);
+    assert.ok(backPath && backPath.length >= 2, `${mapId} no path back`);
+    const out = march(sim, home, goPath);
+    const ret = march(sim, far, backPath);
+    const ratio = Math.max(out.n, ret.n) / Math.min(out.n, ret.n);
+    assert.ok(ratio <= 1.1, `${mapId} march ${out.n.toFixed(1)} vs ${ret.n.toFixed(1)}`);
+    const tank = sim.spawnUnit(0, "tank", home.x, home.y);
+    assert.ok(tank, mapId);
+    // The opening truce seals each start. The march is the walk after that hold.
+    sim.time = DEPLOY_SECS + 1;
+    sim.issueMove([tank.id], far.x, far.y, true);
+    assert.ok(tank.path.length >= 1, `${mapId} tank has no route`);
+    if (mapId === "links" || mapId === "isles" || mapId === "coast" || mapId === "plates" || mapId === "river") {
+      assert.equal(march(sim, home, tank.path).bridge, true, `${mapId} path missed the bridge`);
+    }
+    const seen = new Uint8Array(sim.gw * sim.gh);
+    const blobs: { x: number; y: number; n: number }[] = [];
+    for (let y = 1; y < sim.gh - 1; y++) {
+      for (let x = 1; x < sim.gw - 1; x++) {
+        const start = y * sim.gw + x;
+        if (seen[start] || (sim.crystal[start] ?? 0) <= 0) continue;
+        const stack = [start];
+        seen[start] = 1;
+        let n = 0;
+        let sx = 0;
+        let sy = 0;
+        while (stack.length) {
+          const i = stack.pop() as number;
+          n++;
+          sx += i % sim.gw;
+          sy += (i / sim.gw) | 0;
+          const bx = i % sim.gw;
+          const by = (i / sim.gw) | 0;
+          for (const [dx, dy] of [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+          ] as const) {
+            const nx = bx + dx;
+            const ny = by + dy;
+            if (nx < 1 || ny < 1 || nx >= sim.gw - 1 || ny >= sim.gh - 1) continue;
+            const ni = ny * sim.gw + nx;
+            if (seen[ni] || (sim.crystal[ni] ?? 0) <= 0) continue;
+            seen[ni] = 1;
+            stack.push(ni);
+          }
+        }
+        if (n >= 4) blobs.push({ x: sx / n + 0.5, y: sy / n + 0.5, n });
+      }
+    }
+    const expansions = (seat: { x: number; y: number }, other: { x: number; y: number }) =>
+      blobs.filter((b) => {
+        const ds = Math.hypot(b.x - seat.x, b.y - seat.y);
+        const dOther = Math.hypot(b.x - other.x, b.y - other.y);
+        return ds >= 14 && ds <= 28 && ds < dOther;
+      }).length;
+    assert.ok(expansions(home, far) >= 1, `${mapId} home expansion`);
+    assert.ok(expansions(far, home) >= 1, `${mapId} far expansion`);
   }
 });
 

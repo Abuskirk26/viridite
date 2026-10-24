@@ -369,10 +369,9 @@ function layLinks(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
   island(terrain, 30, 44, 4);
   island(terrain, 34, 32, 3.5);
   island(terrain, 38, 22, 3.5);
-  spanBridge(terrain, spans, 20, 46, 8, 2);
-  spanBridge(terrain, spans, 32, 38, 2, 6);
-  spanBridge(terrain, spans, 36, 26, 2, 6);
-  spanBridge(terrain, spans, 40, 20, 6, 2);
+  // Two 3-wide crossings. The north span is the 180° mirror of the south span.
+  spanBridge(terrain, spans, 21, 34, 22, 3);
+  spanBridge(terrain, spans, 21, 27, 22, 3);
   disk(terrain, crystal, 12, 40, 2.3, TILE_CRYSTAL, 860);
   disk(terrain, crystal, 50, 18, 2.4, TILE_CRYSTAL, 860);
   disk(terrain, crystal, 34, 32, 1.6, TILE_CRYSTAL, 1200);
@@ -458,11 +457,19 @@ function layIsles(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
   island(terrain, 14, 48, 8);
   island(terrain, 50, 16, 8);
   island(terrain, 32, 32, 6);
-  for (let i = 0; i < 8; i++) {
-    terrain[idx(20 + i, 40 - i)] = TILE_BRIDGE;
-    terrain[idx(36 + i, 28 - i)] = TILE_BRIDGE;
+  // Orthogonal decks. A 1-tile diagonal is not a walk. Each span's mirror is the other lane.
+  const hops: Array<[number, number, number, number]> = [
+    [18, 40, 12, 3],
+    [28, 34, 3, 8],
+    [16, 50, 18, 3],
+    [31, 38, 3, 14],
+  ];
+  for (const [x, y, w, h] of hops) {
+    spanBridge(terrain, spans, x, y, w, h);
+    const mx = 63 - (x + w - 1);
+    const my = 63 - (y + h - 1);
+    if (mx !== x || my !== y) spanBridge(terrain, spans, mx, my, w, h);
   }
-  spans.push({ tx: 22, ty: 38, w: 3, h: 1 }, { tx: 40, ty: 24, w: 3, h: 1 });
   disk(terrain, crystal, 32, 32, 3.2, TILE_CRYSTAL, 900);
   disk(terrain, crystal, 14, 44, 2, TILE_CRYSTAL, 700);
   disk(terrain, crystal, 50, 20, 2, TILE_CRYSTAL, 700);
@@ -477,7 +484,24 @@ function layDry(terrain: Uint8Array, crystal: Uint16Array) {
   disk(terrain, crystal, 46, 40, 3.2, TILE_DEEP);
   disk(terrain, crystal, 8, 18, 3.2, TILE_ROCK);
   disk(terrain, crystal, 56, 48, 3.4, TILE_ROCK);
+  // Spines run with the march. The center ore stays the middle lane. Each spine's mirror is the other.
+  for (let t = -18; t <= 18; t++) {
+    if (t >= 12 && t <= 16) continue;
+    const x = 38 + t;
+    const y = 38 - t;
+    dryRock(terrain, x, y);
+    dryRock(terrain, x + 1, y);
+    dryRock(terrain, 63 - x, 63 - y);
+    dryRock(terrain, 62 - x, 63 - y);
+  }
   paintShore(terrain);
+}
+
+function dryRock(terrain: Uint8Array, x: number, y: number) {
+  if (x < 2 || y < 2 || x >= MAP_W - 2 || y >= MAP_H - 2) return;
+  const t = terrain[idx(x, y)];
+  if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_BRIDGE || t === TILE_CRYSTAL || t === TILE_ROCK) return;
+  terrain[idx(x, y)] = TILE_ROCK;
 }
 
 function island(terrain: Uint8Array, cx: number, cy: number, r: number) {
@@ -563,6 +587,8 @@ function layMichigan(terrain: Uint8Array, crystal: Uint16Array, spans: Span[]) {
     for (let x = 43; x <= 44; x++) terrain[idx(x, y)] = TILE_BRIDGE;
   }
   spans.push({ tx: 43, ty: 23, w: 2, h: 4 });
+  // West straits deck. Two crossings, so the peninsula is not a single bridge fight.
+  spanBridge(terrain, spans, 39, 22, 3, 9);
   // Satellite shore fringe the state mask still called land. Troops were walking the lake.
   for (const [x, y] of MICHIGAN_FRINGE) {
     if (x < 1 || y < 1 || x >= MAP_W - 1 || y >= MAP_H - 1) continue;
@@ -1935,6 +1961,7 @@ function paintDisk(
       const d = dx * dx + dy * dy;
       if (d > r2 || d < inner) continue;
       const i = y * gw + x;
+      if ((terrain[i] ?? 0) === TILE_BRIDGE) continue;
       terrain[i] = tile;
       if (tile !== TILE_CRYSTAL) crystal[i] = 0;
     }
@@ -2057,6 +2084,277 @@ export function fairNearbyOre(
   const cx = gw / 2;
   const cy = gh / 2;
   for (const [i, j] of pairs) balanceOrePair(terrain, crystal, gw, gh, seats[i]!, seats[j]!, cx, cy);
+}
+
+/** Each seat in a pair gets one ore field a fair walk from home, closer to them than to the other. */
+export function fairExpansionOre(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  if (seats.length < 2) return;
+  const pairs: [number, number][] = [];
+  if (seats.length === 2) pairs.push([0, 1]);
+  else {
+    for (let i = 0; i < seats.length; i++) {
+      let far = -1;
+      let best = -1;
+      for (let j = 0; j < seats.length; j++) {
+        if (j === i) continue;
+        const d = (seats[i]!.x - seats[j]!.x) ** 2 + (seats[i]!.y - seats[j]!.y) ** 2;
+        if (d > best) {
+          best = d;
+          far = j;
+        }
+      }
+      if (far > i) pairs.push([i, far]);
+    }
+  }
+  const cx = gw / 2;
+  const cy = gh / 2;
+  for (const [i, j] of pairs) {
+    ensureExpansion(terrain, crystal, gw, gh, seats[i]!, seats[j]!, cx, cy);
+    ensureExpansion(terrain, crystal, gw, gh, seats[j]!, seats[i]!, cx, cy);
+  }
+}
+
+function expansionBlobs(
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+): { x: number; y: number; n: number }[] {
+  const seen = new Uint8Array(gw * gh);
+  const blobs: { x: number; y: number; n: number }[] = [];
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      const start = y * gw + x;
+      if (seen[start] || (crystal[start] ?? 0) <= 0) continue;
+      const stack = [start];
+      seen[start] = 1;
+      let n = 0;
+      let sx = 0;
+      let sy = 0;
+      while (stack.length) {
+        const i = stack.pop() as number;
+        n++;
+        sx += i % gw;
+        sy += (i / gw) | 0;
+        const bx = i % gw;
+        const by = (i / gw) | 0;
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = bx + dx;
+          const ny = by + dy;
+          if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+          const ni = ny * gw + nx;
+          if (seen[ni] || (crystal[ni] ?? 0) <= 0) continue;
+          seen[ni] = 1;
+          stack.push(ni);
+        }
+      }
+      if (n >= 4) blobs.push({ x: sx / n + 0.5, y: sy / n + 0.5, n });
+    }
+  }
+  return blobs;
+}
+
+function seatHasExpansion(
+  blobs: { x: number; y: number; n: number }[],
+  seat: { x: number; y: number },
+  other: { x: number; y: number },
+): boolean {
+  for (const b of blobs) {
+    const ds = Math.hypot(b.x - seat.x, b.y - seat.y);
+    const dOther = Math.hypot(b.x - other.x, b.y - other.y);
+    if (ds >= 14 && ds <= 26 && ds + 0.5 < dOther) return true;
+  }
+  return false;
+}
+
+function ensureExpansion(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seat: { x: number; y: number },
+  other: { x: number; y: number },
+  cx: number,
+  cy: number,
+) {
+  if (seatHasExpansion(expansionBlobs(crystal, gw, gh), seat, other)) return;
+  const ang = Math.atan2(cy - seat.y, cx - seat.x);
+  for (const side of [0.7, -0.7, 1.05, -1.05, 0.35, -0.35]) {
+    for (let dist = 16; dist <= 24; dist += 2) {
+      const x = seat.x + Math.cos(ang + side) * dist;
+      const y = seat.y + Math.sin(ang + side) * dist;
+      const ds = Math.hypot(x - seat.x, y - seat.y);
+      const dOther = Math.hypot(x - other.x, y - other.y);
+      if (ds < 14 || ds > 24 || ds + 1 >= dOther) continue;
+      if (nearCrystal(crystal, gw, gh, x, y, 5)) continue;
+      let hosts = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (dx * dx + dy * dy > 5) continue;
+          const tx = Math.round(x + dx);
+          const ty = Math.round(y + dy);
+          if (tx < 2 || ty < 2 || tx >= gw - 2 || ty >= gh - 2) continue;
+          const i = ty * gw + tx;
+          if (oreHost(terrain[i] ?? 0) && (crystal[i] ?? 0) === 0) hosts++;
+        }
+      }
+      if (hosts < 8) continue;
+      paintOreDisk(terrain, crystal, gw, gh, x, y, 2.2, 800);
+      if (seatHasExpansion(expansionBlobs(crystal, gw, gh), seat, other)) return;
+    }
+  }
+  // Water maps have no spare ground at expansion range. Lay a side shelf off the lane.
+  for (const side of [1.15, -1.15, 1.55, -1.55]) {
+    for (const dist of [17, 19, 15]) {
+      const x = seat.x + Math.cos(ang + side) * dist;
+      const y = seat.y + Math.sin(ang + side) * dist;
+      const ds = Math.hypot(x - seat.x, y - seat.y);
+      const dOther = Math.hypot(x - other.x, y - other.y);
+      if (ds < 14 || ds > 24 || ds + 2 >= dOther) continue;
+      if (nearCrystal(crystal, gw, gh, x, y, 5)) continue;
+      if (!shelfFits(terrain, gw, gh, x, y, 2.8)) continue;
+      const anchor = shelfAnchor(terrain, gw, gh, x, y, seat, other);
+      if (!anchor) continue;
+      if (!paintShelfNeck(terrain, gw, gh, anchor.x, anchor.y, x, y)) continue;
+      paintShelfDisk(terrain, gw, gh, x, y, 2.6);
+      paintOreDisk(terrain, crystal, gw, gh, x, y, 2, 800);
+      if (seatHasExpansion(expansionBlobs(crystal, gw, gh), seat, other)) return;
+    }
+  }
+}
+
+function nearCrystal(crystal: Uint16Array, gw: number, gh: number, x: number, y: number, rad: number): boolean {
+  const r2 = rad * rad;
+  for (let ty = Math.max(1, Math.floor(y - rad)); ty <= Math.min(gh - 2, Math.ceil(y + rad)); ty++) {
+    for (let tx = Math.max(1, Math.floor(x - rad)); tx <= Math.min(gw - 2, Math.ceil(x + rad)); tx++) {
+      const dx = tx + 0.5 - x;
+      const dy = ty + 0.5 - y;
+      if (dx * dx + dy * dy > r2) continue;
+      if ((crystal[ty * gw + tx] ?? 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
+function shelfFits(terrain: Uint8Array, gw: number, gh: number, cx: number, cy: number, r: number): boolean {
+  const r2 = r * r;
+  let water = 0;
+  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
+    for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      if (dx * dx + dy * dy > r2) continue;
+      if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) return false;
+      const t = terrain[y * gw + x] ?? 0;
+      if (t === TILE_BRIDGE || t === TILE_ROCK || t === TILE_CLIFF || t === TILE_CRYSTAL || t === TILE_HIGH || t === TILE_RAMP) return false;
+      if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_SHORE) water++;
+    }
+  }
+  return water >= 8;
+}
+
+/** Home-side ground to tie a shelf to. Stays near this seat so it cannot reach the other island. */
+function shelfAnchor(
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x: number,
+  y: number,
+  seat: { x: number; y: number },
+  other: { x: number; y: number },
+): { x: number; y: number } | null {
+  let best: { x: number; y: number } | null = null;
+  let bestD = 14;
+  for (let ty = 1; ty < gh - 1; ty++) {
+    for (let tx = 1; tx < gw - 1; tx++) {
+      const t = terrain[ty * gw + tx] ?? 0;
+      if (!oreHost(t)) continue;
+      const px = tx + 0.5;
+      const py = ty + 0.5;
+      if (Math.hypot(px - seat.x, py - seat.y) > 11) continue;
+      if (Math.hypot(px - other.x, py - other.y) + 6 < Math.hypot(px - seat.x, py - seat.y)) continue;
+      const d = Math.hypot(px - x, py - y);
+      if (d < bestD) {
+        bestD = d;
+        best = { x: tx, y: ty };
+      }
+    }
+  }
+  return best;
+}
+
+function paintShelfDisk(terrain: Uint8Array, gw: number, gh: number, cx: number, cy: number, r: number) {
+  const r2 = r * r;
+  for (let y = Math.max(1, Math.floor(cy - r)); y <= Math.min(gh - 2, Math.ceil(cy + r)); y++) {
+    for (let x = Math.max(1, Math.floor(cx - r)); x <= Math.min(gw - 2, Math.ceil(cx + r)); x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - cy;
+      if (dx * dx + dy * dy > r2) continue;
+      const i = y * gw + x;
+      const t = terrain[i] ?? 0;
+      if (t === TILE_BRIDGE || t === TILE_ROCK || t === TILE_CLIFF) continue;
+      if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_SHORE) terrain[i] = TILE_SAND;
+    }
+  }
+}
+
+/** Sand neck across water. Refuses a bridge, a cliff, or ground that belongs to the far side. */
+function paintShelfNeck(
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+): boolean {
+  const cells: { x: number; y: number }[] = [];
+  let x = x0;
+  let y = y0;
+  const dx = Math.abs(x1 - x0);
+  const sx = x0 < x1 ? 1 : -1;
+  const dy = -Math.abs(y1 - y0);
+  const sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (let guard = 0; guard < gw + gh; guard++) {
+    for (let oy = -1; oy <= 1; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        if (Math.abs(ox) + Math.abs(oy) > 1) continue;
+        const tx = x + ox;
+        const ty = y + oy;
+        if (tx < 1 || ty < 1 || tx >= gw - 1 || ty >= gh - 1) return false;
+        const t = terrain[ty * gw + tx] ?? 0;
+        if (t === TILE_BRIDGE || t === TILE_ROCK || t === TILE_CLIFF || t === TILE_HIGH) return false;
+        cells.push({ x: tx, y: ty });
+      }
+    }
+    if (Math.hypot(x - x1, y - y1) < 1.5) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      x += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      y += sy;
+    }
+  }
+  for (const c of cells) {
+    const i = c.y * gw + c.x;
+    const t = terrain[i] ?? 0;
+    if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_SHORE) terrain[i] = TILE_SAND;
+  }
+  return true;
 }
 
 function oreNearSum(crystal: Uint16Array, gw: number, gh: number, x: number, y: number, radius: number): number {

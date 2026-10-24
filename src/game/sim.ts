@@ -83,7 +83,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, fairExpansionOre, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -776,7 +776,10 @@ export class Sim {
     this.fog = [0, 1, 2, 3].map(() => new Uint8Array(gw * gh));
     if (!opts.empty) {
       for (const s of slots) stampCamp(this.terrain, this.crystal, s.x, s.y, gw, gh);
-      if (!custom) fairNearbyOre(this.terrain, this.crystal, gw, gh, slots);
+      if (!custom) {
+        fairNearbyOre(this.terrain, this.crystal, gw, gh, slots);
+        fairExpansionOre(this.terrain, this.crystal, gw, gh, slots);
+      }
       this.seedPods();
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
