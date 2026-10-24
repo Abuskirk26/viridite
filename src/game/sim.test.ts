@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, resolveBuilding } from "./data.ts";
+import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
 import { DEPLOY_SECS, NORMAL_PUSH_AT, Sim, shortPlaceReason, type Building } from "./sim.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, viewPitch, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
@@ -1506,6 +1506,55 @@ test("the bot keeps attacking after its construction yard falls", () => {
     (u) => u.team === 1 && u.hp > 0 && (u.order.t === "attack" || (u.order.t === "move" && u.order.attackMove)),
   );
   assert.equal(pushed || sim.aiIntent[1] === "attack", true);
+});
+
+test("armor multipliers: rifles are weak vs tanks, rockets punch tanks, cannons punch halls", () => {
+  assert.equal(counterMul("rifle", "armored"), ARMOR_MULT.rifle.armored);
+  assert.equal(counterMul("rocket", "armored"), ARMOR_MULT.rocket.armored);
+  assert.equal(counterMul("rocket", "building"), ARMOR_MULT.rocket.building);
+  assert.equal(counterMul("artillery", "building"), ARMOR_MULT.cannon.building);
+  assert.equal(counterMul("tank", "building"), ARMOR_MULT.cannon.building);
+  assert.ok(ARMOR_MULT.rifle.armored < ARMOR_MULT.rocket.armored);
+  assert.ok(ARMOR_MULT.cannon.building > ARMOR_MULT.rifle.building);
+  assert.equal(plateOf("rifle", "infantry"), "light");
+  assert.equal(plateOf("scout", "vehicle"), "light");
+  assert.equal(plateOf("tank", "vehicle"), "armored");
+  assert.equal(plateOf("medium", "heavy"), "armored");
+
+  const fresh = () => {
+    const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+    sim.time = 50;
+    return sim;
+  };
+  const unitHit = (kind: "rifle" | "rocket", foe: "rifle" | "tank", ticks: number) => {
+    const sim = fresh();
+    const a = sim.spawnUnit(0, kind, 30, 30);
+    const b = sim.spawnUnit(1, foe, 33, 30);
+    assert.ok(a && b);
+    sim.issueAttack([a.id], b.id);
+    const before = b.hp;
+    for (let i = 0; i < ticks; i++) sim.tick(0.1);
+    return before - b.hp;
+  };
+  const hallHit = (kind: "rifle" | "artillery", ticks: number) => {
+    const sim = fresh();
+    const a = sim.spawnUnit(0, kind, kind === "artillery" ? 26 : 30, 44);
+    const hall = stubBuilding(sim, { kind: "power", team: 1, tx: 33, ty: 43 });
+    occupy(sim, hall);
+    assert.ok(a);
+    sim.issueAttack([a.id], hall.id);
+    const before = hall.hp;
+    for (let i = 0; i < ticks; i++) sim.tick(0.1);
+    return before - hall.hp;
+  };
+  const rifleInf = unitHit("rifle", "rifle", 1);
+  const rifleTank = unitHit("rifle", "tank", 1);
+  const rocketTank = unitHit("rocket", "tank", 8);
+  const rifleHall = hallHit("rifle", 1);
+  const artyHall = hallHit("artillery", 20);
+  assert.ok(rifleInf > rifleTank * 3, `rifle vs infantry ${rifleInf} vs tank ${rifleTank}`);
+  assert.ok(rocketTank > rifleTank * 4, `rocket vs tank ${rocketTank} vs rifle ${rifleTank}`);
+  assert.ok(artyHall > rifleHall * 5, `artillery vs hall ${artyHall} vs rifle ${rifleHall}`);
 });
 
 

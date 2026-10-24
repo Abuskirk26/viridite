@@ -46,6 +46,7 @@ import {
   SURVIVE_SECONDS,
   commandCost,
   isFence,
+  matchupTag,
   resolveBuilding,
   resolveUnit,
   trainedList,
@@ -3585,6 +3586,7 @@ function TrainButton({
   icons?: boolean;
 }) {
   const spec = resolveUnit(unitId, sim.factionOf(team as 0));
+  const tag = matchupTag(unitId);
   const need = unitRequires(unitId);
   const unlocked = !need || sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
   const broke = unlocked && sim.credits[team] < spec.cost;
@@ -3610,7 +3612,7 @@ function TrainButton({
       <button
         type="button"
         data-testid={`train-${unitId}`}
-        aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
+        aria-label={unlocked ? `${spec.name}, ${spec.cost} credits, ${commandCost(spec)} command${tag ? `, ${tag.detail}` : ""}` : `${spec.name}. Needs ${BUILDINGS[need!].name}.`}
         disabled={!building.complete || !unlocked}
         onContextMenu={(e) => e.preventDefault()}
         style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "manipulation" }}
@@ -3669,6 +3671,9 @@ function TrainButton({
                 <>
                   {spec.cost}
                   <span className="text-brass"> · {commandCost(spec)}</span>
+                  {tag ? (
+                    <span className={tag.tone === "strong" ? "text-gold" : "text-brass"}>{` · ${tag.short}`}</span>
+                  ) : null}
                   {low ? <span className="text-brass"> · low</span> : null}
                 </>
               ) : (
