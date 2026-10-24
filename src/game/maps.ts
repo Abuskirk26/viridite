@@ -1370,8 +1370,84 @@ export function dressBattlefield(
   for (const p of pads) stampLane(terrain, crystal, gw, gh, p.x, p.y, cx, cy, 1);
   linkBridges(terrain, crystal, gw, gh, pads);
   sealOreFields(terrain, crystal, gw, gh);
+  openExpansions(terrain, crystal, gw, gh, pads);
   const props = placeHamlets(terrain, crystal, gw, gh, pads, cx, cy, salt);
   return props;
+}
+
+/** A build plot on the far side of a deposit, off the starting pads and off the lane. */
+function openExpansions(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+) {
+  const seen = new Uint8Array(gw * gh);
+  const canClear = (t: number) => t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH || t === TILE_SCRUB || t === TILE_STUMP;
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      const start = y * gw + x;
+      if (seen[start] || (crystal[start] ?? 0) <= 0) continue;
+      const blob: number[] = [];
+      const stack = [start];
+      seen[start] = 1;
+      let sx = 0;
+      let sy = 0;
+      while (stack.length) {
+        const i = stack.pop() as number;
+        blob.push(i);
+        const bx = i % gw;
+        const by = (i / gw) | 0;
+        sx += bx;
+        sy += by;
+        for (const [dx, dy] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+        ] as const) {
+          const nx = bx + dx;
+          const ny = by + dy;
+          if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+          const ni = ny * gw + nx;
+          if (seen[ni] || (crystal[ni] ?? 0) <= 0) continue;
+          seen[ni] = 1;
+          stack.push(ni);
+        }
+      }
+      if (blob.length < 4) continue;
+      const cx = sx / blob.length + 0.5;
+      const cy = sy / blob.length + 0.5;
+      if (nearPad(pads, cx, cy, 12)) continue;
+      let nearest = pads[0];
+      let best = Infinity;
+      for (const p of pads) {
+        const d = (p.x - cx) ** 2 + (p.y - cy) ** 2;
+        if (d < best) {
+          best = d;
+          nearest = p;
+        }
+      }
+      if (!nearest) continue;
+      const ang = Math.atan2(cy - nearest.y, cx - nearest.x);
+      const tx = Math.round(cx + Math.cos(ang) * 3.2);
+      const ty = Math.round(cy + Math.sin(ang) * 3.2);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = tx + dx;
+          const ny = ty + dy;
+          if (nx < 2 || ny < 2 || nx >= gw - 2 || ny >= gh - 2) continue;
+          if (nearPad(pads, nx, ny, 9)) continue;
+          const i = ny * gw + nx;
+          if ((crystal[i] ?? 0) > 0) continue;
+          const tile = terrain[i] ?? 0;
+          if (!canClear(tile)) continue;
+          terrain[i] = TILE_CLEAR;
+        }
+      }
+    }
+  }
 }
 
 /** Fill gaps inside a deposit so the ore reads as one patch, not loose tiles. */
