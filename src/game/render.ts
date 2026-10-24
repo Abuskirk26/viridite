@@ -893,6 +893,7 @@ export function drawGame(
 
   paintScreenFog(ctx, sim.fog[VIEWER], cam, view, GW, GH);
   paintDeathFx(ctx, sim, cam, view);
+  paintCaptureBars(ctx, sim, cam, view);
 
   drawJobsScreen(ctx, sim, cam, view);
   drawPlaceLabel(ctx, sim, cam, view, ui);
@@ -3934,6 +3935,36 @@ function paintCollapse(ctx: CanvasRenderingContext2D, b: Building, x: number, y:
   paintSmoke(ctx, x - wide * 0.2, y - wide * 0.35, wide * 0.42, time, false);
   paintSmoke(ctx, x + wide * 0.18, y - wide * 0.2, wide * 0.36, time + 0.6, false);
   ctx.restore();
+}
+
+function captureGoal(b: Building): number {
+  if (b.kind === "span" && b.rubble > 0) return 6;
+  if (isFence(b.kind)) return 2.6;
+  return 3;
+}
+
+/** Phone-readable bar over a hall an engineer is taking. Team color fills as the capture runs. */
+function paintCaptureBars(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view: View) {
+  for (const u of sim.units) {
+    if (u.hp <= 0 || u.kind !== "engineer" || u.order.t !== "capture" || u.capture <= 0) continue;
+    const b = sim.buildingById(u.order.id);
+    if (!b || b.hp <= 0) continue;
+    const s = worldToScreen(cam, b.tx + b.w / 2, b.ty + b.h * 0.12, view);
+    const w = 68;
+    const h = 8;
+    const x = Math.round(s.x - w / 2);
+    const y = Math.round(s.y - 22);
+    const frac = Math.max(0, Math.min(1, u.capture / captureGoal(b)));
+    ctx.save();
+    ctx.fillStyle = "rgba(16, 12, 8, 0.88)";
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = seatPaint(sim, u.team);
+    ctx.fillRect(x + 1, y + 1, Math.max(0, (w - 2) * frac), h - 2);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    ctx.restore();
+  }
 }
 
 function paintCaptureRing(ctx: CanvasRenderingContext2D, x: number, y: number, progress: number) {
