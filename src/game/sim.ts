@@ -88,7 +88,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, openBuildPads, paveMichigan, plantCorners, resampleMap, seedScars, snapLand, stampCamp, waterKind, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { unitPickRadius } from "./view.ts";
@@ -327,6 +327,20 @@ export interface Ghost {
   ttl: number;
 }
 
+/** A building last seen under fog. Stays until the player looks again and it is gone. */
+export interface SeenHall {
+  viewer: Team;
+  id: number;
+  team: Team;
+  kind: BuildingId;
+  tx: number;
+  ty: number;
+  w: number;
+  h: number;
+  hp: number;
+  complete: boolean;
+}
+
 type Target = { kind: "unit"; u: Unit } | { kind: "building"; b: Building };
 
 export interface PlaceResult {
@@ -462,11 +476,11 @@ export interface NewGame {
 }
 export function footprintOrigin(kind: BuildingId, wx: number, wy: number): { tx: number; ty: number } {
   const d = BUILDINGS[kind];
-  // The tapped tile stays inside the footprint. Even sizes hang down-right of that tile
-  // instead of rounding onto the tile above the finger.
+  // Center the footprint on the world point under the finger. screenToWorld already
+  // folds in pitch and the camera; the finger is in CSS pixels, the same space as the view.
   return {
-    tx: Math.floor(wx) - Math.floor((d.w - 1) / 2),
-    ty: Math.floor(wy) - Math.floor((d.h - 1) / 2),
+    tx: Math.round(wx - d.w / 2),
+    ty: Math.round(wy - d.h / 2),
   };
 }
 
@@ -686,6 +700,8 @@ export class Sim {
   spots: Spot[] = [];
   /** Last-known enemy marks. Drawing only; both clients update them the same way. */
   ghosts: Ghost[] = [];
+  /** Enemy halls remembered after they leave line of sight. */
+  seenHalls: SeenHall[] = [];
   /** Wrecks, fences, and crates drawn on top of the paint. Not blocking. */
   fieldProps: FieldProp[] = [];
   /** Where each seat was last shot. The phone recenters on the viewer's alarm. */
@@ -791,6 +807,9 @@ export class Sim {
         fairExpansionOre(this.terrain, this.crystal, gw, gh, slots);
         evenMichiganFields(this.terrain, this.crystal, gw, gh, slots);
       }
+      openBuildPads(this.terrain, this.crystal, gw, gh, slots);
+      if (!custom && this.mapId === "michigan") paveMichigan(this.terrain, this.crystal, gw, gh, slots);
+      this.clearStartClutter(slots);
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
         this.spawnUnit(t as Team, "mcv", at.x, at.y);
@@ -2992,6 +3011,7 @@ export class Sim {
       if (target.u.armor === "infantry" && this.inCover(target.u) && (shot === "shell" || shot === "rocket")) mul *= 0.75;
       this.hurtUnit(target.u, base * mul, from, attacker);
     } else {
+      if (this.spareNormalBuildings(from, target.b)) return;
       let dmg = base * vsBld;
       if ((target.b.kind === "wall" || target.b.kind === "gate" || target.b.kind === "sandbag") && target.b.rubble <= 0) {
         const explosive = shot === "shell" || shot === "rocket";
@@ -3065,6 +3085,15 @@ export class Sim {
     }
   }
 
+  /** Normal CPU seats do not damage buildings before the 4:00 harass. Hard and Easy are not gated. */
+  private spareNormalBuildings(from: Team, b: Building): boolean {
+    if (this.time >= NORMAL_HARASS_AT) return false;
+    if (!this.cpu[from]) return false;
+    if (this.difficultyOf(from) !== "normal") return false;
+    if (b.neutral || this.allied(from, b.team)) return false;
+    return true;
+  }
+
   private hurtBuilding(b: Building, dmg: number, from?: Team) {
     if (b.hp <= 0 || dmg <= 0) return;
     if (from !== undefined) this.noteThreat(b.team, b.tx + b.w / 2, b.ty + b.h / 2, from);
@@ -3107,7 +3136,8 @@ export class Sim {
       return;
     }
     b.hp = Math.max(1, b.maxHp * 0.02);
-    b.collapse = 1.35;
+    // Further shells must not restart the fall. A building under fire used to live forever at 2% hp.
+    if (b.collapse <= 0) b.collapse = 1.35;
     this.notePlant(b, from);
     this.boom(b.tx + b.w / 2, b.ty + b.h / 2, 0.95);
     this.debris(b.tx + b.w / 2, b.ty + b.h / 2, 7);
@@ -4014,7 +4044,7 @@ export class Sim {
       this.finish(up ? "win" : "lose", up ? "Held the field" : "No buildings or units remain");
       return;
     }
-    if (this.mode === "destroy" && this.difficulty === "hard" && this.time >= HARD_CAP_SECS) {
+    if (this.mode === "destroy" && (this.difficulty === "hard" || this.difficulty === "normal") && this.time >= HARD_CAP_SECS) {
       const mineSide = this.alliance[0] ?? 0;
       const mine = this.matchScore(mineSide);
       let bestOther = -1;
@@ -4084,6 +4114,27 @@ export class Sim {
     return true;
   }
 
+  /**
+   * Buildings and units still on the field after the Construction Yard is gone.
+   * Walls, bridges, and rubble do not count. Null until a yard has existed,
+   * while one still stands (including a rebuild), or once the side is wiped.
+   */
+  yardHold(team: Team): number | null {
+    if (!this.hadYard[team] || this.eliminated[team]) return null;
+    const yardUp = this.buildings.some(
+      (b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0 && b.collapse <= 0,
+    );
+    if (yardUp) return null;
+    const n = this.realBuildings(team) + this.units.filter((u) => u.team === team && u.hp > 0).length;
+    return n > 0 ? n : null;
+  }
+
+  yardLostLine(team: Team): string | null {
+    const n = this.yardHold(team);
+    if (n == null) return null;
+    return `Construction Yard lost: ${n} buildings/units left`;
+  }
+
   private finish(outcome: "win" | "lose", reason: string) {
     this.outcome = outcome;
     this.reason = reason;
@@ -4127,6 +4178,7 @@ export class Sim {
       this.reveal(s.team, s.x, s.y, 2.4);
     }
     this.trackKnown();
+    this.trackHalls();
   }
 
   private shareSight() {
@@ -5363,6 +5415,88 @@ export class Sim {
         if (this.visibleUnit(t as Team, u)) this.remember(t as Team, u, 6);
       }
     }
+  }
+
+  private trackHalls() {
+    for (let t = 0; t <= this.opponents; t++) {
+      const viewer = t as Team;
+      for (const b of this.buildings) {
+        if (b.hp <= 0 || b.rubble > 0 || b.neutral || b.kind === "span" || isFence(b.kind)) continue;
+        if (this.allied(viewer, b.team)) continue;
+        if (!this.buildingVisible(viewer, b)) continue;
+        this.noteHall(viewer, b);
+      }
+    }
+    if (!this.seenHalls.length) return;
+    this.seenHalls = this.seenHalls.filter((g) => {
+      let visible = false;
+      let explored = false;
+      for (let y = g.ty; y < g.ty + g.h; y++) {
+        for (let x = g.tx; x < g.tx + g.w; x++) {
+          if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
+          const f = this.fog[g.viewer]?.[y * this.gw + x] ?? 0;
+          if (f === 2) visible = true;
+          if (f >= 1) explored = true;
+        }
+      }
+      if (!explored) return false;
+      const live = this.buildingById(g.id);
+      if (visible && (!live || live.hp <= 0 || live.rubble > 0 || live.neutral)) return false;
+      return true;
+    });
+  }
+
+  private noteHall(viewer: Team, b: Building) {
+    for (const g of this.seenHalls) {
+      if (g.viewer !== viewer || g.id !== b.id) continue;
+      g.tx = b.tx;
+      g.ty = b.ty;
+      g.w = b.w;
+      g.h = b.h;
+      g.hp = b.hp;
+      g.complete = b.complete;
+      g.kind = b.kind;
+      g.team = b.team;
+      return;
+    }
+    this.seenHalls.push({
+      viewer,
+      id: b.id,
+      team: b.team,
+      kind: b.kind,
+      tx: b.tx,
+      ty: b.ty,
+      w: b.w,
+      h: b.h,
+      hp: b.hp,
+      complete: b.complete,
+    });
+  }
+
+  /** Trees, props, and shell holes inside a start pad are not a build. */
+  private clearStartClutter(slots: { x: number; y: number }[]) {
+    const r2 = 10.2 * 10.2;
+    const near = (x: number, y: number) => {
+      for (const s of slots) {
+        const dx = x - s.x;
+        const dy = y - s.y;
+        if (dx * dx + dy * dy <= r2) return true;
+      }
+      return false;
+    };
+    for (const s of slots) {
+      const rad = 11;
+      for (let y = Math.floor(s.y) - rad; y <= Math.floor(s.y) + rad; y++) {
+        for (let x = Math.floor(s.x) - rad; x <= Math.floor(s.x) + rad; x++) {
+          if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
+          const dx = x + 0.5 - s.x;
+          const dy = y + 0.5 - s.y;
+          if (dx * dx + dy * dy > r2) continue;
+          this.craters[y * this.gw + x] = 0;
+        }
+      }
+    }
+    if (this.fieldProps.length) this.fieldProps = this.fieldProps.filter((p) => !near(p.x, p.y));
   }
 
   private remember(viewer: Team, u: Unit, ttl: number) {

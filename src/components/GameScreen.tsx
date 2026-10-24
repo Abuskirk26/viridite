@@ -12,6 +12,7 @@ import {
   Gem,
   Landmark,
   LayoutGrid,
+  Lock,
   Move,
   Star,
   Timer,
@@ -354,6 +355,7 @@ export function GameScreen() {
   const camRef = useRef<Camera>({ x: 32, y: 32, zoom: 48 });
   const viewRef = useRef<View>({ w: 1, h: 1 });
   const phaseRef = useRef<Phase>("menu");
+  const endNoted = useRef(false);
   const pausedRef = useRef(false);
   const selRef = useRef<number[]>([]);
   const selBRef = useRef<number | null>(null);
@@ -923,10 +925,7 @@ export function GameScreen() {
       const hover = placingRef.current
         ? aimedCell(sim, camRef.current, viewRef.current, placingRef.current, fingerX, fingerY, false)
         : null;
-      const ghost =
-        placingRef.current && draftRef.current.lift
-          ? aimedCell(sim, camRef.current, viewRef.current, placingRef.current, fingerX, fingerY, true)
-          : hover;
+      const ghost = hover;
       let wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null = null;
       if (placingRef.current && isFence(placingRef.current)) {
         const dragged = draftRef.current.wallPts;
@@ -992,17 +991,22 @@ export function GameScreen() {
         sheet,
         image,
       );
+      if (sim.outcome !== "playing" && phaseRef.current === "play") {
+        if (!endNoted.current) {
+          endNoted.current = true;
+          writeSave(sim, camRef.current);
+          window.setTimeout(() => {
+            if (phaseRef.current === "play") setPhase("over");
+          }, 400);
+        }
+      } else if (sim.outcome === "playing") {
+        endNoted.current = false;
+      }
       if (now - lastHud > 200) {
         lastHud = now;
         const live = selRef.current.filter((id) => sim.unitById(id));
         if (live.length !== selRef.current.length) setSel(live);
         if (selBRef.current && !sim.buildingById(selBRef.current)) setSelB(null);
-        if (sim.outcome !== "playing" && phaseRef.current === "play") {
-          writeSave(sim, camRef.current);
-          window.setTimeout(() => {
-            if (phaseRef.current === "play") setPhase("over");
-          }, 2000);
-        }
         setFrame((n) => (n + 1) % 100000);
       }
     };
@@ -1079,9 +1083,9 @@ export function GameScreen() {
           kind,
           draftRef.current.hoverX,
           draftRef.current.hoverY,
-          draftRef.current.lift,
+          false,
         );
-        const box = placeChrome(camRef.current, viewRef.current, show.tx, show.ty, BUILDINGS[kind].w);
+        const box = placeChrome(camRef.current, viewRef.current, show.tx, show.ty, BUILDINGS[kind].w, BUILDINGS[kind].h);
         const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
         if (hit(box.confirm)) return "confirm";
         if (hit(box.cancel)) return "cancel";
@@ -1855,6 +1859,15 @@ export function GameScreen() {
                     setSelecting(next);
                   }}
                 />
+              )}
+              {phase === "play" && sim.yardLostLine(viewer as Team) && (
+                <p
+                  data-testid="yard-lost"
+                  className="pointer-events-none absolute right-2 z-20 max-w-[15rem] border border-brass-dim bg-field/92 px-2 py-1 font-display text-xs uppercase leading-snug tracking-wide text-gold"
+                  style={{ top: 108 }}
+                >
+                  {sim.yardLostLine(viewer as Team)}
+                </p>
               )}
               {stall && phase === "play" && (
                 <p className="pointer-events-none absolute top-2 right-2 steel-inset px-2 py-1 text-xs text-gold" data-testid="net-stall">
@@ -2764,6 +2777,22 @@ function ShortDock({
   const hurt = !!ownBuilding && (ownBuilding.mending || ownBuilding.hp < ownBuilding.maxHp);
   const gate = !!ownBuilding && ownBuilding.kind === "gate";
   const slot = "bevel-btn grid h-11 w-14 shrink-0 place-items-center font-display text-[11px] uppercase leading-none disabled:text-muted";
+  const faction = sim.factionOf(team as 0);
+  const hallTabs: { id: TrainAt; label: string }[] = [
+    { id: "barracks", label: "Infantry" },
+    { id: "factory", label: "Vehicles" },
+  ];
+  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn)) hallTabs.push({ id: "helipad", label: "Air" });
+  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn)) hallTabs.push({ id: "dock", label: "Navy" });
+  const [hall, setHall] = useState<TrainAt>("barracks");
+  useEffect(() => {
+    if (ownBuilding && isTrainHall(ownBuilding.kind)) setHall(ownBuilding.kind);
+  }, [ownBuilding?.id, ownBuilding?.kind]);
+  useEffect(() => {
+    if (hall !== "factory") return;
+    const card = document.querySelector('[data-testid="train-tank"]');
+    if (card instanceof HTMLElement) card.scrollIntoView({ inline: "start", block: "nearest" });
+  }, [hall, selB]);
   return (
     <div
       className="flex h-16 items-center gap-1 px-1"
@@ -2772,11 +2801,29 @@ function ShortDock({
       style={{ WebkitTouchCallout: "none", userSelect: "none" }}
     >
       <SquadKeys tight marks={squadOn} onSave={onSave} onRecall={onRecall} />
+      {!unitOrders && (
+        <div className="flex shrink-0 items-center gap-0.5" data-testid="hall-tabs">
+          {hallTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              data-testid={`hall-tab-${tab.id}`}
+              aria-pressed={hall === tab.id}
+              onClick={() => setHall(tab.id)}
+              className={`bevel-btn h-11 min-w-11 px-1.5 font-display text-[10px] uppercase leading-none ${
+                hall === tab.id ? "bg-crystal text-crystal-ink" : "text-gold"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" style={{ touchAction: "pan-x" }}>
         {unitOrders ? (
           commands
         ) : (
-          <TroopRoster tight sim={sim} team={team} selB={selB} onTrain={onTrain} onCancelOne={onCancelOne} />
+          <TroopRoster tight focus={hall} sim={sim} team={team} selB={selB} onTrain={onTrain} onCancelOne={onCancelOne} />
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1" data-testid="dock-utility">
@@ -2824,6 +2871,7 @@ function TroopRoster({
   selB = null,
   tight = false,
   icons = false,
+  focus = null,
 }: {
   sim: Sim;
   team: number;
@@ -2832,6 +2880,8 @@ function TroopRoster({
   selB?: number | null;
   tight?: boolean;
   icons?: boolean;
+  /** Landscape dock shows one hall. The others stay in the DOM so their train ids still exist. */
+  focus?: TrainAt | null;
 }) {
   const faction = sim.factionOf(team as 0);
   const hasDock = sim.buildings.some((b) => b.team === team && b.kind === "dock" && b.complete && b.hp > 0 && b.rubble <= 0);
@@ -2852,49 +2902,63 @@ function TroopRoster({
       {groups.map((group) => {
         const list = trainedList(group.id, faction).filter((id) => trainOffered(sim.mapId, faction, id, hasDock || group.id !== "dock"));
         if (!list.length) return null;
+        const shown = !focus || focus === group.id;
         const hall = producerOf(sim, team, group.id, selB);
         const hot = !!picked && picked.kind === group.id && picked.team === team;
+        if (!shown) {
+          return (
+            <div key={group.id} data-roster-group={group.id} className="hidden">
+              {list.map((id) => (
+                <button key={id} type="button" disabled tabIndex={-1} data-testid={`train-${id}`} className="hidden" />
+              ))}
+            </div>
+          );
+        }
+        if (!hall) {
+          return (
+            <div key={group.id} data-roster-group={group.id} className="flex shrink-0 items-center gap-1">
+              <button
+                type="button"
+                disabled
+                data-testid={`hall-locked-${group.id}`}
+                aria-label={`Build ${BUILDINGS[group.id].name} to unlock`}
+                className={`bevel-btn flex shrink-0 items-center justify-center gap-1 px-2 text-muted ${
+                  tight ? "h-12 min-h-11 min-w-[8.75rem]" : "h-16 min-w-16"
+                }`}
+              >
+                <Lock className="size-3.5 shrink-0" aria-hidden />
+                <span className="whitespace-nowrap font-display text-[11px] uppercase leading-none">{`Build ${BUILDINGS[group.id].name} to unlock`}</span>
+              </button>
+              {list.map((id) => (
+                <button key={id} type="button" disabled tabIndex={-1} data-testid={`train-${id}`} className="hidden" />
+              ))}
+            </div>
+          );
+        }
         return (
           <div
             key={group.id}
             data-roster-group={group.id}
             className={`flex shrink-0 items-center gap-1 ${hot ? "outline outline-1 outline-gold" : ""}`}
           >
-            {icons ? null : (
+            {icons || focus ? null : (
               <span className="shrink-0 whitespace-nowrap px-1 font-display text-[11px] uppercase leading-none tracking-wide text-gold">
                 {group.label}
               </span>
             )}
-            {list.map((id) =>
-              hall ? (
-                <TrainButton
-                  key={id}
-                  tight={tight}
-                  icons={icons}
-                  sim={sim}
-                  team={team}
-                  building={hall}
-                  unitId={id}
-                  onTrain={(unit) => onTrain(group.id, unit)}
-                  onCancelOne={onCancelOne ? () => onCancelOne(group.id, id) : undefined}
-                />
-              ) : (
-                <button
-                  key={id}
-                  type="button"
-                  disabled
-                  data-testid={`train-${id}`}
-                  aria-label={`${resolveUnit(id, faction).name}. Build a ${BUILDINGS[group.id].name} first.`}
-                  onContextMenu={(e) => e.preventDefault()}
-                  className={`bevel-btn flex shrink-0 items-center justify-center gap-1 px-1.5 text-muted ${
-                    icons ? "h-11 min-w-11" : tight ? "h-12 min-h-11 min-w-[8.75rem] flex-row" : "h-16 w-16 flex-col"
-                  }`}
-                >
-                  <span className="whitespace-nowrap font-display text-[11px] uppercase leading-none">{resolveUnit(id, faction).short}</span>
-                  {icons ? null : <span className="whitespace-nowrap text-[11px] leading-none text-muted">Locked</span>}
-                </button>
-              ),
-            )}
+            {list.map((id) => (
+              <TrainButton
+                key={id}
+                tight={tight}
+                icons={icons}
+                sim={sim}
+                team={team}
+                building={hall}
+                unitId={id}
+                onTrain={(unit) => onTrain(group.id, unit)}
+                onCancelOne={onCancelOne ? () => onCancelOne(group.id, id) : undefined}
+              />
+            ))}
           </div>
         );
       })}
@@ -3732,7 +3796,10 @@ function TrainButton({
             <span className="whitespace-nowrap font-display text-[11px] uppercase">{spec.short}</span>
             <span className={`whitespace-nowrap text-[11px] tabular-nums ${broke ? "text-danger" : "text-gold"}`}>
               {hqLocked ? (
-                `HQ ${needTier}`
+                <span className="inline-flex items-center gap-0.5">
+                  <Lock className="size-3 shrink-0" aria-hidden />
+                  {`HQ ${needTier}`}
+                </span>
               ) : unlocked ? (
                 <>
                   {spec.cost}
@@ -3743,7 +3810,10 @@ function TrainButton({
                   {low ? <span className="text-brass"> · low</span> : null}
                 </>
               ) : (
-                `Needs ${BUILDINGS[need!].short}`
+                <span className="inline-flex items-center gap-0.5">
+                  <Lock className="size-3 shrink-0" aria-hidden />
+                  {`Needs ${BUILDINGS[need!].short}`}
+                </span>
               )}
             </span>
           </span>

@@ -214,8 +214,8 @@ let fogTmp: Float32Array | null = null;
 
 function fogAlpha(state: number): number {
   if (state === 2) return 0;
-  if (state === 1) return 42;
-  return 112;
+  if (state === 1) return 58;
+  return 236;
 }
 
 function sampleFog(fog: Uint8Array, wx: number, wy: number, gw: number, gh: number): number {
@@ -297,10 +297,10 @@ function paintScreenFog(ctx: CanvasRenderingContext2D, fog: Uint8Array | undefin
   for (let i = 0; i < n; i++) {
     const o = i * 4;
     const a = src[i] ?? 0;
-    data[o] = 52;
-    data[o + 1] = 68;
-    data[o + 2] = 82;
-    data[o + 3] = a < 1 ? 0 : a > 150 ? 150 : a;
+    data[o] = 18;
+    data[o + 1] = 22;
+    data[o + 2] = 28;
+    data[o + 3] = a < 1 ? 0 : a > 245 ? 245 : a;
   }
   fx.putImageData(img, 0, 0);
   ctx.save();
@@ -467,6 +467,23 @@ export function drawGame(
     depth.push({
       y: b.ty + b.h,
       draw: () => (isFence(b.kind) ? paint() : around(b.tx + b.w / 2, b.ty + b.h / 2, hs, paint)),
+    });
+  }
+  for (const g of sim.seenHalls) {
+    if (g.viewer !== VIEWER) continue;
+    const live = sim.buildingById(g.id);
+    if (live && live.hp > 0 && live.rubble <= 0 && sim.buildingVisible(VIEWER, live)) continue;
+    let explored = false;
+    for (let y = g.ty; y < g.ty + g.h && !explored; y++) {
+      for (let x = g.tx; x < g.tx + g.w; x++) {
+        if ((fog?.[y * GW + x] ?? 0) >= 1) explored = true;
+      }
+    }
+    if (!explored) continue;
+    const ghost = g;
+    depth.push({
+      y: ghost.ty + ghost.h,
+      draw: () => paintSeenHall(ctx, sim, ghost),
     });
   }
 
@@ -1014,17 +1031,29 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
 }
 
 export function placeChrome(
-  _cam: Camera,
+  cam: Camera,
   view: View,
-  _tx: number,
-  _ty: number,
-  _w: number,
+  tx: number,
+  ty: number,
+  w: number,
+  h = w,
 ): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
   const bw = 112;
   const bh = 48;
-  const padW = 52;
-  const x = Math.max(4, Math.round(view.w - bw - padW - 8));
-  const y = Math.max(4, Math.round(view.h - (bh * 2 + 6) - 8));
+  const gap = 10;
+  const a = worldToScreen(cam, tx, ty, view);
+  const b = worldToScreen(cam, tx + w, ty + h, view);
+  const left = Math.min(a.x, b.x);
+  const right = Math.max(a.x, b.x);
+  const top = Math.min(a.y, b.y);
+  const bottom = Math.max(a.y, b.y);
+  const stack = bh * 2 + 6;
+  let x = Math.round(right + gap);
+  let y = Math.round((top + bottom) / 2 - stack / 2);
+  if (x + bw > view.w - 4) x = Math.round(left - gap - bw);
+  if (x < 4) x = 4;
+  if (y < 4) y = 4;
+  if (y + stack > view.h - 4) y = Math.max(4, Math.round(view.h - 4 - stack));
   return {
     confirm: { x, y, w: bw, h: bh },
     cancel: { x, y: y + bh + 6, w: bw, h: bh },
@@ -1119,7 +1148,8 @@ function drawPlaceLabel(
   if (!ui.placing) return;
   if (ui.touchPlace) {
     const visual = ui.ghost ?? ui.hover;
-    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, BUILDINGS[ui.placing].w));
+    const placed = BUILDINGS[ui.placing];
+    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h));
   }
   let tx = 0;
   let ty = 0;
@@ -3836,6 +3866,24 @@ function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide
   ctx.restore();
 }
 
+function paintSeenHall(
+  ctx: CanvasRenderingContext2D,
+  sim: Sim,
+  g: { team: number; tx: number; ty: number; w: number; h: number },
+) {
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.fillStyle = seatPaint(sim, g.team);
+  ctx.fillRect(g.tx + 0.14, g.ty + 0.14, Math.max(0.4, g.w - 0.28), Math.max(0.4, g.h - 0.28));
+  ctx.globalAlpha = 0.85;
+  ctx.strokeStyle = seatPaint(sim, g.team);
+  ctx.lineWidth = 0.07;
+  ctx.setLineDash([0.2, 0.12]);
+  ctx.strokeRect(g.tx + 0.06, g.ty + 0.06, Math.max(0.2, g.w - 0.12), Math.max(0.2, g.h - 0.12));
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
 function drawBuilding(
   ctx: CanvasRenderingContext2D,
   b: Building,
@@ -4553,7 +4601,7 @@ function minimapFogVeil(sim: Sim): HTMLCanvasElement | null {
   const fog = sim.fog[VIEWER];
   for (let i = 0; i < n; i++) {
     const f = fog?.[i] ?? 0;
-    src[i] = f === 2 ? 255 : f === 1 ? 236 : 214;
+    src[i] = f === 2 ? 255 : f === 1 ? 168 : 22;
   }
   const tmp = new Float32Array(n);
   for (let y = 0; y < h; y++) {
@@ -4679,32 +4727,6 @@ function paintMiniMarks(ctx: CanvasRenderingContext2D, sim: Sim, ox: number, oy:
   ctx.restore();
 }
 
-function paintEnemySpawns(ctx: CanvasRenderingContext2D, sim: Sim, r: { x: number; y: number; s: number }) {
-  // 1v1 and skirmish: every enemy start is a red marker from the first second, fog or not.
-  const slots = sim.starts.slots;
-  for (let t = 0; t < slots.length; t++) {
-    if (t === VIEWER || sim.allied(VIEWER, t)) continue;
-    const s = slots[t];
-    if (!s) continue;
-    const cx = r.x + (s.x / Math.max(1, sim.gw)) * r.s;
-    const cy = r.y + (s.y / Math.max(1, sim.gh)) * r.s;
-    const rad = 6.5;
-    ctx.save();
-    ctx.fillStyle = "#d63428";
-    ctx.strokeStyle = "#fff6ea";
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - rad);
-    ctx.lineTo(cx + rad * 0.82, cy);
-    ctx.lineTo(cx, cy + rad);
-    ctx.lineTo(cx - rad * 0.82, cy);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-  }
-}
-
 function drawMinimap(
   ctx: CanvasRenderingContext2D,
   sim: Sim,
@@ -4766,6 +4788,12 @@ function drawMinimap(
     const seat = seatAtCorner(sim, c.x, c.y);
     const cx = r.x + c.x * cell;
     const cy = r.y + c.y * cell;
+    if (seat >= 0 && seat !== VIEWER && !sim.allied(VIEWER, seat)) {
+      const tx = c.x | 0;
+      const ty = c.y | 0;
+      const seen = tx >= 0 && ty >= 0 && tx < sim.gw && ty < sim.gh ? (sim.fog[VIEWER]?.[ty * sim.gw + tx] ?? 0) : 0;
+      if (seen === 0) continue;
+    }
     if (seat >= 0) paintTeamShape(ctx, cx, cy, 6, seatPaint(sim, seat), teamStyle(seat).shape, 1);
     else {
       ctx.fillStyle = "rgba(237,230,217,0.45)";
@@ -4786,6 +4814,8 @@ function drawMinimap(
   }
   for (const c of sim.crates) {
     if (c.x < 0) continue;
+    const ti = (c.y | 0) * sim.gw + (c.x | 0);
+    if ((sim.fog[VIEWER]?.[ti] ?? 0) !== 2) continue;
     const cx = r.x + c.x * cell;
     const cy = r.y + c.y * cell;
     ctx.fillStyle = c.kind === "mend" ? "#8fd9b0" : c.kind === "squad" ? "#e2c27a" : "#3dcc6e";
@@ -4798,8 +4828,25 @@ function drawMinimap(
     if (g.viewer !== VIEWER || g.ttl <= 0) continue;
     const live = sim.unitById(g.id);
     if (live && live.hp > 0 && sim.minimapUnit(VIEWER, live)) continue;
-    ctx.fillStyle = "rgba(224,122,85,0.7)";
+    const ti = (g.y | 0) * sim.gw + (g.x | 0);
+    if ((sim.fog[VIEWER]?.[ti] ?? 0) === 0) continue;
+    ctx.save();
+    ctx.globalAlpha = 0.72;
+    ctx.fillStyle = seatPaint(sim, g.team);
     ctx.fillRect(r.x + g.x * cell - 1.4, r.y + g.y * cell - 1.4, 2.8, 2.8);
+    ctx.restore();
+  }
+  for (const g of sim.seenHalls) {
+    if (g.viewer !== VIEWER) continue;
+    const live = sim.buildingById(g.id);
+    if (live && live.hp > 0 && sim.buildingVisible(VIEWER, live)) continue;
+    const ti = g.ty * sim.gw + g.tx;
+    if ((sim.fog[VIEWER]?.[ti] ?? 0) === 0) continue;
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = seatPaint(sim, g.team);
+    ctx.fillRect(r.x + g.tx * cell, r.y + g.ty * cell, Math.max(2, g.w * cell), Math.max(2, g.h * cell));
+    ctx.restore();
   }
   for (const b of sim.buildings) {
     if (b.kind !== "yard" || b.team === VIEWER || b.hp <= 0) continue;
@@ -4819,7 +4866,6 @@ function drawMinimap(
     ctx.lineWidth = 4;
     ctx.strokeRect(r.x - 6, r.y - 6, r.s + 12, r.s + 12);
   }
-  paintEnemySpawns(ctx, sim, r);
   const halfW = view.w / (2 * cam.zoom);
   const halfH = view.h / (2 * cam.zoom * viewPitch());
   ctx.strokeStyle = "#f3ead7";

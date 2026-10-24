@@ -28,6 +28,7 @@ import {
 } from "./data.ts";
 import { softenField } from "./tileset.ts";
 import { PALM_MASK } from "./palm-mask.ts";
+import { findPath } from "./path.ts";
 
 export interface Span {
   tx: number;
@@ -2448,6 +2449,269 @@ export function evenMichiganFields(
     if (!victim) break;
     wipe(victim.x, victim.y);
   }
+}
+
+const PAD_CLEAR = 10;
+
+function padBlocked(t: number): boolean {
+  return (
+    t === TILE_DEEP ||
+    t === TILE_SHALLOW ||
+    t === TILE_WRECK ||
+    t === TILE_ROCK ||
+    t === TILE_CLIFF ||
+    t === TILE_BRIDGE ||
+    t === TILE_SHORE ||
+    t === TILE_FORD
+  );
+}
+
+/**
+ * Flat sand inside every start, with the home ore pulled to the rim so a
+ * refinery can sit beside it. Water, rock, and bridges stay.
+ */
+export function openBuildPads(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  const r2 = PAD_CLEAR * PAD_CLEAR;
+  for (const s of seats) {
+    let lifted = 0;
+    const rad = Math.ceil(PAD_CLEAR);
+    for (let y = Math.floor(s.y) - rad; y <= Math.floor(s.y) + rad; y++) {
+      for (let x = Math.floor(s.x) - rad; x <= Math.floor(s.x) + rad; x++) {
+        if (x < 1 || y < 1 || x >= gw - 1 || y >= gh - 1) continue;
+        const dx = x + 0.5 - s.x;
+        const dy = y + 0.5 - s.y;
+        if (dx * dx + dy * dy > r2) continue;
+        const i = y * gw + x;
+        const t = terrain[i] ?? 0;
+        if (padBlocked(t)) continue;
+        if (
+          t === TILE_SCRUB ||
+          t === TILE_STUMP ||
+          t === TILE_ROUGH ||
+          t === TILE_HUT ||
+          t === TILE_BARN ||
+          t === TILE_PUMP ||
+          t === TILE_CRYSTAL
+        ) {
+          terrain[i] = TILE_SAND;
+        }
+        const ore = crystal[i] ?? 0;
+        if (ore > 0) {
+          lifted += ore;
+          crystal[i] = 0;
+          if ((terrain[i] ?? 0) === TILE_CRYSTAL) terrain[i] = TILE_SAND;
+        }
+      }
+    }
+    const nearHome = oreWithin(crystal, gw, s.x, s.y, 13);
+    if (lifted > 0 || !nearHome) parkOre(terrain, crystal, gw, gh, seats, s, lifted > 0 ? lifted : 700);
+  }
+}
+
+function oreWithin(crystal: Uint16Array, gw: number, sx: number, sy: number, rad: number): boolean {
+  const r2 = rad * rad;
+  for (let y = Math.floor(sy - rad); y <= Math.ceil(sy + rad); y++) {
+    for (let x = Math.floor(sx - rad); x <= Math.ceil(sx + rad); x++) {
+      const dx = x + 0.5 - sx;
+      const dy = y + 0.5 - sy;
+      if (dx * dx + dy * dy > r2) continue;
+      if ((crystal[y * gw + x] ?? 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
+/** Drop a home field just outside the pad, toward the map center when the ground allows. */
+function parkOre(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+  seat: { x: number; y: number },
+  amount: number,
+) {
+  const ang = Math.atan2(gh / 2 - seat.y, gw / 2 - seat.x);
+  const spins = [0, 0.4, -0.4, 0.85, -0.85, 1.3, -1.3, 1.8, -1.8, 2.4, -2.4, Math.PI];
+  const pay = Math.max(520, Math.min(900, amount > 4000 ? 800 : 700));
+  for (const dist of [PAD_CLEAR + 1.8, PAD_CLEAR + 2.8, PAD_CLEAR + 3.6]) {
+    for (const spin of spins) {
+      const x = seat.x + Math.cos(ang + spin) * dist;
+      const y = seat.y + Math.sin(ang + spin) * dist;
+      if (x < 3 || y < 3 || x >= gw - 3 || y >= gh - 3) continue;
+      let crowded = false;
+      for (const other of seats) {
+        if (other === seat) continue;
+        const dx = x - other.x;
+        const dy = y - other.y;
+        if (dx * dx + dy * dy < (PAD_CLEAR + 1) * (PAD_CLEAR + 1)) crowded = true;
+      }
+      if (crowded) continue;
+      let hosts = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          if (dx * dx + dy * dy > 2.3) continue;
+          const tx = Math.round(x + dx);
+          const ty = Math.round(y + dy);
+          if (tx < 2 || ty < 2 || tx >= gw - 2 || ty >= gh - 2) continue;
+          if (oreHost(terrain[ty * gw + tx] ?? 0)) hosts++;
+        }
+      }
+      if (hosts < 3) continue;
+      paintOreDisk(terrain, crystal, gw, gh, x, y, 1.35, pay);
+      return;
+    }
+  }
+  // An island start has no land past the pad. Keep a thin field on the far shore of the island.
+  let bestX = -1;
+  let bestY = -1;
+  let bestD = 4;
+  for (let y = Math.floor(seat.y) - 13; y <= Math.floor(seat.y) + 13; y++) {
+    for (let x = Math.floor(seat.x) - 13; x <= Math.floor(seat.x) + 13; x++) {
+      if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) continue;
+      if (!oreHost(terrain[y * gw + x] ?? 0)) continue;
+      const d = Math.hypot(x + 0.5 - seat.x, y + 0.5 - seat.y);
+      if (d < 4 || d > 12.5 || d <= bestD) continue;
+      bestD = d;
+      bestX = x + 0.5;
+      bestY = y + 0.5;
+    }
+  }
+  if (bestX >= 0) paintOreDisk(terrain, crystal, gw, gh, bestX, bestY, 1.05, pay);
+}
+
+/**
+ * Michigan lanes. Widen the walk from each camp to the other and to its
+ * expansion so a tank group fits. Bridges, water, and ore stay put.
+ */
+export function paveMichigan(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  const blocked = (x: number, y: number, throughWoods: boolean) => {
+    if (x < 0 || y < 0 || x >= gw || y >= gh) return true;
+    const t = terrain[y * gw + x] ?? 0;
+    if (t === TILE_ROCK || t === TILE_CLIFF || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK) return true;
+    if (!throughWoods && t === TILE_SCRUB) return true;
+    return false;
+  };
+  const plantShoulder = (step: { x: number; y: number }, prev: { x: number; y: number }) => {
+    const dx = step.x - prev.x;
+    const dy = step.y - prev.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const px = -dy / len;
+    const py = dx / len;
+    for (const side of [1, -1]) {
+      const cx = step.x + 0.5 + px * side * 4.2;
+      const cy = step.y + 0.5 + py * side * 4.2;
+      let camp = false;
+      for (const s of seats) {
+        if (Math.hypot(cx - s.x, cy - s.y) < 12) camp = true;
+      }
+      if (camp) continue;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          if (ox * ox + oy * oy > 2) continue;
+          const x = Math.round(cx + ox);
+          const y = Math.round(cy + oy);
+          if (x < 2 || y < 2 || x >= gw - 2 || y >= gh - 2) continue;
+          const i = y * gw + x;
+          const t = terrain[i] ?? 0;
+          if ((crystal[i] ?? 0) > 0) continue;
+          if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH) continue;
+          terrain[i] = TILE_SCRUB;
+        }
+      }
+    }
+  };
+  const paint = (path: { x: number; y: number }[] | null) => {
+    if (!path) return;
+    for (let i = 0; i < path.length; i++) {
+      const step = path[i]!;
+      if (i > 0 && i % 5 === 0) plantShoulder(step, path[i - 1]!);
+      let skip = false;
+      for (const s of seats) {
+        if (Math.hypot(step.x + 0.5 - s.x, step.y + 0.5 - s.y) < 6) skip = true;
+      }
+      if (skip) continue;
+        for (let dy = -2; dy <= 2; dy++) {
+        for (let dx = -2; dx <= 2; dx++) {
+          const reach = Math.max(Math.abs(dx), Math.abs(dy));
+          if (reach > 2) continue;
+          const x = step.x + dx;
+          const y = step.y + dy;
+          if (x < 1 || y < 1 || x >= gw - 1 || y >= gh - 1) continue;
+          const i = y * gw + x;
+          const t = terrain[i] ?? 0;
+          if (t === TILE_BRIDGE || t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK) continue;
+          if ((crystal[i] ?? 0) > 0) continue;
+          // The outer shoulder stays trees so infantry still have an ambush line.
+          if (t === TILE_SCRUB && reach > 1) continue;
+          if (!roadOk(t, 0)) continue;
+          terrain[i] = TILE_ROAD;
+        }
+      }
+    }
+  };
+  for (let i = 0; i < seats.length; i++) {
+    for (let j = i + 1; j < seats.length; j++) {
+      const a = seats[i]!;
+      const b = seats[j]!;
+      paint(findPath((x, y) => blocked(x, y, false), a.x | 0, a.y | 0, b.x | 0, b.y | 0, gw, gh));
+    }
+    const home = seats[i]!;
+    let best: { x: number; y: number } | null = null;
+    let bestD = 1e9;
+    const blobs = expansionBlobs(crystal, gw, gh);
+    for (const blob of blobs) {
+      const ds = Math.hypot(blob.x - home.x, blob.y - home.y);
+      if (ds < 14 || ds > 28) continue;
+      let closer = true;
+      for (const other of seats) {
+        if (other === home) continue;
+        if (Math.hypot(blob.x - other.x, blob.y - other.y) <= ds) closer = false;
+      }
+      if (!closer || ds >= bestD) continue;
+      bestD = ds;
+      best = blob;
+    }
+    if (best) paint(findPath((x, y) => blocked(x, y, true), home.x | 0, home.y | 0, best.x | 0, best.y | 0, gw, gh));
+  }
+  const grow: number[] = [];
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if ((terrain[y * gw + x] ?? 0) !== TILE_SCRUB) continue;
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        const i = ny * gw + nx;
+        const t = terrain[i] ?? 0;
+        if (t !== TILE_SAND && t !== TILE_CLEAR && t !== TILE_ROUGH) continue;
+        if ((crystal[i] ?? 0) > 0) continue;
+        let camp = false;
+        for (const s of seats) {
+          if (Math.hypot(nx + 0.5 - s.x, ny + 0.5 - s.y) < 11) camp = true;
+        }
+        if (camp) continue;
+        grow.push(i);
+      }
+    }
+  }
+  for (const i of grow) terrain[i] = TILE_SCRUB;
 }
 
 function nearCrystal(crystal: Uint16Array, gw: number, gh: number, x: number, y: number, rad: number): boolean {

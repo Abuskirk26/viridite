@@ -245,7 +245,8 @@ export const HARVEST_PER_SEC = 60;
 /** A refinery dock unloads the whole bay at once. Kept so older balance notes still import. */
 export const DUMP_PER_SEC = 250;
 export const SURVIVE_SECONDS = 600;
-export const BUILD_GAP = 3;
+/** Chebyshev tiles a new hall may sit from a finished friendly building. Wide enough for a camp, not the whole map. */
+export const BUILD_GAP = 7;
 export const UNIT_CAP = 60;
 export const BUILDING_CAP = 40;
 /** One finger-drag lays at most this many fence tiles. */
