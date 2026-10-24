@@ -64,7 +64,9 @@ export function allows(
 ): boolean {
   if (who === "air") return true;
   if (tile === TILE_FORD) return true;
-  if (tile === TILE_SCRUB) return who === "infantry" || who === "vehicle" || who === "amphib";
+  // Infantry slip through the trunks. Tanks, trucks, and amphibs go around.
+  // Aircraft already returned. Boats never stand on a tree tile.
+  if (tile === TILE_SCRUB) return who === "infantry";
   if (tile === TILE_ROCK || tile === TILE_CLIFF) return false;
   if (isShell(tile) && shellMark < 2) return false;
   const g = groundOf(tile);

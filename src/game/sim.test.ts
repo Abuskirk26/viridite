@@ -1022,7 +1022,7 @@ test("passability follows the tile: shallow, cliff, ramp, and a beached transpor
   assert.equal(sim.passable(boat, 10.2, 10.2), false);
 });
 
-test("a cliff blocks sight and a vehicle crushes a tree into a stump", () => {
+test("a cliff blocks sight and a tank drives around a tree", () => {
   const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: true, crates: false, cpu: [false, false, false, false], seed: 3 });
   sim.terrain.fill(TILE_CLEAR);
   for (let y = 0; y < sim.gh; y++) sim.terrain[y * sim.gw + 20] = TILE_CLIFF;
@@ -1037,9 +1037,16 @@ test("a cliff blocks sight and a vehicle crushes a tree into a stump", () => {
   const tank = sim.spawnUnit(0, "tank", 8.5, 8.5);
   assert.ok(tank);
   sim.terrain[8 * sim.gw + 11] = TILE_SCRUB;
-  sim.issueMove([tank.id], 14.5, 8.5, false);
-  for (let i = 0; i < 80; i++) sim.tick(0.1);
-  assert.equal(sim.terrain[8 * sim.gw + 11], TILE_STUMP);
+  sim.time = DEPLOY_SECS + 1;
+  sim.issueMove([tank.id], 14.5, 8.5, true);
+  assert.ok(tank.path.length >= 1, "tank has no route around the tree");
+  for (const p of tank.path) assert.notEqual(sim.terrain[p.y * sim.gw + p.x], TILE_SCRUB);
+  for (let i = 0; i < 80; i++) {
+    sim.tick(0.1);
+    assert.notEqual(sim.terrain[(tank.y | 0) * sim.gw + (tank.x | 0)], TILE_SCRUB, "tank clipped a trunk");
+  }
+  assert.equal(sim.terrain[8 * sim.gw + 11], TILE_SCRUB);
+  assert.ok(tank.x > 13, `tank stalled at ${tank.x}`);
 });
 
 test("an engineer repairs a wrecked span back into a bridge", () => {
@@ -1229,6 +1236,135 @@ test("shallow water slows infantry and woods hide them until a ground unit is ad
   spotter.x = 31.7;
   spotter.y = 30.5;
   assert.equal(sim.visibleUnit(0, hid), true);
+});
+
+test("tanks path around a forest and infantry walk into it", () => {
+  const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  sim.terrain.fill(TILE_CLEAR);
+  sim.time = DEPLOY_SECS + 1;
+  for (let y = 6; y <= 16; y++) {
+    sim.terrain[y * sim.gw + 20] = TILE_SCRUB;
+    sim.terrain[y * sim.gw + 21] = TILE_SCRUB;
+  }
+  const tank = sim.spawnUnit(0, "tank", 16.5, 11.5);
+  const rifle = sim.spawnUnit(0, "rifle", 16.5, 24.5);
+  const heli = sim.spawnUnit(0, "chinook", 16.5, 28.5);
+  const boat = sim.spawnUnit(0, "transport", 8.5, 8.5);
+  assert.ok(tank && rifle && heli && boat);
+  sim.terrain[8 * sim.gw + 8] = TILE_DEEP;
+  assert.equal(sim.passable(heli, 20.5, 11.5), true, "air should ignore the trees");
+  assert.equal(sim.passable(boat, 8.5, 8.5), true, "a boat on open water still floats");
+  assert.equal(sim.passable(tank, 20.5, 11.5), false);
+  assert.equal(sim.passable(rifle, 20.5, 11.5), true);
+  sim.issueMove([tank.id], 26.5, 11.5, true);
+  for (const p of tank.path) assert.notEqual(sim.terrain[p.y * sim.gw + p.x], TILE_SCRUB, "preview cut the woods");
+  assert.ok(tank.path.some((p) => p.y < 6 || p.y > 16), "tank did not go around");
+  for (let x = 18; x <= 28; x++) sim.terrain[24 * sim.gw + x] = TILE_SCRUB;
+  sim.issueMove([rifle.id], 30.5, 24.5, false);
+  let entered = false;
+  for (let i = 0; i < 40; i++) {
+    sim.tick(0.1);
+    if (sim.terrain[(rifle.y | 0) * sim.gw + (rifle.x | 0)] === TILE_SCRUB) entered = true;
+  }
+  assert.equal(entered, true, "infantry refused the woods");
+  assert.ok(rifle.x > 19, `rifle stayed at ${rifle.x}`);
+  assert.equal(sim.terrain[(rifle.y | 0) * sim.gw + (rifle.x | 0)], TILE_SCRUB);
+  const yard = stubBuilding(sim, { kind: "yard", team: 0, tx: 4, ty: 4 });
+  occupy(sim, yard);
+  sim.credits[0] = 5000;
+  const blocked = sim.canPlace(0, "power", 20, 10);
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.reason, /Blocked/);
+});
+
+test("woods hide infantry until a shot, a neighbor, or a detector, and soften tank blasts", () => {
+  const fresh = () => {
+    const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 2 });
+    sim.terrain.fill(TILE_CLEAR);
+    sim.time = DEPLOY_SECS + 1;
+    return sim;
+  };
+  const hide = fresh();
+  const hid = hide.spawnUnit(1, "rifle", 30.5, 30.5);
+  const prey = hide.spawnUnit(0, "tank", 34.2, 30.5);
+  assert.ok(hid && prey);
+  hide.terrain[30 * hide.gw + 30] = TILE_SCRUB;
+  assert.equal(hide.visibleUnit(0, hid), false, "seen before the shot");
+  hide.issueAttack([hid.id], prey.id);
+  hide.tick(0.1);
+  assert.ok(hid.reveal > 1.5, `reveal ${hid.reveal}`);
+  assert.equal(hide.visibleUnit(0, hid), true, "the shot stayed hidden");
+  hid.order = { t: "idle" };
+  hid.cooldown = 9;
+  prey.hp = 0;
+  for (let i = 0; i < 22; i++) hide.tick(0.1);
+  assert.equal(hide.visibleUnit(0, hid), false, "still revealed after the shot faded");
+
+  const scoutSim = fresh();
+  const ghost = scoutSim.spawnUnit(1, "rifle", 30.5, 30.5);
+  assert.ok(ghost);
+  scoutSim.terrain[30 * scoutSim.gw + 30] = TILE_SCRUB;
+  const scout = scoutSim.spawnUnit(0, "scout", 30.5, 36.2);
+  assert.ok(scout);
+  assert.equal(scoutSim.visibleUnit(0, ghost), true, "scout missed the woods");
+  scout.x = 30.5;
+  scout.y = 40.5;
+  assert.equal(scoutSim.visibleUnit(0, ghost), false, "a far scout still spotted the woods");
+  const radar = stubBuilding(scoutSim, { kind: "radar", team: 0, tx: 30, ty: 34 });
+  assert.equal(scoutSim.visibleUnit(0, ghost), true, "radar missed the woods");
+  const plant = stubBuilding(scoutSim, { kind: "power", team: 0, tx: 12, ty: 12 });
+  plant.powerOut = 0;
+  scoutSim.powerOf(0);
+  assert.equal(scoutSim.visibleUnit(0, ghost), false, "unpowered radar still spotted the woods");
+  void radar;
+
+  const hit = (woods: boolean, kind: "tank" | "rifle") => {
+    const sim = fresh();
+    const gun = sim.spawnUnit(0, kind, 24.5, 24.5);
+    const foe = sim.spawnUnit(1, "rifle", 28.2, 24.5);
+    assert.ok(gun && foe);
+    if (woods) sim.terrain[24 * sim.gw + 28] = TILE_SCRUB;
+    foe.reveal = 2;
+    foe.hp = 500;
+    foe.maxHp = 500;
+    foe.cooldown = 9;
+    sim.issueAttack([gun.id], foe.id);
+    const before = foe.hp;
+    for (let i = 0; i < 12; i++) sim.tick(0.1);
+    return before - foe.hp;
+  };
+  const openTank = hit(false, "tank");
+  const woodTank = hit(true, "tank");
+  const openRifle = hit(false, "rifle");
+  const woodRifle = hit(true, "rifle");
+  assert.ok(openTank > 5, `open tank hit ${openTank}`);
+  assert.ok(Math.abs(woodTank / openTank - 0.75) < 0.08, `woods tank ${woodTank} vs open ${openTank}`);
+  assert.ok(Math.abs(woodRifle - openRifle) < 0.5, `rifle woods ${woodRifle} vs open ${openRifle}`);
+
+  const boom = (woods: boolean) => {
+    const sim = fresh();
+    const gun = sim.spawnUnit(0, "artillery", 18.5, 20.5);
+    const decoy = sim.spawnUnit(1, "tank", 24.5, 20.5);
+    const foe = sim.spawnUnit(1, "rifle", 24.5, 21.15);
+    assert.ok(gun && decoy && foe);
+    gun.speed = 0;
+    decoy.speed = 0;
+    foe.speed = 0;
+    if (woods) sim.terrain[21 * sim.gw + 24] = TILE_SCRUB;
+    foe.reveal = 2;
+    foe.hp = 500;
+    foe.maxHp = 500;
+    foe.cooldown = 9;
+    decoy.cooldown = 9;
+    sim.issueAttack([gun.id], decoy.id);
+    const before = foe.hp;
+    for (let i = 0; i < 30; i++) sim.tick(0.1);
+    return before - foe.hp;
+  };
+  const openBoom = boom(false);
+  const woodBoom = boom(true);
+  assert.ok(openBoom > 1, `splash missed ${openBoom}`);
+  assert.ok(Math.abs(woodBoom / openBoom - 0.75) < 0.12, `woods splash ${woodBoom} vs open ${openBoom}`);
 });
 
 test("a squad keeps the slowest pace, hold does not chase, and artillery will not fire inside minimum range", () => {
@@ -1753,6 +1889,58 @@ test("armor multipliers: rifles are weak vs tanks, rockets punch tanks, cannons 
   assert.ok(artyHall > rifleHall * 5, `artillery vs hall ${artyHall} vs rifle ${rifleHall}`);
 });
 
+test("michigan infantry step into the woods while tanks keep the open ground", () => {
+  const sim = new Sim({
+    mapId: "michigan",
+    faction: "concord",
+    mode: "destroy",
+    fog: false,
+    crates: false,
+    cpu: [false, true, false, false],
+    seed: 1,
+    opponents: 1,
+    ai: "builder",
+    difficulty: "normal",
+  });
+  sim.time = NORMAL_PUSH_AT + 5;
+  sim.credits[1] = 0;
+  for (const u of sim.units) if (u.team === 1 && u.kind === "mcv") u.hp = 0;
+  const camp = sim.starts.slots[1] ?? sim.starts.enemy;
+  stubBuilding(sim, { kind: "yard", team: 1, tx: Math.max(2, Math.floor(camp.x) - 1), ty: Math.max(2, Math.floor(camp.y) - 1) });
+  const rifles = [];
+  for (let i = 0; i < 4; i++) {
+    const rifle = sim.spawnUnit(1, "rifle", camp.x + 1.2, camp.y + 0.4 + i * 0.35);
+    assert.ok(rifle);
+    rifle.order = { t: "idle" };
+    rifles.push(rifle);
+  }
+  const tank = sim.spawnUnit(1, "tank", camp.x + 2.4, camp.y - 1.1);
+  assert.ok(tank);
+  tank.order = { t: "idle" };
+  aiThink(sim, 1);
+  const foot = rifles.filter((r) => r.order.t === "move");
+  assert.ok(foot.length >= 1, "infantry never left home");
+  let inWoods = 0;
+  for (const r of foot) {
+    if (r.order.t !== "move") continue;
+    const tx = r.order.x | 0;
+    const ty = r.order.y | 0;
+    if (sim.terrain[ty * sim.gw + tx] === TILE_SCRUB) inWoods++;
+    let near = sim.terrain[ty * sim.gw + tx] === TILE_SCRUB;
+    for (let oy = -1; oy <= 1 && !near; oy++) {
+      for (let ox = -1; ox <= 1; ox++) {
+        if ((sim.terrain[(ty + oy) * sim.gw + (tx + ox)] ?? 0) === TILE_SCRUB) near = true;
+      }
+    }
+    assert.equal(near, true, "infantry ambush missed the woods");
+  }
+  assert.ok(inWoods >= 1, "no rifle was stood in the trees");
+  const led = sim.unitById(tank.id);
+  if (led && led.order.t === "move") {
+    assert.notEqual(sim.terrain[(led.order.y | 0) * sim.gw + (led.order.x | 0)], TILE_SCRUB, "tank was ordered into the trees");
+  }
+});
+
 test("every skirmish map bakes grass, sand, or water instead of a flat fill", () => {
   const ids = ["palm", "michigan", "plates", "links", "coast", "river", "isles", "dry"] as const;
   for (const mapId of ids) {
@@ -1896,8 +2084,31 @@ test("skirmish maps connect both seats, with an expansion and a fair march", () 
         const dOther = Math.hypot(b.x - other.x, b.y - other.y);
         return ds >= 14 && ds <= 28 && ds < dOther;
       }).length;
-    assert.ok(expansions(home, far) >= 1, `${mapId} home expansion`);
-    assert.ok(expansions(far, home) >= 1, `${mapId} far expansion`);
+    const homeExp = expansions(home, far);
+    const farExp = expansions(far, home);
+    assert.ok(homeExp >= 1, `${mapId} home expansion`);
+    assert.ok(farExp >= 1, `${mapId} far expansion`);
+    if (mapId === "michigan") {
+      assert.ok(ratio <= 1.02, `michigan march ${out.n.toFixed(1)} vs ${ret.n.toFixed(1)}`);
+      assert.ok(Math.abs(homeExp - farExp) <= 1, `michigan expansions ${homeExp}/${farExp}`);
+      const spans = sim.buildings.filter((b) => b.kind === "span" && b.hp > 0).length;
+      assert.ok(spans >= 2, `michigan bridges ${spans}`);
+      let scrub = 0;
+      let sand = 0;
+      let shallow = 0;
+      let rock = 0;
+      for (let i = 0; i < sim.terrain.length; i++) {
+        const t = sim.terrain[i];
+        if (t === TILE_SCRUB) scrub++;
+        if (t === TILE_SAND) sand++;
+        if (t === TILE_SHALLOW) shallow++;
+        if (t === TILE_ROCK) rock++;
+      }
+      assert.ok(scrub > 40, `michigan woods ${scrub}`);
+      assert.ok(sand > 20, `michigan dunes ${sand}`);
+      assert.ok(shallow > 8, `michigan shallows ${shallow}`);
+      assert.ok(rock > 4, `michigan rock ${rock}`);
+    }
   }
 });
 

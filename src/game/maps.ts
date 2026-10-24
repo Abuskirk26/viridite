@@ -145,7 +145,7 @@ export const MAP_LIST: { id: MapId; name: string; blurb: string; earth?: EarthSi
   {
     id: "michigan",
     name: "Michigan",
-    blurb: "The state from satellite. A bridge crosses the straits. Rivers cut the mitten. Two camps up, two below.",
+    blurb: "Great Lakes. Two straits bridges, forest clumps with open gaps, dunes on the shore, and ore worth a fight.",
     player: { x: 32.5, y: 50.5 },
     enemy: { x: 16.5, y: 17.5 },
     earth: {
@@ -1398,7 +1398,139 @@ export function dressBattlefield(
   sealOreFields(terrain, crystal, gw, gh);
   openExpansions(terrain, crystal, gw, gh, pads);
   const props = placeHamlets(terrain, crystal, gw, gh, pads, cx, cy, salt);
+  if (id === "michigan") dressGreatLakes(terrain, crystal, gw, gh, pads, salt);
   return props;
+}
+
+/**
+ * Michigan arrives as one solid woods. Break that into clumps with gaps,
+ * a sand beach and dune behind the shore, rock on the points, and a shoal
+ * under the two straits bridges. Camps, ore, roads, and both decks stay.
+ */
+function dressGreatLakes(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  salt: number,
+) {
+  const at = (x: number, y: number) => terrain[y * gw + x] ?? 0;
+  const wet = (t: number) => t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
+  const bridges: [number, number][] = [];
+  for (let y = 1; y < gh - 1; y++) {
+    for (let x = 1; x < gw - 1; x++) {
+      if (at(x, y) === TILE_BRIDGE) bridges.push([x, y]);
+    }
+  }
+  const nearDeck = (x: number, y: number, r: number) => {
+    const r2 = r * r;
+    for (const [bx, by] of bridges) {
+      const dx = x + 0.5 - (bx + 0.5);
+      const dy = y + 0.5 - (by + 0.5);
+      if (dx * dx + dy * dy <= r2) return true;
+    }
+    return false;
+  };
+  const straits = (x: number, y: number) => x >= 34 && x <= 49 && y >= 16 && y <= 35;
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if (at(x, y) !== TILE_DEEP || !straits(x, y)) continue;
+      if (nearDeck(x, y, 3.4)) terrain[y * gw + x] = TILE_SHALLOW;
+    }
+  }
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if (at(x, y) !== TILE_SCRUB) continue;
+      terrain[y * gw + x] = TILE_CLEAR;
+    }
+  }
+  const besideWater = (x: number, y: number, rad: number) => {
+    for (let dy = -rad; dy <= rad; dy++) {
+      for (let dx = -rad; dx <= rad; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) > rad) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+        const n = at(nx, ny);
+        if (n === TILE_SHORE || wet(n)) return true;
+      }
+    }
+    return false;
+  };
+  for (let y = 2; y < gh - 2; y++) {
+    for (let x = 2; x < gw - 2; x++) {
+      if (at(x, y) !== TILE_CLEAR && at(x, y) !== TILE_ROUGH) continue;
+      if ((crystal[y * gw + x] ?? 0) > 0) continue;
+      if (!besideWater(x, y, 1)) continue;
+      terrain[y * gw + x] = TILE_SAND;
+    }
+  }
+  let points = 0;
+  for (let y = 2; y < gh - 2 && points < 16; y++) {
+    for (let x = 2; x < gw - 2 && points < 16; x++) {
+      if (at(x, y) !== TILE_SHORE || straits(x, y)) continue;
+      let land = 0;
+      let water = 0;
+      let ford = false;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const n = at(x + dx, y + dy);
+          if (n === TILE_FORD) ford = true;
+          if (wet(n)) water++;
+          else if (n !== TILE_ROCK && n !== TILE_CLIFF && n !== TILE_BRIDGE) land++;
+        }
+      }
+      if (ford || water < 3 || land < 2 || land > 4) continue;
+      if (dressHash(x, y, salt) > 0.62) continue;
+      terrain[y * gw + x] = TILE_ROCK;
+      crystal[y * gw + x] = 0;
+      points++;
+    }
+  }
+  const openForWoods = (x: number, y: number) => {
+    const t = at(x, y);
+    if (t !== TILE_CLEAR && t !== TILE_ROUGH) return false;
+    if ((crystal[y * gw + x] ?? 0) > 0) return false;
+    if (nearPad(pads, x, y, 9)) return false;
+    if (straits(x, y)) return false;
+    if (besideWater(x, y, 1)) return false;
+    if (nearCrystal(crystal, gw, gh, x + 0.5, y + 0.5, 2.4)) return false;
+    return true;
+  };
+  const seeds: [number, number][] = [];
+  for (let y = 3; y < gh - 3; y++) {
+    for (let x = 3; x < gw - 3; x++) {
+      if (!openForWoods(x, y)) continue;
+      if (dressHash(x, y, salt) > 0.78) continue;
+      let crowded = false;
+      for (const [sx, sy] of seeds) {
+        if ((sx - x) * (sx - x) + (sy - y) * (sy - y) < 26) {
+          crowded = true;
+          break;
+        }
+      }
+      if (crowded) continue;
+      seeds.push([x, y]);
+    }
+  }
+  for (const [x, y] of seeds) {
+    const r = 2.35 + (dressHash(x, y, salt + 3) > 0.55 ? 0.4 : 0);
+    const r2 = r * r;
+    for (let dy = -3; dy <= 3; dy++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 2 || ny < 2 || nx >= gw - 2 || ny >= gh - 2) continue;
+        if (!openForWoods(nx, ny)) continue;
+        if (d2 > (r - 0.7) * (r - 0.7) && dressHash(nx + salt, ny, x + y) > 0.7) continue;
+        terrain[ny * gw + nx] = TILE_SCRUB;
+      }
+    }
+  }
 }
 
 /** A build plot on the far side of a deposit, off the starting pads and off the lane. */
@@ -2230,6 +2362,91 @@ function ensureExpansion(
       paintOreDisk(terrain, crystal, gw, gh, x, y, 2, 800);
       if (seatHasExpansion(expansionBlobs(crystal, gw, gh), seat, other)) return;
     }
+  }
+}
+
+/**
+ * The mitten used to hand one seat three expansion blobs and the other one.
+ * Drop the extras on the heavy side until the 14–28 band matches.
+ * Home ore inside 14 tiles is left alone.
+ */
+export function evenMichiganFields(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  seats: { x: number; y: number }[],
+) {
+  if (seats.length !== 2) return;
+  const home = seats[0]!;
+  const far = seats[1]!;
+  const band = (seat: { x: number; y: number }, other: { x: number; y: number }) =>
+    expansionBlobs(crystal, gw, gh).filter((b) => {
+      const ds = Math.hypot(b.x - seat.x, b.y - seat.y);
+      const dOther = Math.hypot(b.x - other.x, b.y - other.y);
+      return ds >= 14 && ds <= 28 && ds < dOther;
+    });
+  const wipe = (x: number, y: number) => {
+    let sx = Math.round(x - 0.5);
+    let sy = Math.round(y - 0.5);
+    if ((crystal[sy * gw + sx] ?? 0) <= 0) {
+      let found = false;
+      for (let r = 1; r <= 3 && !found; r++) {
+        for (let dy = -r; dy <= r && !found; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const nx = sx + dx;
+            const ny = sy + dy;
+            if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+            if ((crystal[ny * gw + nx] ?? 0) <= 0) continue;
+            sx = nx;
+            sy = ny;
+            found = true;
+            break;
+          }
+        }
+      }
+      if (!found) return;
+    }
+    const stack = [sy * gw + sx];
+    const seen = new Uint8Array(gw * gh);
+    seen[sy * gw + sx] = 1;
+    while (stack.length) {
+      const i = stack.pop() as number;
+      crystal[i] = 0;
+      if ((terrain[i] ?? 0) === TILE_CRYSTAL) terrain[i] = TILE_CLEAR;
+      const bx = i % gw;
+      const by = (i / gw) | 0;
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1],
+      ] as const) {
+        const nx = bx + dx;
+        const ny = by + dy;
+        if (nx < 1 || ny < 1 || nx >= gw - 1 || ny >= gh - 1) continue;
+        const ni = ny * gw + nx;
+        if (seen[ni] || (crystal[ni] ?? 0) <= 0) continue;
+        seen[ni] = 1;
+        stack.push(ni);
+      }
+    }
+  };
+  for (let guard = 0; guard < 6; guard++) {
+    const a = band(home, far);
+    const b = band(far, home);
+    if (a.length === b.length) break;
+    const heavy = a.length > b.length ? a : b;
+    const seat = a.length > b.length ? home : far;
+    if (heavy.length <= 1) break;
+    const victim = heavy.slice().sort((p, q) => {
+      const dp = Math.hypot(p.x - seat.x, p.y - seat.y);
+      const dq = Math.hypot(q.x - seat.x, q.y - seat.y);
+      return dq - dp;
+    })[0];
+    if (!victim) break;
+    wipe(victim.x, victim.y);
   }
 }
 
