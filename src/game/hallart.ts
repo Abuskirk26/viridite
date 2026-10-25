@@ -3,8 +3,9 @@
  *
  * HALL_SHEET names a file in public/art/iso/<name>.png.
  * Drop that PNG in and it replaces the bake. A missing file keeps the bake.
- * The seven original sheets (yard, power, barracks, factory, tower, refinery, supply)
- * already live there. The rest are baked until their PNG arrives.
+ * Painted sheets already on disk: the original seven, plus advpower, helipad,
+ * aa, radar, silo, stealth, wall, sandbag, and gate. Dock stays baked until
+ * public/art/iso/dock.png is added.
  */
 
 import type { BuildingId } from "./data.ts";
