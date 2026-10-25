@@ -21,8 +21,16 @@ function fromLocation(): RenderMode | null {
 
 let mode: RenderMode = typeof window === "undefined" ? "2d" : (fromLocation() ?? stored());
 
+const listeners = new Set<(mode: RenderMode) => void>();
+
 export function getRenderMode(): RenderMode {
   return mode;
+}
+
+/** Lobby, pause, and the Video tab all read this, so a pick in one place updates the others. */
+export function subscribeRenderMode(fn: (mode: RenderMode) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
 }
 
 export function setRenderMode(next: RenderMode) {
@@ -32,9 +40,11 @@ export function setRenderMode(next: RenderMode) {
   } catch {
     /* private mode */
   }
-  if (typeof history === "undefined" || typeof location === "undefined") return;
-  const url = new URL(location.href);
-  if (next === "3d") url.searchParams.set("render", "3d");
-  else url.searchParams.delete("render");
-  history.replaceState(null, "", url);
+  if (typeof history !== "undefined" && typeof location !== "undefined") {
+    const url = new URL(location.href);
+    if (next === "3d") url.searchParams.set("render", "3d");
+    else url.searchParams.delete("render");
+    history.replaceState(null, "", url);
+  }
+  for (const fn of listeners) fn(mode);
 }

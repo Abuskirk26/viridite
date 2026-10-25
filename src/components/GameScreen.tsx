@@ -86,7 +86,7 @@ import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
 import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetFieldAlive, sheetLong } from "@/game/render";
 import { ensureIso, iso } from "@/game/iso";
-import { SheetBody, SheetHead } from "@/components/SettingsSheet";
+import { SheetBody, SheetHead, VersionPick } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
 import { TeamPip } from "@/components/TeamPip";
@@ -101,7 +101,8 @@ import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
 import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 import { getRenderMode } from "@/game/render3d/mode";
-import { projectGround, projectWorld } from "@/game/render3d/camera";
+import { projectSurface, projectWorld } from "@/game/render3d/camera";
+import { sampleHeight } from "@/game/render3d/terrain";
 import { Scene3D } from "@/game/render3d/scene";
 
 const SAVE_KEY = "viridite-last-match";
@@ -114,10 +115,13 @@ interface MatchFile {
 
 const FINGER_LIFT = 72;
 
-/** Ground under a pixel. The 3D camera raycasts the flat plane; 2D keeps the pitched map. */
+/** Ground height for the 3D ray. Flat zero until a match assigns the terrain. */
+let terrainHeight: (x: number, y: number) => number = () => 0;
+
+/** Ground under a pixel. 3D walks the ray onto the hills; 2D keeps the pitched map. */
 function pointerWorld(cam: Camera, view: View, sx: number, sy: number) {
   if (getRenderMode() === "3d") {
-    const hit = projectGround(cam, view, sx, sy);
+    const hit = projectSurface(cam, view, sx, sy, terrainHeight);
     if (hit) return hit;
   }
   return screenToWorld(cam, sx, sy, view);
@@ -365,6 +369,11 @@ export function GameScreen() {
   const glRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<Scene3D | null>(null);
   const simRef = useRef<Sim | null>(null);
+  terrainHeight = (x, y) => {
+    const live = simRef.current;
+    if (!live) return 0;
+    return sampleHeight(live.terrain, live.gw, live.gh, x, y);
+  };
   const sheetRef = useRef<{ small: HTMLCanvasElement; mid: HTMLCanvasElement | null; full: HTMLCanvasElement | null; key: string } | null>(null);
   const camRef = useRef<Camera>({ x: 32, y: 32, zoom: 48 });
   const viewRef = useRef<View>({ w: 1, h: 1 });
@@ -889,7 +898,9 @@ export function GameScreen() {
       last = now;
       setViewPitch(sim.mapId === "palm" ? 1 : 0.68);
       const mode3d = getRenderMode() === "3d";
-      const project = mode3d ? (sx: number, sy: number) => projectGround(camRef.current, viewRef.current, sx, sy) : undefined;
+      const project = mode3d
+        ? (sx: number, sy: number) => projectSurface(camRef.current, viewRef.current, sx, sy, terrainHeight)
+        : undefined;
       stepZoom(camRef.current, dt, viewRef.current, sim.gw, sim.gh, wideField(sim.mapSize), project);
       stepInertia(camRef.current, dt, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
       if (!pausedRef.current && phaseRef.current === "play" && sim.outcome === "playing") {
@@ -1003,7 +1014,9 @@ export function GameScreen() {
         placeGrid: true,
         touchPlace: touchPlaceRef.current,
         glass: mode3d ? ("3d" as const) : ("2d" as const),
-        project: mode3d ? (wx: number, wy: number) => projectWorld(camRef.current, viewRef.current, wx, wy) : undefined,
+        project: mode3d
+          ? (wx: number, wy: number) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy))
+          : undefined,
       };
       if (mode3d && glRef.current) {
         glRef.current.style.display = "block";
@@ -1127,7 +1140,7 @@ export function GameScreen() {
           show.ty,
           BUILDINGS[kind].w,
           BUILDINGS[kind].h,
-          getRenderMode() === "3d" ? (wx, wy) => projectWorld(camRef.current, viewRef.current, wx, wy) : undefined,
+          getRenderMode() === "3d" ? (wx, wy) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy)) : undefined,
         );
         const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
         if (hit(box.confirm)) return "confirm";
@@ -1157,7 +1170,8 @@ export function GameScreen() {
         if (netRef.current) setPlacing(null);
         setFrame((n) => n + 1);
       },
-      projectGround: (sx, sy) => (getRenderMode() === "3d" ? projectGround(camRef.current, viewRef.current, sx, sy) : null),
+      projectGround: (sx, sy) =>
+        getRenderMode() === "3d" ? projectSurface(camRef.current, viewRef.current, sx, sy, terrainHeight) : null,
       onWall: (screenPts) => {
         const sim = simRef.current;
         const kind = placingRef.current;
@@ -1986,6 +2000,10 @@ export function GameScreen() {
               {paused && phase === "play" && !pauseSheet && (
                 <Overlay title="Paused">
                   <PauseSound />
+                  <div className="flex items-center justify-center gap-2">
+                    <p className="font-display text-xs uppercase tracking-wide text-brass">View</p>
+                    <VersionPick testPrefix="pause-version" />
+                  </div>
                   <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
                     Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
                   </p>

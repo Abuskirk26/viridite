@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getRenderMode, setRenderMode } from "@/game/render3d/mode";
+import { getRenderMode, setRenderMode, subscribeRenderMode, type RenderMode } from "@/game/render3d/mode";
 import { Check, CircleAlert, RefreshCw } from "lucide-react";
 import { AudioBuses } from "@/components/AudioBuses";
 import {
@@ -21,6 +21,31 @@ const TABS: { id: SheetTab; label: string }[] = [
   { id: "video", label: "Video" },
   { id: "sound", label: "Sound" },
 ];
+
+/** 2D or 3D. The same control is on the skirmish bar, the pause menu, and Video. */
+export function VersionPick({ testPrefix = "version" }: { testPrefix?: string }) {
+  const [mode, setMode] = useState<RenderMode>(() => getRenderMode());
+  useEffect(() => subscribeRenderMode(setMode), []);
+  const choice = (id: RenderMode, label: string) => (
+    <button
+      type="button"
+      data-testid={`${testPrefix}-${id}`}
+      aria-pressed={mode === id}
+      className={`h-11 min-w-14 px-3 font-display text-xs uppercase tracking-wide ${
+        mode === id ? "bg-crystal text-crystal-ink" : "bg-field text-ink"
+      }`}
+      onClick={() => setRenderMode(id)}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="flex items-center border border-brass-dim" data-testid={`${testPrefix}-pick`} role="group" aria-label="Battlefield version">
+      {choice("2d", "2D")}
+      {choice("3d", "3D")}
+    </div>
+  );
+}
 
 export function SheetHead({
   tab,
@@ -74,10 +99,6 @@ export function SheetBody({
 }) {
   const [rev, setRev] = useState(0);
   const [open, setOpen] = useState<DoctrineId | null>(null);
-  const [render3d, setRender3d] = useState(false);
-  useEffect(() => {
-    setRender3d(getRenderMode() === "3d");
-  }, []);
   const current = doctrineOf();
   const picked = packById(current);
   void rev;
@@ -166,21 +187,12 @@ export function SheetBody({
         <>
           <Note
             title="Video"
-            lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe.", "3D is the Art of War view. 2D stays on until you turn it on."]}
+            lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe.", "2D is the painted map. 3D is the Art of War view. Switch any time."]}
           />
-          <label className="flex items-center gap-2 px-2 text-sm text-ink">
-            <input
-              type="checkbox"
-              data-testid="render-3d"
-              checked={render3d}
-              onChange={(e) => {
-                const on = e.target.checked;
-                setRender3d(on);
-                setRenderMode(on ? "3d" : "2d");
-              }}
-            />
-            3D battlefield
-          </label>
+          <div className="flex items-center justify-between gap-3 px-2">
+            <p className="font-display text-xs uppercase tracking-wide text-brass">Battlefield</p>
+            <VersionPick testPrefix="render" />
+          </div>
           <label className="flex items-center gap-2 px-2 text-sm text-ink">
             <input
               type="checkbox"

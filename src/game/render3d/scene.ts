@@ -10,7 +10,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { BUILDINGS, teamStyle, type BuildingId, type Team } from "../data.ts";
 import type { Sim } from "../sim.ts";
 import type { Camera, View } from "../view.ts";
-import { CAM_FOV, eyeOf } from "./camera.ts";
+import { CAM_FOV, eyeOf, projectGround } from "./camera.ts";
 import { modelUrl, paintTeam, placeholder } from "./models.ts";
 import { buildGround, sampleHeight, terrainHash, type GroundPack } from "./terrain.ts";
 
@@ -76,6 +76,12 @@ export class Scene3D {
   private pPos: Float32Array;
   private pCol: Float32Array;
   private readonly pMax = 420;
+  private fogGeo: THREE.BufferGeometry;
+  private fogPos: Float32Array;
+  private fogCol: Float32Array;
+  private fogMesh: THREE.Mesh;
+  private readonly fogC = 36;
+  private readonly fogR = 22;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -124,6 +130,45 @@ export class Scene3D {
     );
     points.frustumCulled = false;
     this.scene.add(points);
+    const verts = (this.fogC + 1) * (this.fogR + 1);
+    this.fogPos = new Float32Array(verts * 3);
+    this.fogCol = new Float32Array(verts * 4);
+    this.fogGeo = new THREE.BufferGeometry();
+    this.fogGeo.setAttribute("position", new THREE.BufferAttribute(this.fogPos, 3));
+    this.fogGeo.setAttribute("fogColor", new THREE.BufferAttribute(this.fogCol, 4));
+    const index: number[] = [];
+    for (let y = 0; y < this.fogR; y++) {
+      for (let x = 0; x < this.fogC; x++) {
+        const i = y * (this.fogC + 1) + x;
+        const row = this.fogC + 1;
+        index.push(i, i + 1, i + row + 1, i, i + row + 1, i + row);
+      }
+    }
+    this.fogGeo.setIndex(index);
+    const fogMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      vertexShader: `
+        attribute vec4 fogColor;
+        varying vec4 vColor;
+        void main() {
+          vColor = fogColor;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec4 vColor;
+        void main() {
+          if (vColor.a < 0.02) discard;
+          gl_FragColor = vColor;
+        }
+      `,
+    });
+    this.fogMesh = new THREE.Mesh(this.fogGeo, fogMat);
+    this.fogMesh.frustumCulled = false;
+    this.fogMesh.renderOrder = 4;
+    this.fogMesh.visible = false;
+    this.scene.add(this.fogMesh);
   }
 
   resize(w: number, h: number) {
@@ -165,6 +210,7 @@ export class Scene3D {
     this.syncHalls(sim, ui);
     this.syncGhost(sim, ui);
     this.syncFx(sim, alpha);
+    this.syncFog(sim, cam, view, ui.viewer);
     this.renderer.render(this.scene, this.camera);
     const now = performance.now();
     this.samples.push(now);
@@ -402,6 +448,64 @@ export class Scene3D {
     this.pGeo.setDrawRange(0, n);
     (this.pGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
     (this.pGeo.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+  }
+
+  /** Screen-draped veil. Unexplored ground is dark and covers the trees. Explored ground is a tint. */
+  private syncFog(sim: Sim, cam: Camera, view: View, viewer: number) {
+    const fog = sim.fogOn ? sim.fog[viewer as Team] : undefined;
+    if (!fog || fog.length < sim.gw * sim.gh) {
+      this.fogMesh.visible = false;
+      return;
+    }
+    const cols = this.fogC;
+    const rows = this.fogR;
+    let any = false;
+    for (let j = 0; j <= rows; j++) {
+      for (let i = 0; i <= cols; i++) {
+        const n = j * (cols + 1) + i;
+        const hit = projectGround(cam, view, (i / cols) * view.w, (j / rows) * view.h);
+        const o3 = n * 3;
+        const o4 = n * 4;
+        const inside = !!hit && hit.x >= -1 && hit.y >= -1 && hit.x <= sim.gw + 1 && hit.y <= sim.gh + 1;
+        if (!hit || !inside) {
+          this.fogPos[o3] = cam.x;
+          this.fogPos[o3 + 1] = -6;
+          this.fogPos[o3 + 2] = cam.y;
+          this.fogCol[o4 + 3] = 0;
+          continue;
+        }
+        const tx = Math.max(0, Math.min(sim.gw - 1, hit.x | 0));
+        const ty = Math.max(0, Math.min(sim.gh - 1, hit.y | 0));
+        const state = fog[ty * sim.gw + tx] ?? 0;
+        const h = sampleHeight(sim.terrain, sim.gw, sim.gh, hit.x, hit.y);
+        const shroud = state !== 2 && state !== 1;
+        this.fogPos[o3] = hit.x;
+        this.fogPos[o3 + 1] = h + (shroud ? 1.55 : 0.08);
+        this.fogPos[o3 + 2] = hit.y;
+        const alpha = state === 2 ? 0 : state === 1 ? 58 / 255 : 220 / 255;
+        this.fogCol[o4] = 18 / 255;
+        this.fogCol[o4 + 1] = 22 / 255;
+        this.fogCol[o4 + 2] = 28 / 255;
+        this.fogCol[o4 + 3] = alpha;
+        if (alpha > 0) any = true;
+      }
+    }
+    for (let j = rows; j >= 0; j--) {
+      for (let i = 0; i <= cols; i++) {
+        const n = j * (cols + 1) + i;
+        if (this.fogPos[n * 3 + 1] > -5) continue;
+        const below = j < rows ? (j + 1) * (cols + 1) + i : -1;
+        if (below >= 0 && this.fogPos[below * 3 + 1] > -5) {
+          this.fogPos[n * 3] = this.fogPos[below * 3]!;
+          this.fogPos[n * 3 + 1] = this.fogPos[below * 3 + 1]!;
+          this.fogPos[n * 3 + 2] = this.fogPos[below * 3 + 2]!;
+        }
+        this.fogCol[n * 4 + 3] = 0;
+      }
+    }
+    this.fogMesh.visible = any;
+    (this.fogGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.fogGeo.getAttribute("fogColor") as THREE.BufferAttribute).needsUpdate = true;
   }
 }
 
