@@ -134,8 +134,9 @@ export function clampCamera(cam: Camera, gw = MAP_W, gh = MAP_H, view?: View, wa
   cam.zoom = Math.max(limits.min, Math.min(limits.max, cam.zoom));
   if (cam.aim != null) cam.aim = Math.max(limits.min, Math.min(limits.max, cam.aim));
 
-  const halfW = view ? view.w / (2 * cam.zoom) : Math.min(3, gw / 2);
-  const halfH = view ? view.h / (2 * cam.zoom * pitch) : Math.min(3, gh / 2);
+  // Half a pixel inside the glass so the clear color past the edge never shows.
+  const halfW = view ? (view.w + 1) / (2 * cam.zoom) : Math.min(3, gw / 2);
+  const halfH = view ? (view.h + 1) / (2 * cam.zoom * pitch) : Math.min(3, gh / 2);
 
   const pin = (value: number, half: number, span: number) => {
     const lo = half;
@@ -250,9 +251,12 @@ export function unitPictureWidth(kind: string, aspect: number): number {
 
 /** Hall picture is the footprint times this. Same on every map. Buildings are not resized. */
 export function hallDrawMul(kind: string): number {
-  if (kind === "tower" || kind === "aa") return 1.05;
+  if (kind === "tower" || kind === "aa" || kind === "radar") return 1.05;
   if (kind === "advpower") return 0.96;
   if (kind === "power") return 0.86;
+  if (kind === "silo") return 0.78;
+  if (kind === "helipad") return 1;
+  if (kind === "wall" || kind === "gate" || kind === "sandbag") return 0.98;
   return 0.92;
 }
 
@@ -260,18 +264,21 @@ export function hallDrawMul(kind: string): number {
 const HALL_ASPECT: Record<string, number> = {
   yard: 0.9,
   power: 1.43,
-  advpower: 1.43,
+  advpower: 340 / 360,
   refinery: 1.15,
   barracks: 1.19,
   factory: 1.1,
   tower: 0.91,
-  aa: 0.91,
-  radar: 0.91,
+  aa: 360 / 320,
+  radar: 400 / 280,
   supply: 1.05,
-  silo: 1.05,
-  dock: 1.1,
-  helipad: 0.85,
-  stealth: 1.19,
+  silo: 420 / 260,
+  dock: 300 / 360,
+  helipad: 250 / 360,
+  stealth: 240 / 360,
+  wall: 180 / 240,
+  sandbag: 150 / 260,
+  gate: 200 / 240,
 };
 
 /**

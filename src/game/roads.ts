@@ -29,7 +29,7 @@ const BRIGHT: Ink = {
 };
 
 const MUTED: Ink = {
-  feather: "rgba(64,48,34,0.32)",
+  feather: "rgba(48,40,30,0.34)",
   mid: "rgba(70,54,38,0.42)",
   body: "#5a4634",
   core: "#64503c",
@@ -52,11 +52,9 @@ const DIAG: readonly (readonly [number, number])[] = [
   [-1, -1],
 ];
 
-const FEATHER = 1.38;
-const MID = 1.28;
-const BODY = 1.2;
-const CORE = 1.05;
-const RUT = 0.03;
+/** Soft edge just over a tile, worn body about one tile. No core, ruts, or disks. */
+const FEATHER = 1.06;
+const BODY = 0.9;
 
 function roadScale(gw: number, gh: number): number {
   return Math.max(8, Math.min(32, Math.floor(2048 / Math.max(gw, gh, 1))));
@@ -218,93 +216,25 @@ function strokeChains(ctx: CanvasRenderingContext2D, splines: Pt[][], width: num
   ctx.stroke();
 }
 
-function fillDisks(ctx: CanvasRenderingContext2D, blobs: Pt[], radius: number, color: string) {
-  if (!blobs.length) return;
-  ctx.beginPath();
-  for (const p of blobs) {
-    ctx.moveTo(p.x + radius, p.y);
-    ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-  }
-  ctx.fillStyle = color;
-  ctx.fill();
-}
-
-/** Two separate ruts. A shared path flips the normal at bends and draws a cross tie. */
-function strokeRuts(ctx: CanvasRenderingContext2D, splines: Pt[][], color: string) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = RUT;
-  for (const pts of splines) {
-    if (pts.length < 2) continue;
-    for (const side of [-1, 1]) {
-      ctx.beginPath();
-      let down = false;
-      let prevNx = 0;
-      let prevNy = 0;
-      for (let i = 0; i < pts.length; i++) {
-        const prev = pts[Math.max(0, i - 1)]!;
-        const next = pts[Math.min(pts.length - 1, i + 1)]!;
-        let dx = next.x - prev.x;
-        let dy = next.y - prev.y;
-        const len = Math.hypot(dx, dy) || 1;
-        dx /= len;
-        dy /= len;
-        let nx = -dy;
-        let ny = dx;
-        if (i > 0 && nx * prevNx + ny * prevNy < 0) {
-          nx = -nx;
-          ny = -ny;
-        }
-        const steady = i === 0 || nx * prevNx + ny * prevNy >= 0.2;
-        const x = pts[i]!.x + nx * 0.16 * side;
-        const y = pts[i]!.y + ny * 0.16 * side;
-        if (!down || !steady) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-        down = true;
-        prevNx = nx;
-        prevNy = ny;
-      }
-      ctx.stroke();
-    }
-  }
-}
-
 function speck(x: number, y: number, salt: number): number {
   let n = Math.imul(Math.round(x * 8) + salt * 17, 374761393) ^ Math.imul(Math.round(y * 8), 668265263);
   n = Math.imul(n ^ (n >>> 13), 1274126177);
   return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
 }
 
-function gravel(ctx: CanvasRenderingContext2D, splines: Pt[][], color: string, salt: number) {
-  ctx.beginPath();
-  let any = false;
-  for (const pts of splines) {
-    let acc = 0.4;
-    for (let i = 1; i < pts.length; i++) {
-      const ax = pts[i - 1]!.x;
-      const ay = pts[i - 1]!.y;
-      const bx = pts[i]!.x;
-      const by = pts[i]!.y;
-      const seg = Math.hypot(bx - ax, by - ay);
-      acc += seg;
-      if (acc < 0.72) continue;
-      acc = 0;
-      const h = speck(bx, by, salt);
-      if (h < 0.42) continue;
-      const len = seg || 1;
-      const nx = -(by - ay) / len;
-      const ny = (bx - ax) / len;
-      const off = (h - 0.5) * 0.28;
-      const r = 0.016 + h * 0.016;
-      const cx = bx + nx * off;
-      const cy = by + ny * off;
-      ctx.moveTo(cx + r, cy);
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      any = true;
-    }
-  }
-  if (!any) return;
-  ctx.fillStyle = color;
-  ctx.fill();
+/** A little wander so the edge is not a ruler. Ends stay put so chains still meet. */
+function wear(pts: Pt[]): Pt[] {
+  if (pts.length < 3) return pts;
+  return pts.map((p, i) => {
+    if (i === 0 || i === pts.length - 1) return p;
+    const prev = pts[i - 1]!;
+    const next = pts[i + 1]!;
+    let dx = next.x - prev.x;
+    let dy = next.y - prev.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const j = (speck(p.x, p.y, 3) - 0.5) * 0.12;
+    return { x: p.x + (-dy / len) * j, y: p.y + (dx / len) * j };
+  });
 }
 
 function strokeDirt(
@@ -322,19 +252,23 @@ function strokeDirt(
   const built = buildRoads(terrain, gw, gh, x0, y0, x1, y1, show);
   if (!built.chains.length && !built.blobs.length) return;
   const ink = muted ? MUTED : BRIGHT;
-  const splines = built.chains.map((c) => smoothChain(c.pts, c.closed));
+  const splines = built.chains.map((c) => wear(smoothChain(c.pts, c.closed)));
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.setLineDash([]);
   strokeChains(ctx, splines, FEATHER, ink.feather);
-  strokeChains(ctx, splines, MID, ink.mid);
   strokeChains(ctx, splines, BODY, ink.body);
-  strokeChains(ctx, splines, CORE, ink.core);
-  fillDisks(ctx, built.blobs, BODY / 2, ink.body);
-  strokeRuts(ctx, splines, ink.rut);
-  gravel(ctx, splines, ink.grit, 1);
-  gravel(ctx, splines, ink.gritLit, 2);
+  if (built.blobs.length) {
+    ctx.beginPath();
+    for (const p of built.blobs) {
+      ctx.moveTo(p.x - 0.32, p.y);
+      ctx.lineTo(p.x + 0.32, p.y);
+    }
+    ctx.strokeStyle = ink.body;
+    ctx.lineWidth = BODY;
+    ctx.stroke();
+  }
   ctx.restore();
 }
 

@@ -60,6 +60,12 @@ test("the camera stays inside the map at max zoom-out", () => {
   assert.ok(cam.y - halfH >= -0.02);
   assert.ok(cam.y + halfH <= 96.02);
   assert.ok(halfW * 2 < 96);
+  const shoved: Camera = { x: -800, y: 1400, zoom: cam.zoom, vx: 80, vy: -80 };
+  clampCamera(shoved, 96, 96, phone);
+  assert.ok(shoved.x - halfW >= -0.02);
+  assert.ok(shoved.y - halfH >= -0.02);
+  assert.ok(shoved.x + halfW <= 96.02);
+  assert.ok(shoved.y + halfH <= 96.02);
 });
 
 test("pinch and wheel ease onto the limit and do not bounce past it", () => {

@@ -234,7 +234,11 @@ export function stepParticles(dt: number) {
   }
 }
 
-export function drawParticles(ctx: CanvasRenderingContext2D, time: number) {
+export function drawParticles(
+  ctx: CanvasRenderingContext2D,
+  time: number,
+  clipDecal?: (x: number, y: number, r: number) => void,
+) {
   for (const p of pool) {
     if (!p.alive) continue;
     const k = p.ttl / p.max;
@@ -272,11 +276,14 @@ export function drawParticles(ctx: CanvasRenderingContext2D, time: number) {
       ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
       ctx.restore();
     } else if (p.kind === "scorch") {
+      ctx.save();
+      clipDecal?.(p.x, p.y, p.size);
       ctx.fillStyle = p.color;
       ctx.globalAlpha *= 0.55;
       ctx.beginPath();
       ctx.ellipse(p.x, p.y, p.size, p.size * 0.55, 0, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
     } else if (p.kind === "wreck") {
       const fade = k < 0.2 ? k / 0.2 : 1;
       ctx.save();
