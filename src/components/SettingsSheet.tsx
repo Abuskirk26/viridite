@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getRenderMode, setRenderMode } from "@/game/render3d/mode";
 import { Check, CircleAlert, RefreshCw } from "lucide-react";
 import { AudioBuses } from "@/components/AudioBuses";
 import {
@@ -73,6 +74,10 @@ export function SheetBody({
 }) {
   const [rev, setRev] = useState(0);
   const [open, setOpen] = useState<DoctrineId | null>(null);
+  const [render3d, setRender3d] = useState(false);
+  useEffect(() => {
+    setRender3d(getRenderMode() === "3d");
+  }, []);
   const current = doctrineOf();
   const picked = packById(current);
   void rev;
@@ -161,8 +166,21 @@ export function SheetBody({
         <>
           <Note
             title="Video"
-            lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe."]}
+            lines={["Sharp is the 4K bake. The phone draws a slice, not the whole sheet.", "Walker camera pulls back only on Kane Line.", "Reduced flash keeps the ring and drops the strobe.", "3D is the Art of War view. 2D stays on until you turn it on."]}
           />
+          <label className="flex items-center gap-2 px-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              data-testid="render-3d"
+              checked={render3d}
+              onChange={(e) => {
+                const on = e.target.checked;
+                setRender3d(on);
+                setRenderMode(on ? "3d" : "2d");
+              }}
+            />
+            3D battlefield
+          </label>
           <label className="flex items-center gap-2 px-2 text-sm text-ink">
             <input
               type="checkbox"

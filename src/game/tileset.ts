@@ -72,7 +72,8 @@ export function allows(
   if (isShell(tile) && shellMark < 2) return false;
   const g = groundOf(tile);
   if (g === "deep") return who === "boat";
-  if (g === "shallow") return who === "boat" || who === "infantry" || who === "amphib";
+  // Shallow water is boats and amphibs. Infantry use a ford or a bridge.
+  if (g === "shallow") return who === "boat" || who === "amphib";
   if (g === "shore") return who !== "boat";
   if (tile === TILE_BRIDGE) return who !== "boat";
   return who !== "boat";
