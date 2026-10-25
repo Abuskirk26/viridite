@@ -153,12 +153,14 @@ type RoadOp = {
   dash: number[];
   lineTo: number;
   arcs: number;
+  maxR: number;
 };
 
 function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
   const ops: RoadOp[] = [];
   let lineTo = 0;
   let arcs = 0;
+  let maxR = 0;
   const ctx = {
     lineWidth: 1,
     lineCap: "butt",
@@ -175,11 +177,13 @@ function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
         dash: d.slice(),
         lineTo,
         arcs,
+        maxR,
       });
     },
     beginPath() {
       lineTo = 0;
       arcs = 0;
+      maxR = 0;
     },
     moveTo() {},
     lineTo() {
@@ -187,8 +191,9 @@ function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
     },
     rect() {},
     clip() {},
-    arc() {
+    arc(_x: number, _y: number, r?: number) {
       arcs++;
+      if (typeof r === "number" && r > maxR) maxR = r;
     },
     stroke() {
       ops.push({
@@ -199,6 +204,7 @@ function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
         dash: [],
         lineTo,
         arcs,
+        maxR,
       });
     },
     fill() {
@@ -210,6 +216,7 @@ function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
         dash: [],
         lineTo,
         arcs,
+        maxR,
       });
     },
     fillRect() {
@@ -221,6 +228,7 @@ function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
         dash: [],
         lineTo,
         arcs,
+        maxR,
       });
     },
     save() {},
@@ -272,13 +280,13 @@ function assertDirtTrack(ops: RoadOp[]) {
   }
   const widths = ops.filter((op) => op.op === "stroke").map((op) => op.lineWidth);
   const maxW = Math.max(...widths);
-  assert.ok(maxW >= 1.5 && maxW <= 2.05, `road width ${maxW}`);
+  assert.ok(maxW >= 1.05 && maxW <= 1.5, `road width ${maxW}`);
 }
 
 function widestRed(ops: RoadOp[]): number {
   let red = 0;
   for (const op of ops) {
-    if (op.op !== "stroke" || op.lineWidth < 1.5) continue;
+    if (op.op !== "stroke" || op.lineWidth < 1.05) continue;
     red = Math.max(red, inkOf(op.strokeStyle).r);
   }
   return red;
@@ -290,14 +298,14 @@ test("no road tile draws plank, rail, or inset artwork", () => {
   for (let x = 2; x <= 10; x++) straight[8 * gw + x] = TILE_ROAD;
   const straightOps = paintRoads(straight);
   assertDirtTrack(straightOps);
-  assert.ok(straightOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.5 && op.lineTo >= 4));
+  assert.ok(straightOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.05 && op.lineWidth <= 1.3 && op.lineTo >= 4));
 
   const bend = new Uint8Array(gw * gw);
   for (let x = 2; x <= 6; x++) bend[4 * gw + x] = TILE_ROAD;
   for (let y = 5; y <= 9; y++) bend[y * gw + 6] = TILE_ROAD;
   const bendOps = paintRoads(bend);
   assertDirtTrack(bendOps);
-  assert.ok(bendOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.5 && op.lineTo >= 4));
+  assert.ok(bendOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.05 && op.lineWidth <= 1.3 && op.lineTo >= 4));
 
   const block = new Uint8Array(gw * gw);
   block[2 * gw + 2] = TILE_ROAD;
@@ -312,7 +320,7 @@ test("no road tile draws plank, rail, or inset artwork", () => {
   for (let y = 4; y <= 12; y++) junction[y * gw + 8] = TILE_ROAD;
   const junctionOps = paintRoads(junction);
   assertDirtTrack(junctionOps);
-  assert.ok(junctionOps.some((op) => op.op === "fill" && op.arcs > 0), "junction is a filled blob");
+  assert.ok(!junctionOps.some((op) => op.op === "fill" && op.maxR > 0.2), "junction disk scallops the edge");
 
   const meet = new Uint8Array(gw * gw);
   for (let x = 3; x <= 6; x++) meet[10 * gw + x] = TILE_ROAD;

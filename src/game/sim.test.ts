@@ -1793,6 +1793,19 @@ test("losing the yard does not end the match while buildings or units remain", (
   assert.equal(sim.reason, "No buildings or units remain");
 });
 
+test("deploying the MCV does not call the opening yard the last building", () => {
+  const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
+  const yard = deployPlayer(sim);
+  sim.tick(0.2);
+  assert.equal(sim.logs.some((line) => line.includes("Last building")), false);
+  const power = stubBuilding(sim, { kind: "power", team: 0, tx: yard.tx + 4, ty: yard.ty });
+  sim.tick(0.2);
+  assert.equal(sim.logs.some((line) => line.includes("Last building")), false);
+  power.hp = 0;
+  sim.tick(0.2);
+  assert.equal(sim.logs.some((line) => line.includes("Last building")), true);
+});
+
 test("a lost construction yard names what is left until it is rebuilt or the side is wiped", () => {
   const sim = new Sim({ mapId: "basin", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false] });
   assert.equal(sim.yardLostLine(0), null, "an MCV-only open showed the banner");
