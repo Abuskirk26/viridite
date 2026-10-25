@@ -42,6 +42,7 @@ import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
 import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, terrainFieldAlive, writeTerrain } from "./tileset.ts";
+import { paintRoadNet } from "./roads.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
 export function frameScale(): number {
@@ -1326,7 +1327,8 @@ function miniRgb(t: number, crystal: number, fog: number, x = 0, y = 0): [number
   const seen = fog === 2;
   if (t === TILE_DEEP || t === TILE_WRECK) return [32, 112, 156];
   if (t === TILE_SHALLOW || t === TILE_FORD) return [64, 176, 196];
-  if (t === TILE_BRIDGE || t === TILE_ROAD) return [196, 154, 96];
+  if (t === TILE_BRIDGE) return [196, 154, 96];
+  if (t === TILE_ROAD) return [222, 186, 122];
   if (t === TILE_SHORE) return seen ? [230, 201, 138] : [186, 164, 120];
   if (t === TILE_ROCK || t === TILE_CLIFF) return [120, 108, 96];
   if (t === TILE_RAMP) return [168, 136, 88];
@@ -2534,10 +2536,7 @@ function paintTile(
     ctx.fillStyle = grove ? "rgba(18,64,28,0.34)" : "rgba(52,104,40,0.16)";
     ctx.fillRect(x, y, 1, 1);
   }
-  if (t === TILE_ROAD) {
-    ctx.fillStyle = "rgba(92,64,36,0.55)";
-    ctx.fillRect(x, y + 0.28, 1, 0.44);
-  } else if (t === TILE_VALLEY) {
+  if (t === TILE_VALLEY) {
     ctx.fillStyle = "rgba(20,40,16,0.35)";
     ctx.fillRect(x, y + 0.35, 1, 0.3);
   } else if (t === TILE_ROCK || t === TILE_CLIFF) {
@@ -3119,96 +3118,6 @@ function paintBridges(
   visit((x, y) => paintBridgeShadow(ctx, terrain, gw, gh, x, y));
   visit((x, y) => paintBridgeRamps(ctx, terrain, gw, gh, x, y));
   visit((x, y) => paintBridgeDeckTile(ctx, terrain, gw, gh, x, y));
-}
-
-function roadTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): boolean {
-  if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
-  return (terrain[y * gw + x] ?? 0) === TILE_ROAD;
-}
-
-/** Dirt bed, dark edges, wheel ruts, and a dashed center line. */
-function paintRoadNet(
-  ctx: CanvasRenderingContext2D,
-  terrain: Uint8Array,
-  gw: number,
-  gh: number,
-  x0: number,
-  y0: number,
-  x1: number,
-  y1: number,
-  show?: (x: number, y: number) => boolean,
-) {
-  const segs: [number, number, number, number][] = [];
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      if ((terrain[y * gw + x] ?? 0) !== TILE_ROAD) continue;
-      if (show && !show(x, y)) continue;
-      const links: [number, number][] = [
-        [1, 0],
-        [0, 1],
-        [1, 1],
-        [1, -1],
-      ];
-      for (const [dx, dy] of links) {
-        const nx = x + dx;
-        const ny = y + dy;
-        const diagonal = dx !== 0 && dy !== 0;
-        // A filled blob's diagonal is the X across a junction. A real bend has an open corner.
-        if (diagonal && roadTile(terrain, gw, gh, x + dx, y) && roadTile(terrain, gw, gh, x, y + dy)) continue;
-        if (roadTile(terrain, gw, gh, nx, ny)) {
-          if (show && !show(nx, ny)) continue;
-          segs.push([x + 0.5, y + 0.5, nx + 0.5, ny + 0.5]);
-          continue;
-        }
-        if (diagonal || !bridgeTile(terrain, gw, gh, nx, ny)) continue;
-        if (show && !show(nx, ny)) continue;
-        segs.push([x + 0.5, y + 0.5, x + 0.5 + dx * 0.5, y + 0.5 + dy * 0.5]);
-      }
-    }
-  }
-  if (!segs.length) return;
-  ctx.save();
-  ctx.lineCap = "butt";
-  ctx.lineJoin = "round";
-  const strokeAll = (width: number, color: string) => {
-    ctx.beginPath();
-    for (const [ax, ay, bx, by] of segs) {
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(bx, by);
-    }
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.stroke();
-  };
-  strokeAll(0.9, "#2c2116");
-  strokeAll(0.74, "#6b5030");
-  strokeAll(0.58, "#c4a36a");
-  strokeAll(0.4, "#d7b87a");
-  ctx.lineWidth = 0.045;
-  ctx.strokeStyle = "rgba(42, 28, 16, 0.8)";
-  ctx.beginPath();
-  for (const [ax, ay, bx, by] of segs) {
-    const dx = bx - ax;
-    const dy = by - ay;
-    const len = Math.hypot(dx, dy) || 1;
-    const ox = (-dy / len) * 0.16;
-    const oy = (dx / len) * 0.16;
-    ctx.moveTo(ax + ox, ay + oy);
-    ctx.lineTo(bx + ox, by + oy);
-    ctx.moveTo(ax - ox, ay - oy);
-    ctx.lineTo(bx - ox, by - oy);
-  }
-  ctx.stroke();
-  ctx.setLineDash([0.16, 0.2]);
-  ctx.lineWidth = 0.035;
-  ctx.strokeStyle = "rgba(255, 244, 214, 0.72)";
-  ctx.beginPath();
-  for (const [ax, ay, bx, by] of segs) {
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
-  }
-  ctx.stroke();
-  ctx.restore();
 }
 
 /** Roads then bridges, on top of the baked ground. Match and editor share this. */
@@ -4936,10 +4845,10 @@ function minimapMarks(sim: Sim): HTMLCanvasElement | null {
       b = 88;
       a = 150;
     } else if (t === TILE_ROAD) {
-      r = 150;
-      gc = 112;
-      b = 68;
-      a = 90;
+      r = 222;
+      gc = 186;
+      b = 122;
+      a = 230;
     } else if (t === TILE_HIGH) {
       r = 214;
       gc = 204;

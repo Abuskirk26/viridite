@@ -149,7 +149,7 @@ function at(terrain: ArrayLike<number>, x: number, y: number, gw: number, gh: nu
 
 const HEIGHT = new Float32Array([
   0.42, 1.28, 0.56, 0.56, 0.56, 0.09, 0.0, 1.72, 0.26, 0.09,
-  0.56, 0.98, 0.09, 0.56, 0.98, 0.82, 0.56, 0.56, 0.56, 0.56, 0.0, 1.58,
+  0.42, 0.98, 0.09, 0.56, 0.98, 0.82, 0.56, 0.56, 0.56, 0.56, 0.0, 1.58,
 ]);
 
 function rawH(tile: number): number {

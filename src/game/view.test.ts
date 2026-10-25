@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TILE_CLEAR, TILE_DEEP } from "./data.ts";
+import { TILE_BRIDGE, TILE_CLEAR, TILE_DEEP, TILE_ROAD } from "./data.ts";
+import { paintRoadNet } from "./roads.ts";
 import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import {
   clampCamera,
@@ -142,4 +143,184 @@ test("a terrain sheet has land or water, and a flat navy fill does not", () => {
     blank[i * 3 + 2] = 34;
   }
   assert.equal(terrainFieldAlive(blank), false);
+});
+
+type RoadOp = {
+  op: "stroke" | "fill" | "fillRect" | "dash";
+  lineWidth: number;
+  strokeStyle: string;
+  fillStyle: string;
+  dash: number[];
+  lineTo: number;
+  arcs: number;
+};
+
+function roadCtx(): { ctx: CanvasRenderingContext2D; ops: RoadOp[] } {
+  const ops: RoadOp[] = [];
+  let lineTo = 0;
+  let arcs = 0;
+  const ctx = {
+    lineWidth: 1,
+    lineCap: "butt",
+    lineJoin: "miter",
+    strokeStyle: "",
+    fillStyle: "",
+    imageSmoothingEnabled: true,
+    setLineDash(d: number[]) {
+      ops.push({
+        op: "dash",
+        lineWidth: ctx.lineWidth,
+        strokeStyle: String(ctx.strokeStyle),
+        fillStyle: String(ctx.fillStyle),
+        dash: d.slice(),
+        lineTo,
+        arcs,
+      });
+    },
+    beginPath() {
+      lineTo = 0;
+      arcs = 0;
+    },
+    moveTo() {},
+    lineTo() {
+      lineTo++;
+    },
+    rect() {},
+    clip() {},
+    arc() {
+      arcs++;
+    },
+    stroke() {
+      ops.push({
+        op: "stroke",
+        lineWidth: ctx.lineWidth,
+        strokeStyle: String(ctx.strokeStyle),
+        fillStyle: String(ctx.fillStyle),
+        dash: [],
+        lineTo,
+        arcs,
+      });
+    },
+    fill() {
+      ops.push({
+        op: "fill",
+        lineWidth: ctx.lineWidth,
+        strokeStyle: String(ctx.strokeStyle),
+        fillStyle: String(ctx.fillStyle),
+        dash: [],
+        lineTo,
+        arcs,
+      });
+    },
+    fillRect() {
+      ops.push({
+        op: "fillRect",
+        lineWidth: ctx.lineWidth,
+        strokeStyle: String(ctx.strokeStyle),
+        fillStyle: String(ctx.fillStyle),
+        dash: [],
+        lineTo,
+        arcs,
+      });
+    },
+    save() {},
+    restore() {},
+    setTransform() {},
+    drawImage() {},
+  };
+  return { ctx: ctx as unknown as CanvasRenderingContext2D, ops };
+}
+
+function paintRoads(terrain: Uint8Array, show?: (x: number, y: number) => boolean): RoadOp[] {
+  const { ctx, ops } = roadCtx();
+  paintRoadNet(ctx, terrain, 16, 16, 0, 0, 15, 15, show);
+  return ops;
+}
+
+function inkOf(style: string): { r: number; g: number; b: number } {
+  const hex = /^#([0-9a-f]{6})$/i.exec(style.trim());
+  if (hex) {
+    const n = Number.parseInt(hex[1] ?? "", 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  }
+  const short = /^#([0-9a-f]{3})$/i.exec(style.trim());
+  if (short) {
+    const h = short[1] ?? "000";
+    const n = (c: string) => Number.parseInt(c + c, 16);
+    return { r: n(h[0] ?? "0"), g: n(h[1] ?? "0"), b: n(h[2] ?? "0") };
+  }
+  const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(style);
+  assert.ok(m, `color ${style}`);
+  return { r: Number(m?.[1]), g: Number(m?.[2]), b: Number(m?.[3]) };
+}
+
+function assertDirtTrack(ops: RoadOp[]) {
+  assert.equal(ops.some((op) => op.op === "fillRect"), false, "no inset rect");
+  for (const op of ops) {
+    if (op.op === "dash") {
+      assert.deepEqual(op.dash, [], "no center dashes");
+      continue;
+    }
+    const style = op.op === "fill" ? op.fillStyle : op.strokeStyle;
+    if (!style) continue;
+    const c = inkOf(style);
+    assert.ok(!(c.r > 230 && c.g > 230 && c.b > 200), `white mark ${style}`);
+    assert.ok(!(c.g > c.r + 8 && c.g > 80), `green inset ${style}`);
+    if (op.op === "stroke" && op.lineWidth > 0.12) {
+      assert.ok(!(c.r < 50 && c.g < 40 && c.b < 30), `rail ${op.lineWidth} ${style}`);
+    }
+  }
+  const widths = ops.filter((op) => op.op === "stroke").map((op) => op.lineWidth);
+  const maxW = Math.max(...widths);
+  assert.ok(maxW >= 1.5 && maxW <= 2.05, `road width ${maxW}`);
+}
+
+function widestRed(ops: RoadOp[]): number {
+  let red = 0;
+  for (const op of ops) {
+    if (op.op !== "stroke" || op.lineWidth < 1.5) continue;
+    red = Math.max(red, inkOf(op.strokeStyle).r);
+  }
+  return red;
+}
+
+test("no road tile draws plank, rail, or inset artwork", () => {
+  const gw = 16;
+  const straight = new Uint8Array(gw * gw);
+  for (let x = 2; x <= 10; x++) straight[8 * gw + x] = TILE_ROAD;
+  const straightOps = paintRoads(straight);
+  assertDirtTrack(straightOps);
+  assert.ok(straightOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.5 && op.lineTo >= 4));
+
+  const bend = new Uint8Array(gw * gw);
+  for (let x = 2; x <= 6; x++) bend[4 * gw + x] = TILE_ROAD;
+  for (let y = 5; y <= 9; y++) bend[y * gw + 6] = TILE_ROAD;
+  const bendOps = paintRoads(bend);
+  assertDirtTrack(bendOps);
+  assert.ok(bendOps.some((op) => op.op === "stroke" && op.lineWidth >= 1.5 && op.lineTo >= 4));
+
+  const block = new Uint8Array(gw * gw);
+  block[2 * gw + 2] = TILE_ROAD;
+  block[2 * gw + 3] = TILE_ROAD;
+  block[3 * gw + 2] = TILE_ROAD;
+  block[3 * gw + 3] = TILE_ROAD;
+  const blockOps = paintRoads(block);
+  assertDirtTrack(blockOps);
+
+  const junction = new Uint8Array(gw * gw);
+  for (let x = 4; x <= 12; x++) junction[8 * gw + x] = TILE_ROAD;
+  for (let y = 4; y <= 12; y++) junction[y * gw + 8] = TILE_ROAD;
+  const junctionOps = paintRoads(junction);
+  assertDirtTrack(junctionOps);
+  assert.ok(junctionOps.some((op) => op.op === "fill" && op.arcs > 0), "junction is a filled blob");
+
+  const meet = new Uint8Array(gw * gw);
+  for (let x = 3; x <= 6; x++) meet[10 * gw + x] = TILE_ROAD;
+  meet[10 * gw + 7] = TILE_BRIDGE;
+  meet[10 * gw + 8] = TILE_BRIDGE;
+  assertDirtTrack(paintRoads(meet));
+
+  const muted = paintRoads(straight, () => true);
+  assertDirtTrack(muted);
+  assert.ok(widestRed(muted) < widestRed(straightOps), "explored fog desaturates the track");
 });
