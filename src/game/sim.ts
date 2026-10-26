@@ -91,6 +91,7 @@ import { lobbySize, offersNavy } from "./editor.ts";
 import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, matchNorthwestOre, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, shelveNorthwest, snapLand, stampCamp, waterKind, widenNorthwest, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
+import { linkStarts } from "./pass.ts";
 import { unitPickRadius } from "./view.ts";
 import { aiThink } from "./ai.ts";
 
@@ -825,6 +826,7 @@ export class Sim {
         shelveNorthwest(this.terrain, this.crystal, gw, gh, slots);
       }
       this.clearStartClutter(slots);
+      linkStarts(this.terrain, gw, gh, slots);
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
         this.spawnUnit(t as Team, "mcv", at.x, at.y);

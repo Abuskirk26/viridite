@@ -356,7 +356,17 @@ test("raider normal lets a Coastline opener stand up", () => {
     for (const u of sim.units) if (u.team === 0 && u.hp > 0) u.hp = u.maxHp;
     if (yardAt < 0 && sim.buildings.some((b) => b.team === 1 && b.kind === "yard" && b.complete)) yardAt = sim.time;
     const foe = sim.units.filter((u) => u.team === 1 && u.hp > 0 && u.damage > 0);
-    if (scoutLeft < 0 && foe.some((u) => Math.hypot(u.x - camp.x, u.y - camp.y) > 12)) scoutLeft = sim.time;
+    // A land detour around boats-only water can bulge past the camp ring without an attack order.
+    if (
+      scoutLeft < 0 &&
+      foe.some((u) => {
+        if (u.order.t !== "move") return false;
+        if (Math.hypot(u.x - camp.x, u.y - camp.y) <= 12) return false;
+        return Math.hypot(u.order.x - camp.x, u.order.y - camp.y) > 14;
+      })
+    ) {
+      scoutLeft = sim.time;
+    }
     if (earlyContact < 0 && sim.time < 230 && foe.some((u) => Math.hypot(u.x - home.x, u.y - home.y) < 8)) {
       earlyContact = sim.time;
     }
@@ -1030,7 +1040,7 @@ test("passability follows the tile: shallow, cliff, ramp, and a beached transpor
   sim.terrain[12 * sim.gw + 16] = TILE_CLIFF;
   sim.terrain[12 * sim.gw + 18] = TILE_RAMP;
   sim.terrain[8 * sim.gw + 8] = TILE_SHORE;
-  assert.equal(sim.passable(rifle, 14.2, 10.2), true);
+  assert.equal(sim.passable(rifle, 14.2, 10.2), false);
   assert.equal(sim.passable(tank, 14.2, 10.2), false);
   assert.equal(sim.passable(rifle, 16.2, 10.2), false);
   assert.equal(sim.passable(boat, 16.2, 10.2), true);
@@ -1234,17 +1244,23 @@ test("lanes, plateaus, and forest cover stay readable without moving the crystal
   assert.ok(sand > 20, "camp pad stays buildable");
 });
 
-test("shallow water slows infantry and woods hide them until a ground unit is adjacent", () => {
+test("shallow water is boats-only and woods hide infantry until a ground unit is adjacent", () => {
   const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 2 });
   sim.terrain.fill(TILE_CLEAR);
   const slow = sim.spawnUnit(0, "rifle", 5.5, 5.5);
   const open = sim.spawnUnit(0, "rifle", 5.5, 8.5);
   assert.ok(slow && open);
   for (let x = 6; x < 20; x++) sim.terrain[5 * sim.gw + x] = TILE_SHALLOW;
-  sim.issueMove([slow.id], 18.5, 5.5, false);
+  assert.equal(sim.passable(slow, 8.5, 5.5), false);
+  const boat = sim.spawnUnit(0, "gunboat", 6.5, 5.5);
+  const wader = sim.spawnUnit(0, "wader", 6.5, 12.5);
+  assert.ok(boat && wader);
+  assert.equal(sim.passable(boat, 8.5, 5.5), true);
+  sim.terrain[12 * sim.gw + 8] = TILE_SHALLOW;
+  assert.equal(sim.passable(wader, 8.5, 12.5), true);
   sim.issueMove([open.id], 18.5, 8.5, false);
   for (let i = 0; i < 30; i++) sim.tick(0.1);
-  assert.ok(open.x > slow.x + 0.4, `open ${open.x} vs shallow ${slow.x}`);
+  assert.ok(open.x > 8, `open walker stalled at ${open.x}`);
   const hid = sim.spawnUnit(1, "rifle", 30.5, 30.5);
   assert.ok(hid);
   sim.terrain[30 * sim.gw + 30] = TILE_SCRUB;

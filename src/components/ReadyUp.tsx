@@ -4,6 +4,7 @@ import { FACTION_COLOR, FACTION_NAME, MAP_H, MAP_W, teamStyle, theaterOf, type A
 import { generateMap, MAP_LIST, plantCorners, waterKind } from "@/game/maps";
 import { paintDocThumb, paintTeamShape } from "@/game/render";
 import { TeamPip } from "@/components/TeamPip";
+import { VersionPick } from "@/components/SettingsSheet";
 import {
   CREDIT_CHOICES,
   DIFFICULTY_CHOICES,
@@ -292,6 +293,7 @@ export function ReadyUp({
         <button type="button" data-testid="advanced-rules" className="h-11 min-w-11 px-2 font-display text-xs uppercase text-brass" onClick={() => setRules(true)}>
           Options
         </button>
+        <VersionPick testPrefix="version" />
         <button
           type="button"
           data-testid="practice"

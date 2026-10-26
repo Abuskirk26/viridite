@@ -86,7 +86,7 @@ import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
 import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetFieldAlive, sheetLong } from "@/game/render";
 import { ensureIso, iso } from "@/game/iso";
-import { SheetBody, SheetHead } from "@/components/SettingsSheet";
+import { SheetBody, SheetHead, VersionPick } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
 import { TeamPip } from "@/components/TeamPip";
@@ -100,6 +100,10 @@ import { NetPlay, parseRoomCode } from "@/game/netplay";
 import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
 import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
+import { getRenderMode } from "@/game/render3d/mode";
+import { projectSurface, projectWorld } from "@/game/render3d/camera";
+import { sampleHeight } from "@/game/render3d/terrain";
+import { Scene3D } from "@/game/render3d/scene";
 
 const SAVE_KEY = "viridite-last-match";
 
@@ -111,16 +115,28 @@ interface MatchFile {
 
 const FINGER_LIFT = 72;
 
+/** Ground height for the 3D ray. Flat zero until a match assigns the terrain. */
+let terrainHeight: (x: number, y: number) => number = () => 0;
+
+/** Ground under a pixel. 3D walks the ray onto the hills; 2D keeps the pitched map. */
+function pointerWorld(cam: Camera, view: View, sx: number, sy: number) {
+  if (getRenderMode() === "3d") {
+    const hit = projectSurface(cam, view, sx, sy, terrainHeight);
+    if (hit) return hit;
+  }
+  return screenToWorld(cam, sx, sy, view);
+}
+
 /** World point above the finger so the ghost is not hidden by the hand. */
 function liftedWorld(cam: Camera, view: View, sx: number, sy: number, lift: boolean) {
-  return screenToWorld(cam, sx, lift ? sy - FINGER_LIFT : sy, view);
+  return pointerWorld(cam, view, sx, lift ? sy - FINGER_LIFT : sy);
 }
 
 /** Enemy hall under a finger. A touch also samples above the contact, where the picture sits. */
 function pickStrike(sim: Sim, cam: Camera, view: View, sx: number, sy: number, touch: boolean, viewer: 0) {
   const lifts = touch ? [0, 44, 72] : [0];
   for (const lift of lifts) {
-    const at = screenToWorld(cam, sx, sy - lift, view);
+    const at = pointerWorld(cam, view, sx, sy - lift);
     const b = sim.pickBuilding(at.x, at.y, cam.zoom, viewer);
     if (b && b.hp > 0 && b.rubble <= 0) return b;
   }
@@ -350,7 +366,14 @@ function hintFor(sim: Sim, team: Team = 0): string {
 
 export function GameScreen() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const glRef = useRef<HTMLCanvasElement>(null);
+  const sceneRef = useRef<Scene3D | null>(null);
   const simRef = useRef<Sim | null>(null);
+  terrainHeight = (x, y) => {
+    const live = simRef.current;
+    if (!live) return 0;
+    return sampleHeight(live.terrain, live.gw, live.gh, x, y);
+  };
   const sheetRef = useRef<{ small: HTMLCanvasElement; mid: HTMLCanvasElement | null; full: HTMLCanvasElement | null; key: string } | null>(null);
   const camRef = useRef<Camera>({ x: 32, y: 32, zoom: 48 });
   const viewRef = useRef<View>({ w: 1, h: 1 });
@@ -551,6 +574,11 @@ export function GameScreen() {
 
   const holdForArt = () => {
     if (netRef.current) return;
+    // 3D draws its own ground. Waiting on the 2D bake would sit on "Loading the map" forever.
+    if (getRenderMode() === "3d") {
+      setPrep({ on: false, map: true, figs: true });
+      return;
+    }
     const run = ++prepRun.current;
     pausedRef.current = true;
     setPaused(true);
@@ -869,7 +897,11 @@ export function GameScreen() {
       const dt = Math.min(0.1, (now - last) / 1000);
       last = now;
       setViewPitch(sim.mapId === "palm" ? 1 : 0.68);
-      stepZoom(camRef.current, dt, viewRef.current, sim.gw, sim.gh, wideField(sim.mapSize));
+      const mode3d = getRenderMode() === "3d";
+      const project = mode3d
+        ? (sx: number, sy: number) => projectSurface(camRef.current, viewRef.current, sx, sy, terrainHeight)
+        : undefined;
+      stepZoom(camRef.current, dt, viewRef.current, sim.gw, sim.gh, wideField(sim.mapSize), project);
       stepInertia(camRef.current, dt, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
       if (!pausedRef.current && phaseRef.current === "play" && sim.outcome === "playing") {
         const net = netRef.current;
@@ -954,7 +986,9 @@ export function GameScreen() {
       const had = sheetRef.current?.key === sheetKey;
       let pack = sheetRef.current;
       const big = Math.max(sim.gw, sim.gh);
-      if (!had) {
+      if (mode3d) {
+        pack = null;
+      } else if (!had) {
         const full = bakeTerrain(
           sim.terrain,
           sim.gw,
@@ -965,26 +999,40 @@ export function GameScreen() {
         pack = full ? { small: full, mid: null, full, key: sheetKey } : null;
         sheetRef.current = pack;
       }
-      const image = pack?.full ?? pack?.small ?? null;
+      const image = mode3d ? null : pack?.full ?? pack?.small ?? null;
       const sheet = image ? { image, tw: image.width, th: image.height } : null;
+      const drawUi = {
+        selected: selRef.current,
+        buildingId: selBRef.current,
+        placing: placingRef.current,
+        hover,
+        ghost,
+        wallRun,
+        box: draftRef.current.box,
+        shake: shakeRef.current,
+        viewer: viewerRef.current,
+        placeGrid: true,
+        touchPlace: touchPlaceRef.current,
+        glass: mode3d ? ("3d" as const) : ("2d" as const),
+        project: mode3d
+          ? (wx: number, wy: number) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy))
+          : undefined,
+      };
+      if (mode3d && glRef.current) {
+        glRef.current.style.display = "block";
+        if (!sceneRef.current) sceneRef.current = new Scene3D(glRef.current);
+        sceneRef.current.resize(w, h);
+        sceneRef.current.sync(sim, camRef.current, viewRef.current, drawUi, alpha);
+        window.__viridite3d = { fps: sceneRef.current.fps, rebuild: () => sceneRef.current?.rebuild() };
+      } else if (glRef.current) {
+        glRef.current.style.display = "none";
+      }
       drawGame(
         ctx,
         sim,
         camRef.current,
         viewRef.current,
-        {
-          selected: selRef.current,
-          buildingId: selBRef.current,
-          placing: placingRef.current,
-          hover,
-          ghost,
-          wallRun,
-          box: draftRef.current.box,
-          shake: shakeRef.current,
-          viewer: viewerRef.current,
-          placeGrid: true,
-          touchPlace: touchPlaceRef.current,
-        },
+        drawUi,
         alpha,
         null,
         null,
@@ -1031,7 +1079,7 @@ export function GameScreen() {
         const sim = simRef.current;
         if (!sim || placingRef.current || rallyRef.current) return "immediate";
         if (minimapHit(sx, sy, viewRef.current, sim.gw, sim.gh, wideField(sim.mapSize))) return "immediate";
-        const world = screenToWorld(camRef.current, sx, sy, viewRef.current);
+        const world = pointerWorld(camRef.current, viewRef.current, sx, sy);
         if (sim.pickAt(world.x, world.y, camRef.current.zoom, viewerRef.current as 0)) return "immediate";
         if (armRef.current || selectRef.current) return "immediate";
         return selRef.current.length ? "delay" : "immediate";
@@ -1085,7 +1133,15 @@ export function GameScreen() {
           draftRef.current.hoverY,
           false,
         );
-        const box = placeChrome(camRef.current, viewRef.current, show.tx, show.ty, BUILDINGS[kind].w, BUILDINGS[kind].h);
+        const box = placeChrome(
+          camRef.current,
+          viewRef.current,
+          show.tx,
+          show.ty,
+          BUILDINGS[kind].w,
+          BUILDINGS[kind].h,
+          getRenderMode() === "3d" ? (wx, wy) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy)) : undefined,
+        );
         const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
         if (hit(box.confirm)) return "confirm";
         if (hit(box.cancel)) return "cancel";
@@ -1114,6 +1170,8 @@ export function GameScreen() {
         if (netRef.current) setPlacing(null);
         setFrame((n) => n + 1);
       },
+      projectGround: (sx, sy) =>
+        getRenderMode() === "3d" ? projectSurface(camRef.current, viewRef.current, sx, sy, terrainHeight) : null,
       onWall: (screenPts) => {
         const sim = simRef.current;
         const kind = placingRef.current;
@@ -1142,8 +1200,8 @@ export function GameScreen() {
         setSelecting(false);
         selectRef.current = false;
         if (!sim || pausedRef.current || placingRef.current || armRef.current) return;
-        const a = screenToWorld(camRef.current, box.x0, box.y0, viewRef.current);
-        const b = screenToWorld(camRef.current, box.x1, box.y1, viewRef.current);
+        const a = pointerWorld(camRef.current, viewRef.current, box.x0, box.y0);
+        const b = pointerWorld(camRef.current, viewRef.current, box.x1, box.y1);
         const ids = sim.unitsInRect(a.x, a.y, b.x, b.y, viewerRef.current as 0);
         setSel(ids);
         setSelB(null);
@@ -1160,7 +1218,7 @@ export function GameScreen() {
         selectRef.current = false;
         if (!sim || pausedRef.current || phaseRef.current !== "play") return;
         unlockAudio();
-        const world = screenToWorld(camRef.current, sx, sy, viewRef.current);
+        const world = pointerWorld(camRef.current, viewRef.current, sx, sy);
         const me = viewerRef.current as 0;
         if (chatRef.current) {
           const mark = chatRef.current;
@@ -1752,7 +1810,8 @@ export function GameScreen() {
             )}
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
-              <canvas ref={canvasRef} className="h-full w-full touch-none" data-testid="battlefield" />
+              <canvas ref={glRef} className="pointer-events-none absolute inset-0 hidden h-full w-full" data-testid="battlefield-3d" />
+              <canvas ref={canvasRef} className="relative z-[1] h-full w-full touch-none" data-testid="battlefield" />
               <div
                 data-testid="alert-lane"
                 className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
@@ -1939,28 +1998,33 @@ export function GameScreen() {
                 </div>
               )}
               {paused && phase === "play" && !pauseSheet && (
-                <Overlay title="Paused">
-                  <PauseSound />
+                <Overlay title="Paused" fit>
+                  <div className="flex items-center justify-center gap-2">
+                    <p className="font-display text-xs uppercase tracking-wide text-brass">View</p>
+                    <VersionPick testPrefix="pause-version" dense />
+                  </div>
                   <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
                     Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
                   </p>
-                  <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
-                    {botBrief(sim)}
-                  </p>
                   <BarButton
                     label="Resume"
+                    slim
                     onClick={() => {
                       unlockAudio();
                       setPaused(false);
                     }}
                   >
-                    <Play className="size-5" /> Resume
+                    <Play className="size-4" /> Resume
                   </BarButton>
-                  <p data-testid="pause-rules" className="max-w-xs text-center text-sm text-pretty text-gold">
+                  <p data-testid="pause-ai" className="line-clamp-2 max-w-xs text-center text-xs text-pretty text-gold">
+                    {botBrief(sim)}
+                  </p>
+                  <PauseSound />
+                  <p data-testid="pause-rules" className="max-w-xs text-center text-xs text-pretty text-gold">
                     {SIZE_LABEL[sim.mapSize]} · {sim.gw}² · {TEAM_LABEL[sim.teamMode]} ·{" "}
                     {sim.sharedVision ? "shared sight" : "own sight"}
                   </p>
-                  <p className="max-w-xs text-center text-xs text-pretty text-muted">
+                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-muted">
                     {sim.mapName} · {FACTION_NAME[sim.playerFaction]} vs {FACTION_NAME[sim.enemyFaction]}
                     {sim.opponents >= 2 ? ` · East ${FACTION_NAME[sim.factionOf(2)]}` : ""}
                     {sim.opponents >= 3 ? ` · South ${FACTION_NAME[sim.factionOf(3)]}` : ""} ·{" "}
@@ -1968,26 +2032,28 @@ export function GameScreen() {
                     {sim.difficulty} · {sim.fogOn ? "fog" : "no fog"} · {sim.cratesOn ? "crates" : "no crates"} ·{" "}
                     {sim.wallsOn ? "walls" : "no walls"} · {START_LABEL[sim.startPos]} · {optsRef.current.speed}×
                   </p>
-                  <p className="max-w-xs text-center text-xs text-pretty text-brass">
+                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-brass">
                     {packById(doctrineOf()).name}. Restart same rules. Doctrine stays locked.
                   </p>
-                  <BarButton label="Match settings" testId="pause-settings" onClick={() => setPauseSheet(true)}>
+                  <BarButton label="Match settings" slim testId="pause-settings" onClick={() => setPauseSheet(true)}>
                     Settings
                   </BarButton>
                   <BarButton
                     label="Resume"
+                    slim
                     onClick={() => {
                       unlockAudio();
                       setPaused(false);
                     }}
                   >
-                    <Play className="size-5" /> Resume
+                    <Play className="size-4" /> Resume
                   </BarButton>
-                  <BarButton label="Restart with these rules" testId="restart-skirmish" onClick={restartSame}>
-                    <RotateCcw className="size-5" /> Restart
+                  <BarButton label="Restart with these rules" slim testId="restart-skirmish" onClick={restartSame}>
+                    <RotateCcw className="size-4" /> Restart
                   </BarButton>
                   <BarButton
                     label="Save and leave"
+                    slim
                     onClick={() => {
                       if (simRef.current) writeSave(simRef.current, camRef.current);
                       setHasSave(true);
@@ -3985,6 +4051,7 @@ function BarButton({
   dense = false,
   tile = false,
   block = false,
+  slim = false,
 }: {
   children: ReactNode;
   label: string;
@@ -3994,6 +4061,7 @@ function BarButton({
   dense?: boolean;
   tile?: boolean;
   block?: boolean;
+  slim?: boolean;
 }) {
   return (
     <button
@@ -4003,11 +4071,15 @@ function BarButton({
       disabled={disabled}
       onClick={onClick}
       className={`bevel-btn flex shrink-0 items-center justify-center font-display uppercase tracking-wide disabled:text-muted ${
-        block ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs" : dense
-          ? "h-11 min-h-11 min-w-11 gap-1 px-2 text-xs"
-          : tile
-            ? "h-12 min-h-12 min-w-12 gap-1.5 px-2.5 text-sm"
-            : "h-11 min-h-11 min-w-11 gap-1 px-3 text-xs"
+        slim
+          ? "h-9 min-h-0 min-w-11 gap-1 px-2 text-[11px]"
+          : block
+            ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs"
+            : dense
+              ? "h-11 min-h-11 min-w-11 gap-1 px-2 text-xs"
+              : tile
+                ? "h-12 min-h-12 min-w-12 gap-1.5 px-2.5 text-sm"
+                : "h-11 min-h-11 min-w-11 gap-1 px-3 text-xs"
       }`}
     >
       {children}
@@ -4041,10 +4113,20 @@ function IconButton({
   );
 }
 
-function Overlay({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) {
+function Overlay({ title, children, wide = false, fit = false }: { title: string; children: ReactNode; wide?: boolean; fit?: boolean }) {
+  if (fit) {
+    return (
+      <div className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-field/80" data-testid="match-end">
+        <div className={`steel mx-auto my-1 flex w-full flex-col items-center gap-1 px-3 py-2 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+          <h2 data-testid="match-end-title" className="font-display text-xl uppercase tracking-widest text-gold">{title}</h2>
+          {children}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2" data-testid="match-end">
-      <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+      <div className={`steel flex max-h-full min-h-0 w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
         <h2 data-testid="match-end-title" className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
@@ -4117,9 +4199,9 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
 
 function PauseSound() {
   return (
-    <div className="flex w-full flex-col gap-2" data-testid="pause-audio">
+    <div className="flex w-full flex-col gap-1" data-testid="pause-audio">
       <p className="text-center font-display text-[10px] uppercase tracking-widest text-brass">Sound</p>
-      <AudioBuses live showMute />
+      <AudioBuses live showMute dense />
     </div>
   );
 }
@@ -4160,5 +4242,6 @@ function SpeedControl({ speed, onChange, compact = false }: { speed: number; onC
 declare global {
   interface Window {
     __viridite?: { sim: Sim | null; camera: Camera };
+    __viridite3d?: { fps: number; rebuild: () => void };
   }
 }
