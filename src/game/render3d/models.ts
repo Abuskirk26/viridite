@@ -392,8 +392,19 @@ export function treeGeometry(species: "broad" | "pine" | "bush" | "palm"): THREE
     m.scale.set(0.55, 0.4, 0.55);
     g.add(m);
   } else if (species === "pine") {
-    cyl(g, "trunk", 0, 0.28, 0, 0.1, 0.45, 0.1);
-    cone(g, "pine", 0, 0.78, 0, 0.55, 0.75, 0.55);
+    cyl(g, "trunk", 0, 0.35, 0, 0.08, 0.7, 0.08);
+    const low = new THREE.Mesh(ICO, PAINT.pine);
+    low.position.set(0, 0.7, 0);
+    low.scale.set(0.55, 0.38, 0.55);
+    g.add(low);
+    const mid = new THREE.Mesh(ICO, PAINT.pine);
+    mid.position.set(0, 1.05, 0);
+    mid.scale.set(0.4, 0.32, 0.4);
+    g.add(mid);
+    const tip = new THREE.Mesh(ICO, PAINT.leaf);
+    tip.position.set(0, 1.32, 0);
+    tip.scale.set(0.24, 0.22, 0.24);
+    g.add(tip);
   } else if (species === "palm") {
     cyl(g, "trunk", 0, 0.5, 0, 0.08, 0.95, 0.08);
     box(g, "palm", 0.24, 0.98, 0, 0.5, 0.04, 0.12);
@@ -402,9 +413,13 @@ export function treeGeometry(species: "broad" | "pine" | "bush" | "palm"): THREE
   } else {
     cyl(g, "trunk", 0, 0.3, 0, 0.12, 0.5, 0.12);
     const m = new THREE.Mesh(ICO, PAINT.leaf);
-    m.position.set(0, 0.78, 0);
-    m.scale.set(0.72, 0.55, 0.72);
+    m.position.set(0, 0.85, 0);
+    m.scale.set(0.62, 0.48, 0.62);
     g.add(m);
+    const side = new THREE.Mesh(ICO, PAINT.leaf);
+    side.position.set(0.28, 0.7, 0.1);
+    side.scale.set(0.38, 0.32, 0.38);
+    g.add(side);
   }
   return baked(g);
 }

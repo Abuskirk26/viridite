@@ -23,7 +23,7 @@ const TABS: { id: SheetTab; label: string }[] = [
 ];
 
 /** 2D or 3D. The same control is on the skirmish bar, the pause menu, and Video. */
-export function VersionPick({ testPrefix = "version" }: { testPrefix?: string }) {
+export function VersionPick({ testPrefix = "version", dense = false }: { testPrefix?: string; dense?: boolean }) {
   const [mode, setMode] = useState<RenderMode>(() => getRenderMode());
   useEffect(() => subscribeRenderMode(setMode), []);
   const choice = (id: RenderMode, label: string) => (
@@ -31,7 +31,7 @@ export function VersionPick({ testPrefix = "version" }: { testPrefix?: string })
       type="button"
       data-testid={`${testPrefix}-${id}`}
       aria-pressed={mode === id}
-      className={`h-11 min-w-14 px-3 font-display text-xs uppercase tracking-wide ${
+      className={`${dense ? "h-9 min-w-12 px-2 text-[11px]" : "h-11 min-w-14 px-3 text-xs"} font-display uppercase tracking-wide ${
         mode === id ? "bg-crystal text-crystal-ink" : "bg-field text-ink"
       }`}
       onClick={() => setRenderMode(id)}

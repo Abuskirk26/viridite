@@ -11,10 +11,12 @@ import type { Camera, View } from "../view.ts";
 
 export const CAM_PITCH = (52 * Math.PI) / 180;
 export const CAM_FOV = (46 * Math.PI) / 180;
+/** Wider than the 2D zoom so a landscape phone shows the base and the field past it. */
+export const CAM_SPAN = 1.58;
 
 export function eyeOf(cam: Camera, view: View): { x: number; y: number; z: number } {
   const aspect = Math.max(0.2, view.w / Math.max(1, view.h));
-  const span = view.w / Math.max(1, cam.zoom);
+  const span = (view.w / Math.max(1, cam.zoom)) * CAM_SPAN;
   const dist = span / (2 * Math.tan(CAM_FOV / 2) * aspect);
   return {
     x: cam.x,

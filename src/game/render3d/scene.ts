@@ -24,7 +24,13 @@ export interface SceneUi {
   viewer: number;
 }
 
-const RING = new THREE.TorusGeometry(0.42, 0.028, 5, 16);
+const MARK = new THREE.TorusGeometry(1, 0.045, 8, 28);
+const SELECT = new THREE.TorusGeometry(1.05, 0.075, 8, 36);
+const SELECT_MAT = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+const INFANTRY = new Set(["rifle", "rocket", "marksman", "wader", "engineer", "vanguard"]);
+const VEHICLE = new Set(["scout", "tank", "scatter", "medium", "artillery", "apc", "razor", "harvester", "mcv"]);
+const SEA = new Set(["gunboat", "frigate", "missile", "transport"]);
+const AIR = new Set(["chinook", "attackheli", "bomber"]);
 const BARS = new Map<number, THREE.SpriteMaterial>();
 
 function barMaterial(pct: number): THREE.SpriteMaterial {
@@ -46,6 +52,24 @@ function barMaterial(pct: number): THREE.SpriteMaterial {
   const mat = new THREE.SpriteMaterial({ map, transparent: true, depthTest: true });
   BARS.set(bucket, mat);
   return mat;
+}
+
+function softPuff(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    const glow = ctx.createRadialGradient(32, 32, 1, 32, 32, 30);
+    glow.addColorStop(0, "rgba(255,255,255,0.95)");
+    glow.addColorStop(0.35, "rgba(255,255,255,0.45)");
+    glow.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, 64, 64);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 function teamMat(team: number): THREE.MeshStandardMaterial {
@@ -72,10 +96,14 @@ export class Scene3D {
   private loader = new GLTFLoader();
   private ghost: THREE.Mesh;
   private walls: THREE.Mesh[] = [];
-  private pGeo: THREE.BufferGeometry;
-  private pPos: Float32Array;
-  private pCol: Float32Array;
+  private smokeGeo: THREE.BufferGeometry;
+  private flameGeo: THREE.BufferGeometry;
+  private sPos: Float32Array;
+  private sCol: Float32Array;
+  private fPos: Float32Array;
+  private fCol: Float32Array;
   private readonly pMax = 420;
+  private treeLib = new Map<string, THREE.BufferGeometry>();
   private fogGeo: THREE.BufferGeometry;
   private fogPos: Float32Array;
   private fogCol: Float32Array;
@@ -92,19 +120,22 @@ export class Scene3D {
     });
     this.renderer.setClearColor(0x8eafc4, 1);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.BasicShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.scene.fog = new THREE.FogExp2(0x9eb6c8, 0.011);
     this.scene.add(new THREE.HemisphereLight(0xc5d4e0, 0x3d3428, 0.62));
     this.scene.add(new THREE.AmbientLight(0x66707c, 0.22));
     this.sun = new THREE.DirectionalLight(0xfff1d4, 1.65);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(1024, 1024);
+    this.sun.shadow.mapSize.set(256, 256);
     this.sun.shadow.camera.near = 4;
     this.sun.shadow.camera.far = 160;
-    this.sun.shadow.camera.left = -36;
-    this.sun.shadow.camera.right = 36;
-    this.sun.shadow.camera.top = 36;
-    this.sun.shadow.camera.bottom = -36;
+    this.sun.shadow.camera.left = -22;
+    this.sun.shadow.camera.right = 22;
+    this.sun.shadow.camera.top = 22;
+    this.sun.shadow.camera.bottom = -22;
     this.sun.shadow.bias = -0.00045;
     this.sun.shadow.normalBias = 0.04;
     this.scene.add(this.sun);
@@ -119,17 +150,50 @@ export class Scene3D {
     this.ghost.visible = false;
     this.ghost.renderOrder = 3;
     this.scene.add(this.ghost);
-    this.pPos = new Float32Array(this.pMax * 3);
-    this.pCol = new Float32Array(this.pMax * 3);
-    this.pGeo = new THREE.BufferGeometry();
-    this.pGeo.setAttribute("position", new THREE.BufferAttribute(this.pPos, 3));
-    this.pGeo.setAttribute("color", new THREE.BufferAttribute(this.pCol, 3));
-    const points = new THREE.Points(
-      this.pGeo,
-      new THREE.PointsMaterial({ size: 0.28, vertexColors: true, transparent: true, depthWrite: false, sizeAttenuation: true }),
+    const puff = softPuff();
+    this.sPos = new Float32Array(this.pMax * 3);
+    this.sCol = new Float32Array(this.pMax * 3);
+    this.fPos = new Float32Array(this.pMax * 3);
+    this.fCol = new Float32Array(this.pMax * 3);
+    this.smokeGeo = new THREE.BufferGeometry();
+    this.smokeGeo.setAttribute("position", new THREE.BufferAttribute(this.sPos, 3));
+    this.smokeGeo.setAttribute("color", new THREE.BufferAttribute(this.sCol, 3));
+    this.flameGeo = new THREE.BufferGeometry();
+    this.flameGeo.setAttribute("position", new THREE.BufferAttribute(this.fPos, 3));
+    this.flameGeo.setAttribute("color", new THREE.BufferAttribute(this.fCol, 3));
+    const smoke = new THREE.Points(
+      this.smokeGeo,
+      new THREE.PointsMaterial({
+        map: puff,
+        size: 1.7,
+        vertexColors: true,
+        transparent: true,
+        depthWrite: false,
+        sizeAttenuation: true,
+        alphaTest: 0.04,
+      }),
     );
-    points.frustumCulled = false;
-    this.scene.add(points);
+    const flame = new THREE.Points(
+      this.flameGeo,
+      new THREE.PointsMaterial({
+        map: puff,
+        size: 0.95,
+        vertexColors: true,
+        transparent: true,
+        depthWrite: false,
+        sizeAttenuation: true,
+        blending: THREE.AdditiveBlending,
+        alphaTest: 0.05,
+      }),
+    );
+    smoke.frustumCulled = false;
+    flame.frustumCulled = false;
+    this.scene.add(smoke);
+    this.scene.add(flame);
+    this.loadTree("broad", "/art/models/tree-broad.glb");
+    this.loadTree("pine", "/art/models/tree-pine.glb");
+    this.loadTree("palm", "/art/models/tree-palm.glb");
+    this.loadTree("bush", "/art/models/tree-bush.glb");
     const verts = (this.fogC + 1) * (this.fogR + 1);
     this.fogPos = new Float32Array(verts * 3);
     this.fogCol = new Float32Array(verts * 4);
@@ -191,6 +255,7 @@ export class Scene3D {
       }
       this.pack = buildGround(sim);
       this.hash = hash;
+      this.applyTrees(cam);
       this.scene.add(this.pack.root);
     }
     const eye = eyeOf(cam, view);
@@ -202,6 +267,8 @@ export class Scene3D {
     this.camera.updateProjectionMatrix();
     this.sun.position.set(cam.x - 34, 62, cam.y - 22);
     this.sun.target.position.set(cam.x, 0, cam.y);
+    this.shade(cam);
+    this.applyTrees(cam);
     if (this.pack) {
       this.pack.water.value = sim.time;
       this.pack.foam.value = sim.time;
@@ -224,6 +291,7 @@ export class Scene3D {
     const g = src ? (src.clone(true) as THREE.Group) : placeholder(kind);
     g.userData.kind = kind;
     g.userData.gen = this.gen.get(kind) ?? 0;
+    g.userData.fitted = !!src?.userData.fitted;
     g.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (mesh.isMesh) {
@@ -243,13 +311,14 @@ export class Scene3D {
       modelUrl(kind),
       (gltf) => {
         const src = gltf.scene;
+        src.rotation.y = Math.PI / 2;
+        this.sit(src);
         const box = new THREE.Box3().setFromObject(src);
         const size = box.getSize(new THREE.Vector3());
-        const span = Math.max(size.x, size.y, size.z, 0.001);
-        src.scale.multiplyScalar(1 / span);
-        const fitted = new THREE.Box3().setFromObject(src);
-        src.position.sub(fitted.getCenter(new THREE.Vector3()));
-        src.position.y += (fitted.max.y - fitted.min.y) * 0.5 * src.scale.y;
+        src.scale.multiplyScalar(this.targetSpan(kind, size));
+        this.sit(src);
+        this.pennant(src);
+        src.userData.fitted = true;
         this.sources.set(kind, src);
         this.gen.set(kind, (this.gen.get(kind) ?? 0) + 1);
       },
@@ -260,15 +329,128 @@ export class Scene3D {
     );
   }
 
+  private sit(src: THREE.Object3D) {
+    src.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(src);
+    const center = box.getCenter(new THREE.Vector3());
+    src.position.x -= center.x;
+    src.position.z -= center.z;
+    src.position.y -= box.min.y;
+  }
+
+  private targetSpan(kind: string, size: THREE.Vector3): number {
+    const def = BUILDINGS[kind as BuildingId];
+    const horizontal = Math.max(size.x, size.z, 0.001);
+    const height = Math.max(size.y, 0.001);
+    if (def) return (Math.max(def.w, def.h) * 0.9) / horizontal;
+    if (kind === "span") return 2.4 / horizontal;
+    if (AIR.has(kind)) return 2.05 / horizontal;
+    if (SEA.has(kind)) return 2.15 / horizontal;
+    if (VEHICLE.has(kind)) return 1.65 / horizontal;
+    if (INFANTRY.has(kind)) return 0.95 / height;
+    return 1.2 / horizontal;
+  }
+
+  private pennant(src: THREE.Object3D) {
+    let has = false;
+    src.traverse((o) => {
+      if (o.name === "team") has = true;
+    });
+    if (has) return;
+    const box = new THREE.Box3().setFromObject(src);
+    const size = box.getSize(new THREE.Vector3());
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.45, emissive: 0xffffff, emissiveIntensity: 0.12 }),
+    );
+    mesh.name = "team";
+    mesh.scale.set(Math.max(0.08, size.x * 0.14), Math.max(0.05, size.y * 0.08), Math.max(0.08, size.z * 0.14));
+    mesh.position.set(0, size.y * 0.72, 0);
+    src.add(mesh);
+  }
+
+  private loadTree(species: string, url: string) {
+    this.loader.load(
+      url,
+      (gltf) => {
+        let geo: THREE.BufferGeometry | null = null;
+        gltf.scene.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (!geo && mesh.isMesh) geo = mesh.geometry;
+        });
+        if (!geo) return;
+        this.treeLib.set(species, geo);
+        this.applyTrees();
+      },
+      undefined,
+      () => {
+        /* procedural trees stay until the file arrives */
+      },
+    );
+  }
+
+  private applyTrees(cam?: Camera) {
+    if (!this.pack) return;
+    this.pack.root.traverse((o) => {
+      const species = o.userData.species as string | undefined;
+      const mesh = o as THREE.InstancedMesh;
+      if (!species || !mesh.isInstancedMesh) return;
+      const fancy = this.treeLib.get(species);
+      const plain = o.userData.plain as THREE.BufferGeometry | undefined;
+      const dx = ((o.userData.cx as number) ?? 0) - (cam?.x ?? 0);
+      const dz = ((o.userData.cz as number) ?? 0) - (cam?.y ?? 0);
+      const near = !!cam && dx * dx + dz * dz < 14 * 14;
+      const useFancy = !!(fancy && near && mesh.count <= 36);
+      const next = useFancy ? fancy : plain;
+      if (!next || mesh.geometry === next) return;
+      mesh.geometry = next;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (!mat) return;
+      mat.vertexColors = useFancy;
+      if (!useFancy) mat.color?.set(species === "pine" ? 0x24563a : species === "palm" ? 0x3c8a40 : species === "bush" ? 0x4a7a32 : 0x2f6a34);
+      else mat.color?.set(0xffffff);
+      const white = new THREE.Color(1, 1, 1);
+      if (useFancy) {
+        for (let i = 0; i < mesh.count; i++) mesh.setColorAt(i, white);
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
+    });
+  }
+
+  private shade(cam: Camera) {
+    this.scene.traverse((o) => {
+      const role = o.userData.role;
+      if (role !== "skirt" && role !== "tree") return;
+      const dx = (o.userData.cx as number) - cam.x;
+      const dz = (o.userData.cz as number) - cam.y;
+      const dist = dx * dx + dz * dz;
+      if (role === "skirt") {
+        (o as THREE.Mesh).castShadow = dist < 18 * 18;
+        return;
+      }
+      const count = (o as THREE.InstancedMesh).count ?? 1;
+      (o as THREE.Mesh).castShadow = count <= 8 && dist < 10 * 10;
+    });
+  }
+
   private adorn(g: THREE.Group, team: number, barY: number) {
-    const ring = new THREE.Mesh(RING, TEAM_MAT[team] ?? TEAM_MAT[0]!);
+    const ring = new THREE.Mesh(MARK, TEAM_MAT[team] ?? TEAM_MAT[0]!);
     ring.rotation.x = Math.PI / 2;
-    ring.position.y = 0.05;
+    ring.position.y = 0.06;
     ring.name = "mark";
     ring.castShadow = false;
+    ring.renderOrder = 2;
     g.add(ring);
+    const pick = new THREE.Mesh(SELECT, SELECT_MAT);
+    pick.rotation.x = Math.PI / 2;
+    pick.position.y = 0.12;
+    pick.name = "select";
+    pick.visible = false;
+    pick.castShadow = false;
+    pick.renderOrder = 3;
+    g.add(pick);
     const hp = new THREE.Sprite(barMaterial(1));
-    hp.scale.set(0.72, 0.08, 1);
+    hp.scale.set(0.7, 0.086, 1);
     hp.position.y = barY;
     hp.name = "hp";
     hp.visible = false;
@@ -294,19 +476,33 @@ export class Scene3D {
       const y = u.py + (u.y - u.py) * alpha;
       const ground = sampleHeight(sim.terrain, sim.gw, sim.gh, x, y);
       const alt = u.loco === "air" ? ground + 2.5 : u.loco === "sea" ? 0.18 : ground;
+      if (!g.userData.fitted) g.scale.setScalar(1.7);
       g.position.set(x, alt, y);
       g.rotation.y = -u.facing;
       paintTeam(g, u.team);
+      const world = 1 / Math.max(0.001, g.scale.x);
       const mark = g.getObjectByName("mark") as THREE.Mesh | undefined;
-      if (mark) mark.material = TEAM_MAT[u.team] ?? TEAM_MAT[0]!;
+      if (mark) {
+        mark.material = TEAM_MAT[u.team] ?? TEAM_MAT[0]!;
+        const markR = INFANTRY.has(u.kind) ? 0.52 : AIR.has(u.kind) ? 1.15 : 0.95;
+        mark.scale.set(world * markR, world * markR, world * markR);
+        mark.position.y = 0.05 * world;
+      }
       const selected = ui.selected.includes(u.id);
+      const pick = g.getObjectByName("select");
+      if (pick) {
+        pick.visible = selected;
+        pick.scale.set(world, world, world);
+        pick.position.y = 0.12 * world;
+      }
       const damaged = u.maxHp > 0 && u.hp < u.maxHp - 0.5;
       const hp = g.getObjectByName("hp") as THREE.Sprite | undefined;
       if (hp) {
         hp.visible = damaged || selected;
         if (hp.visible) {
           hp.material = barMaterial(u.maxHp > 0 ? u.hp / u.maxHp : 1);
-          hp.position.y = u.loco === "air" ? 0.85 : 0.95;
+          hp.position.y = (u.loco === "air" ? 1.7 : 1.25) * world;
+          hp.scale.set(0.72 * world, 0.09 * world, 1);
         }
       }
       const spin = sim.time * 16;
@@ -340,21 +536,29 @@ export class Scene3D {
       const h = sampleHeight(sim.terrain, sim.gw, sim.gh, b.tx + b.w / 2, b.ty + b.h / 2);
       g.position.set(b.tx + b.w / 2, b.kind === "span" ? Math.max(h, 0.42) : h, b.ty + b.h / 2);
       paintTeam(g, b.team);
+      const world = 1 / Math.max(0.001, g.scale.x);
       const mark = g.getObjectByName("mark") as THREE.Mesh | undefined;
       if (mark) {
         mark.material = TEAM_MAT[b.team] ?? TEAM_MAT[0]!;
-        const s = Math.max(b.w, b.h) * 0.85;
-        mark.scale.set(s, 1, s);
+        mark.scale.set(world * 0.62, world * 0.62, world * 0.62);
+        mark.position.y = 0.06 * world;
       }
       const picked = ui.buildingId === b.id;
+      const pick = g.getObjectByName("select");
+      if (pick) {
+        pick.visible = picked && b.kind !== "span";
+        const s = Math.max(b.w, b.h) * 0.55 * world;
+        pick.scale.set(s, s, s);
+        pick.position.y = 0.14 * world;
+      }
       const damaged = b.maxHp > 0 && b.hp < b.maxHp - 0.5;
       const hp = g.getObjectByName("hp") as THREE.Sprite | undefined;
       if (hp) {
         hp.visible = (damaged || picked) && b.kind !== "span";
         if (hp.visible) {
           hp.material = barMaterial(b.maxHp > 0 ? b.hp / b.maxHp : 1);
-          hp.position.y = 1.35;
-          hp.scale.set(Math.min(1.4, 0.45 * Math.max(b.w, b.h)), 0.09, 1);
+          hp.position.y = Math.max(1.3, Math.max(b.w, b.h) * 0.7) * world;
+          hp.scale.set(Math.min(1.2, 0.42 * Math.max(b.w, b.h)) * world, 0.086 * world, 1);
         }
       }
     }
@@ -398,35 +602,47 @@ export class Scene3D {
   }
 
   private syncFx(sim: Sim, alpha: number) {
-    let n = 0;
-    const put = (x: number, y: number, z: number, r: number, g: number, b: number) => {
-      if (n >= this.pMax) return;
-      const i = n * 3;
-      this.pPos[i] = x;
-      this.pPos[i + 1] = y;
-      this.pPos[i + 2] = z;
-      this.pCol[i] = r;
-      this.pCol[i + 1] = g;
-      this.pCol[i + 2] = b;
-      n++;
+    let smokeN = 0;
+    let flameN = 0;
+    const smoke = (x: number, y: number, z: number, r: number, g: number, b: number) => {
+      if (smokeN >= this.pMax) return;
+      const i = smokeN * 3;
+      this.sPos[i] = x;
+      this.sPos[i + 1] = y;
+      this.sPos[i + 2] = z;
+      this.sCol[i] = r;
+      this.sCol[i + 1] = g;
+      this.sCol[i + 2] = b;
+      smokeN++;
+    };
+    const flame = (x: number, y: number, z: number, r: number, g: number, b: number) => {
+      if (flameN >= this.pMax) return;
+      const i = flameN * 3;
+      this.fPos[i] = x;
+      this.fPos[i + 1] = y;
+      this.fPos[i + 2] = z;
+      this.fCol[i] = r;
+      this.fCol[i + 1] = g;
+      this.fCol[i + 2] = b;
+      flameN++;
     };
     for (const f of sim.fx) {
       const k = 1 - f.ttl / Math.max(0.05, f.max);
       const ground = sampleHeight(sim.terrain, sim.gw, sim.gh, f.x, f.y);
       if (f.kind === "boom") {
-        const bits = 5;
-        for (let i = 0; i < bits; i++) {
-          const a = (i / bits) * Math.PI * 2 + k;
-          const rad = f.r * (0.25 + k) * (0.6 + (i % 3) * 0.2);
-          put(f.x + Math.cos(a) * rad, ground + 0.3 + k * 1.3, f.y + Math.sin(a) * rad, 1, 0.55 - k * 0.3, 0.2);
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2 + k;
+          const rad = f.r * (0.2 + k) * (0.55 + (i % 3) * 0.2);
+          flame(f.x + Math.cos(a) * rad * 0.45, ground + 0.2 + k * 0.7, f.y + Math.sin(a) * rad * 0.45, 1, 0.55 - k * 0.25, 0.12);
+          smoke(f.x + Math.cos(a) * rad, ground + 0.45 + k * 1.5, f.y + Math.sin(a) * rad, 0.55, 0.52, 0.48);
         }
       } else if (f.kind === "debris") {
-        put(f.x, ground + 0.4 + k * 0.8, f.y, 0.35, 0.28, 0.22);
+        smoke(f.x, ground + 0.35 + k * 0.9, f.y, 0.4, 0.34, 0.28);
       } else if (f.kind === "muzzle" || f.kind === "flash") {
-        put(f.x, ground + 0.45, f.y, 1, 0.9, 0.55);
+        flame(f.x, ground + 0.4, f.y, 1, 0.82, 0.35);
       } else if (f.kind === "beam") {
-        put(f.x, ground + 0.5, f.y, 0.7, 0.9, 1);
-        put(f.x2, sampleHeight(sim.terrain, sim.gw, sim.gh, f.x2, f.y2) + 0.4, f.y2, 0.7, 0.9, 1);
+        flame(f.x, ground + 0.45, f.y, 0.75, 0.9, 1);
+        flame(f.x2, sampleHeight(sim.terrain, sim.gw, sim.gh, f.x2, f.y2) + 0.4, f.y2, 0.75, 0.9, 1);
       }
     }
     for (const s of sim.shots) {
@@ -434,20 +650,38 @@ export class Scene3D {
       const y = s.py + (s.y - s.py) * alpha;
       const ground = sampleHeight(sim.terrain, sim.gw, sim.gh, x, y);
       const lift = s.arc > 0.6 ? Math.sin(Math.min(1, s.age / Math.max(0.05, s.age + s.ttl)) * Math.PI) * 1.4 : 0.35;
-      put(x, ground + lift, y, s.kind === "rocket" ? 1 : 1, s.kind === "rocket" ? 0.62 : 0.95, 0.45);
+      flame(x, ground + lift, y, 1, s.kind === "rocket" ? 0.55 : 0.9, 0.28);
+      smoke(x, ground + lift + 0.25, y, 0.45, 0.42, 0.4);
     }
     for (const b of sim.buildings) {
       if (b.hp <= 0 || b.maxHp <= 0 || b.hp > b.maxHp * 0.72) continue;
       const x = b.tx + b.w / 2;
       const y = b.ty + b.h / 2;
       const ground = sampleHeight(sim.terrain, sim.gw, sim.gh, x, y);
-      const rise = (sim.time * 0.7 + b.id) % 1.4;
-      put(x + Math.sin(sim.time + b.id) * 0.2, ground + 0.8 + rise, y, 0.25, 0.25, 0.25);
-      if (b.hp < b.maxHp * 0.4) put(x, ground + 0.5, y, 1, 0.4, 0.12);
+      const burning = b.hp < b.maxHp * 0.4;
+      for (let i = 0; i < 4; i++) {
+        const k = (sim.time * 0.55 + b.id * 0.17 + i * 0.25) % 1;
+        const spread = 0.15 + k * 0.45;
+        const ang = b.id + i * 1.7;
+        smoke(x + Math.cos(ang) * spread, ground + 0.35 + k * 1.8, y + Math.sin(ang) * spread, 0.42 + k * 0.2, 0.4 + k * 0.15, 0.38);
+        if (burning && k < 0.62) {
+          flame(
+            x + Math.cos(ang) * spread * 0.35,
+            ground + 0.15 + k * 0.9,
+            y + Math.sin(ang) * spread * 0.35,
+            1,
+            0.42 + (1 - k) * 0.4,
+            0.08,
+          );
+        }
+      }
     }
-    this.pGeo.setDrawRange(0, n);
-    (this.pGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    (this.pGeo.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    this.smokeGeo.setDrawRange(0, smokeN);
+    this.flameGeo.setDrawRange(0, flameN);
+    (this.smokeGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.smokeGeo.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+    (this.flameGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+    (this.flameGeo.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
   }
 
   /** Screen-draped veil. Unexplored ground is dark and covers the trees. Explored ground is a tint. */

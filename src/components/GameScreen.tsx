@@ -1998,32 +1998,33 @@ export function GameScreen() {
                 </div>
               )}
               {paused && phase === "play" && !pauseSheet && (
-                <Overlay title="Paused">
-                  <PauseSound />
+                <Overlay title="Paused" fit>
                   <div className="flex items-center justify-center gap-2">
                     <p className="font-display text-xs uppercase tracking-wide text-brass">View</p>
-                    <VersionPick testPrefix="pause-version" />
+                    <VersionPick testPrefix="pause-version" dense />
                   </div>
                   <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
                     Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
                   </p>
-                  <p data-testid="pause-ai" className="max-w-xs text-center text-sm text-pretty text-gold">
-                    {botBrief(sim)}
-                  </p>
                   <BarButton
                     label="Resume"
+                    slim
                     onClick={() => {
                       unlockAudio();
                       setPaused(false);
                     }}
                   >
-                    <Play className="size-5" /> Resume
+                    <Play className="size-4" /> Resume
                   </BarButton>
-                  <p data-testid="pause-rules" className="max-w-xs text-center text-sm text-pretty text-gold">
+                  <p data-testid="pause-ai" className="line-clamp-2 max-w-xs text-center text-xs text-pretty text-gold">
+                    {botBrief(sim)}
+                  </p>
+                  <PauseSound />
+                  <p data-testid="pause-rules" className="max-w-xs text-center text-xs text-pretty text-gold">
                     {SIZE_LABEL[sim.mapSize]} · {sim.gw}² · {TEAM_LABEL[sim.teamMode]} ·{" "}
                     {sim.sharedVision ? "shared sight" : "own sight"}
                   </p>
-                  <p className="max-w-xs text-center text-xs text-pretty text-muted">
+                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-muted">
                     {sim.mapName} · {FACTION_NAME[sim.playerFaction]} vs {FACTION_NAME[sim.enemyFaction]}
                     {sim.opponents >= 2 ? ` · East ${FACTION_NAME[sim.factionOf(2)]}` : ""}
                     {sim.opponents >= 3 ? ` · South ${FACTION_NAME[sim.factionOf(3)]}` : ""} ·{" "}
@@ -2031,26 +2032,28 @@ export function GameScreen() {
                     {sim.difficulty} · {sim.fogOn ? "fog" : "no fog"} · {sim.cratesOn ? "crates" : "no crates"} ·{" "}
                     {sim.wallsOn ? "walls" : "no walls"} · {START_LABEL[sim.startPos]} · {optsRef.current.speed}×
                   </p>
-                  <p className="max-w-xs text-center text-xs text-pretty text-brass">
+                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-brass">
                     {packById(doctrineOf()).name}. Restart same rules. Doctrine stays locked.
                   </p>
-                  <BarButton label="Match settings" testId="pause-settings" onClick={() => setPauseSheet(true)}>
+                  <BarButton label="Match settings" slim testId="pause-settings" onClick={() => setPauseSheet(true)}>
                     Settings
                   </BarButton>
                   <BarButton
                     label="Resume"
+                    slim
                     onClick={() => {
                       unlockAudio();
                       setPaused(false);
                     }}
                   >
-                    <Play className="size-5" /> Resume
+                    <Play className="size-4" /> Resume
                   </BarButton>
-                  <BarButton label="Restart with these rules" testId="restart-skirmish" onClick={restartSame}>
-                    <RotateCcw className="size-5" /> Restart
+                  <BarButton label="Restart with these rules" slim testId="restart-skirmish" onClick={restartSame}>
+                    <RotateCcw className="size-4" /> Restart
                   </BarButton>
                   <BarButton
                     label="Save and leave"
+                    slim
                     onClick={() => {
                       if (simRef.current) writeSave(simRef.current, camRef.current);
                       setHasSave(true);
@@ -4048,6 +4051,7 @@ function BarButton({
   dense = false,
   tile = false,
   block = false,
+  slim = false,
 }: {
   children: ReactNode;
   label: string;
@@ -4057,6 +4061,7 @@ function BarButton({
   dense?: boolean;
   tile?: boolean;
   block?: boolean;
+  slim?: boolean;
 }) {
   return (
     <button
@@ -4066,11 +4071,15 @@ function BarButton({
       disabled={disabled}
       onClick={onClick}
       className={`bevel-btn flex shrink-0 items-center justify-center font-display uppercase tracking-wide disabled:text-muted ${
-        block ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs" : dense
-          ? "h-11 min-h-11 min-w-11 gap-1 px-2 text-xs"
-          : tile
-            ? "h-12 min-h-12 min-w-12 gap-1.5 px-2.5 text-sm"
-            : "h-11 min-h-11 min-w-11 gap-1 px-3 text-xs"
+        slim
+          ? "h-9 min-h-0 min-w-11 gap-1 px-2 text-[11px]"
+          : block
+            ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs"
+            : dense
+              ? "h-11 min-h-11 min-w-11 gap-1 px-2 text-xs"
+              : tile
+                ? "h-12 min-h-12 min-w-12 gap-1.5 px-2.5 text-sm"
+                : "h-11 min-h-11 min-w-11 gap-1 px-3 text-xs"
       }`}
     >
       {children}
@@ -4104,10 +4113,20 @@ function IconButton({
   );
 }
 
-function Overlay({ title, children, wide = false }: { title: string; children: ReactNode; wide?: boolean }) {
+function Overlay({ title, children, wide = false, fit = false }: { title: string; children: ReactNode; wide?: boolean; fit?: boolean }) {
+  if (fit) {
+    return (
+      <div className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-field/80" data-testid="match-end">
+        <div className={`steel mx-auto my-1 flex w-full flex-col items-center gap-1 px-3 py-2 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+          <h2 data-testid="match-end-title" className="font-display text-xl uppercase tracking-widest text-gold">{title}</h2>
+          {children}
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2" data-testid="match-end">
-      <div className={`steel flex max-h-full w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+      <div className={`steel flex max-h-full min-h-0 w-full flex-col items-center gap-2 overflow-y-auto p-3 ${wide ? "max-w-lg" : "max-w-sm"}`}>
         <h2 data-testid="match-end-title" className="font-display text-2xl uppercase tracking-widest text-gold">{title}</h2>
         {children}
       </div>
@@ -4180,9 +4199,9 @@ function Scoreboard({ sim, viewer }: { sim: Sim; viewer: number }) {
 
 function PauseSound() {
   return (
-    <div className="flex w-full flex-col gap-2" data-testid="pause-audio">
+    <div className="flex w-full flex-col gap-1" data-testid="pause-audio">
       <p className="text-center font-display text-[10px] uppercase tracking-widest text-brass">Sound</p>
-      <AudioBuses live showMute />
+      <AudioBuses live showMute dense />
     </div>
   );
 }
