@@ -77,6 +77,10 @@ export interface DrawUi {
   placeGrid?: boolean;
   /** Finger placement paints Confirm and Cancel beside the ghost. */
   touchPlace?: boolean;
+  /** "3d" leaves the battlefield to WebGL and paints only the screen chrome. */
+  glass?: "2d" | "3d";
+  /** World-to-screen used by Confirm / Cancel when the 3D camera is up. */
+  project?: (wx: number, wy: number) => { x: number; y: number };
 }
 
 function hash(x: number, y: number): number {
@@ -355,6 +359,26 @@ export function drawGame(
 ) {
   VIEWER = ui.viewer === 1 || ui.viewer === 2 || ui.viewer === 3 ? ui.viewer : 0;
   hearAt(cam.x, cam.y);
+  if (ui.glass === "3d") {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    const dpr = ctx.canvas.width / Math.max(1, view.w);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawMinimap(ctx, sim, cam, view);
+    drawPlaceLabel(ctx, sim, cam, view, ui);
+    if (ui.box) {
+      const x = Math.min(ui.box.x0, ui.box.x1);
+      const y = Math.min(ui.box.y0, ui.box.y1);
+      const w = Math.abs(ui.box.x1 - ui.box.x0);
+      const h = Math.abs(ui.box.y1 - ui.box.y0);
+      ctx.strokeStyle = "#7dff9a";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = "rgba(80, 220, 120, 0.14)";
+      ctx.fillRect(x, y, w, h);
+    }
+    return;
+  }
   GW = sim.gw;
   GH = sim.gh;
   THEATER = sim.theater;
@@ -1057,12 +1081,14 @@ export function placeChrome(
   ty: number,
   w: number,
   h = w,
+  project?: (wx: number, wy: number) => { x: number; y: number },
 ): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
   const bw = 112;
   const bh = 48;
   const gap = 10;
-  const a = worldToScreen(cam, tx, ty, view);
-  const b = worldToScreen(cam, tx + w, ty + h, view);
+  const to = project ?? ((x: number, y: number) => worldToScreen(cam, x, y, view));
+  const a = to(tx, ty);
+  const b = to(tx + w, ty + h);
   const left = Math.min(a.x, b.x);
   const right = Math.max(a.x, b.x);
   const top = Math.min(a.y, b.y);
@@ -1166,10 +1192,11 @@ function drawPlaceLabel(
   ui: DrawUi,
 ) {
   if (!ui.placing) return;
+  const to = (x: number, y: number) => (ui.project ? ui.project(x, y) : worldToScreen(cam, x, y, view));
   if (ui.touchPlace) {
     const visual = ui.ghost ?? ui.hover;
     const placed = BUILDINGS[ui.placing];
-    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h));
+    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h, ui.project));
   }
   let tx = 0;
   let ty = 0;
@@ -1196,12 +1223,12 @@ function drawPlaceLabel(
     const secs = def.time >= 10 || Number.isInteger(def.time) ? String(def.time) : def.time.toFixed(1);
     text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
-    const s = worldToScreen(cam, tx + def.w / 2, ty, view);
+    const s = to(tx + def.w / 2, ty);
     const lines = check.ok ? [text, power] : [text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
     return;
   } else return;
-  const s = worldToScreen(cam, tx + 0.5, ty, view);
+  const s = to(tx + 0.5, ty);
   ctx.font = "bold 14px sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "bottom";

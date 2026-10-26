@@ -75,6 +75,11 @@ export interface InputHooks {
   onZoom?: (zoom: number) => void;
   /** Screen-space polyline. A tap is a one-point run. */
   onWall?: (screenPts: { x: number; y: number }[]) => void;
+  /**
+   * When set, one-finger pan tracks the ground under the finger.
+   * Absent on the 2D battlefield, which keeps dx/zoom.
+   */
+  projectGround?: (sx: number, sy: number) => { x: number; y: number } | null;
 }
 
 interface Pt {
@@ -142,14 +147,52 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     hooks.camera.vy = 0;
   };
 
+  const groundDelta = (x0: number, y0: number, x1: number, y1: number, dx: number, dy: number) => {
+    const cam = hooks.camera;
+    const project = hooks.projectGround;
+    if (project) {
+      const a = project(x0, y0);
+      const b = project(x1, y1);
+      if (a && b) return { dxw: b.x - a.x, dyw: b.y - a.y };
+    }
+    return { dxw: dx / cam.zoom, dyw: dy / (cam.zoom * viewPitch()) };
+  };
+
+  const applyPan = (x0: number, y0: number, x1: number, y1: number, dx: number, dy: number) => {
+    const cam = hooks.camera;
+    const view = hooks.getView();
+    const g = grid();
+    const wz = !!hooks.warzone?.();
+    const { dxw, dyw } = groundDelta(x0, y0, x1, y1, dx, dy);
+    cam.x -= dxw;
+    cam.y -= dyw;
+    cam.hold = true;
+    cam.vx = -dxw / 0.18;
+    cam.vy = -dyw / 0.18;
+    clampCamera(cam, g.w, g.h, view, wz);
+  };
+
   const applyPinch = (dist: number, midX: number, midY: number) => {
     const cam = hooks.camera;
     const view = hooks.getView();
     const g = grid();
     const wz = !!hooks.warzone?.();
-    cam.x -= (midX - prevMidX) / cam.zoom;
-    cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
-    seekZoom(cam, midX, midY, view, dist / (prevDist || 1), g.w, g.h, wz);
+    const project = hooks.projectGround;
+    if (project) {
+      const a = project(prevMidX, prevMidY);
+      const b = project(midX, midY);
+      if (a && b) {
+        cam.x -= b.x - a.x;
+        cam.y -= b.y - a.y;
+      } else {
+        cam.x -= (midX - prevMidX) / cam.zoom;
+        cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
+      }
+    } else {
+      cam.x -= (midX - prevMidX) / cam.zoom;
+      cam.y -= (midY - prevMidY) / (cam.zoom * viewPitch());
+    }
+    seekZoom(cam, midX, midY, view, dist / (prevDist || 1), g.w, g.h, wz, project);
     hooks.onZoom?.(cam.aim ?? cam.zoom);
     prevDist = dist || 1;
     prevMidX = midX;
@@ -267,18 +310,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
 
     if (mode === "pan") {
-      const cam = hooks.camera;
-      const view = hooks.getView();
-      const g = grid();
-      const wz = !!hooks.warzone?.();
-      const dxw = dx / cam.zoom;
-      const dyw = dy / (cam.zoom * viewPitch());
-      cam.x -= dxw;
-      cam.y -= dyw;
-      cam.hold = true;
-      cam.vx = -dxw / 0.18;
-      cam.vy = -dyw / 0.18;
-      clampCamera(cam, g.w, g.h, view, wz);
+      applyPan(p.x - dx, p.y - dy, p.x, p.y, dx, dy);
       return;
     }
     if (mode === "minimap") {
@@ -307,18 +339,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
         if (touchPan) {
           mode = "pan";
           fromPending = true;
-          const cam = hooks.camera;
-          const view = hooks.getView();
-          const g = grid();
-          const wz = !!hooks.warzone?.();
-          const dxw = (p.x - cur.px) / cam.zoom;
-          const dyw = (p.y - cur.py) / (cam.zoom * viewPitch());
-          cam.x -= dxw;
-          cam.y -= dyw;
-          cam.hold = true;
-          cam.vx = -dxw / 0.18;
-          cam.vy = -dyw / 0.18;
-          clampCamera(cam, g.w, g.h, view, wz);
+          applyPan(cur.px, cur.py, p.x, p.y, p.x - cur.px, p.y - cur.py);
         } else if (!strike) {
           mode = "box";
           hooks.draft.box = { x0: cur.sx, y0: cur.sy, x1: p.x, y1: p.y };
@@ -443,7 +464,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     const g = grid();
     const factor = Math.exp(-e.deltaY * 0.0016);
     const wz = !!hooks.warzone?.();
-    seekZoom(cam, p.x, p.y, view, factor, g.w, g.h, wz);
+    seekZoom(cam, p.x, p.y, view, factor, g.w, g.h, wz, hooks.projectGround);
     hooks.onZoom?.(cam.aim ?? cam.zoom);
   };
 

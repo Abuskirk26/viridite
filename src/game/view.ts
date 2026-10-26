@@ -155,9 +155,30 @@ export function clampCamera(cam: Camera, gw = MAP_W, gh = MAP_H, view?: View, wa
  * Pinch, wheel, and the +/- rocker all go through this.
  * Zooms toward the cursor or pinch midpoint.
  */
-export function zoomAbout(cam: Camera, sx: number, sy: number, view: View, next: number, gw = MAP_W, gh = MAP_H, warzone = false) {
+export function zoomAbout(
+  cam: Camera,
+  sx: number,
+  sy: number,
+  view: View,
+  next: number,
+  gw = MAP_W,
+  gh = MAP_H,
+  warzone = false,
+  project?: (sx: number, sy: number) => { x: number; y: number } | null,
+) {
   const limits = zoomLimits(view, gw, gh, warzone);
   const z = Math.max(limits.min, Math.min(limits.max, next));
+  if (project) {
+    const before = project(sx, sy);
+    cam.zoom = z;
+    const after = before ? project(sx, sy) : null;
+    if (before && after) {
+      cam.x += before.x - after.x;
+      cam.y += before.y - after.y;
+    }
+    clampCamera(cam, gw, gh, view, warzone);
+    return;
+  }
   const wx = (sx - view.w / 2) / Math.max(0.01, cam.zoom) + cam.x;
   const wy = (sy - view.h / 2) / Math.max(0.01, cam.zoom * pitch) + cam.y;
   cam.zoom = z;
@@ -171,7 +192,17 @@ export function zoomAbout(cam: Camera, sx: number, sy: number, view: View, next:
  * Past either end the aim sticks on the limit and the picture eases onto it,
  * so the stop is smooth and the camera does not bounce.
  */
-export function seekZoom(cam: Camera, sx: number, sy: number, view: View, factor: number, gw = MAP_W, gh = MAP_H, warzone = false) {
+export function seekZoom(
+  cam: Camera,
+  sx: number,
+  sy: number,
+  view: View,
+  factor: number,
+  gw = MAP_W,
+  gh = MAP_H,
+  warzone = false,
+  project?: (sx: number, sy: number) => { x: number; y: number } | null,
+) {
   const limits = zoomLimits(view, gw, gh, warzone);
   const base = cam.aim ?? cam.zoom;
   const raw = base * factor;
@@ -180,26 +211,34 @@ export function seekZoom(cam: Camera, sx: number, sy: number, view: View, factor
   cam.focusY = sy;
   cam.aim = clamped;
   if (raw >= limits.min && raw <= limits.max) {
-    zoomAbout(cam, sx, sy, view, clamped, gw, gh, warzone);
+    zoomAbout(cam, sx, sy, view, clamped, gw, gh, warzone, project);
     cam.aim = clamped;
   }
 }
 
 /** Finish a zoom that stopped on the clamp. No-op while pinch is tracking 1:1. */
-export function stepZoom(cam: Camera, dt: number, view: View, gw = MAP_W, gh = MAP_H, warzone = false) {
+export function stepZoom(
+  cam: Camera,
+  dt: number,
+  view: View,
+  gw = MAP_W,
+  gh = MAP_H,
+  warzone = false,
+  project?: (sx: number, sy: number) => { x: number; y: number } | null,
+) {
   if (cam.aim == null || view.w < 8 || view.h < 8) return;
   const limits = zoomLimits(view, gw, gh, warzone);
   cam.aim = Math.max(limits.min, Math.min(limits.max, cam.aim));
   const gap = cam.aim - cam.zoom;
   if (Math.abs(gap) < 0.03) {
     if (Math.abs(gap) > 0.0001) {
-      zoomAbout(cam, cam.focusX ?? view.w / 2, cam.focusY ?? view.h / 2, view, cam.aim, gw, gh, warzone);
+      zoomAbout(cam, cam.focusX ?? view.w / 2, cam.focusY ?? view.h / 2, view, cam.aim, gw, gh, warzone, project);
     }
     return;
   }
   const k = 1 - Math.exp(-dt * 12);
   const next = cam.zoom + gap * k;
-  zoomAbout(cam, cam.focusX ?? view.w / 2, cam.focusY ?? view.h / 2, view, next, gw, gh, warzone);
+  zoomAbout(cam, cam.focusX ?? view.w / 2, cam.focusY ?? view.h / 2, view, next, gw, gh, warzone, project);
 }
 
 /** Same opening zoom on every map. The first real frame refits this to the glass. */
