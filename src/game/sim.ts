@@ -650,6 +650,8 @@ export class Sim {
   hadYard: boolean[] = [false, false, false, false];
   /** True after "Last building!" so a rebuild can warn again. */
   private lastOne = [false, false, false, false];
+  /** True once this side has owned two real buildings. The opening yard is not the last one. */
+  private everMany = [false, false, false, false];
   eliminated: boolean[] = [false, false, false, false];
   /** Units this seat destroyed. */
   statKills: number[] = [0, 0, 0, 0];
@@ -1132,8 +1134,30 @@ export class Sim {
     return this.buildings.some((b) => b.team === team && b.special === "radar" && b.complete && b.hp > 0);
   }
 
+  /** A capture point still waiting. Team 0 on these is a placeholder, not the player. */
+  unheld(b: Building): boolean {
+    if (!b.neutral || b.hp <= 0 || b.rubble > 0) return false;
+    if (b.prize) return true;
+    if (b.team !== 0) return false;
+    return b.kind === "supply" || b.kind === "silo" || b.kind === "tower";
+  }
+
+  private footprintExplored(viewer: Team, b: Building): boolean {
+    if (!this.fogOn) return true;
+    const fog = this.fog[viewer];
+    if (!fog) return true;
+    for (let y = b.ty; y < b.ty + b.h; y++) {
+      for (let x = b.tx; x < b.tx + b.w; x++) {
+        if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
+        if ((fog[y * this.gw + x] ?? 0) > 0) return true;
+      }
+    }
+    return false;
+  }
+
   buildingVisible(viewer: Team, b: Building): boolean {
     if (b.hp <= 0) return false;
+    if (this.unheld(b)) return this.footprintExplored(viewer, b);
     if (b.neutral || this.allied(b.team, viewer)) return true;
     for (let y = b.ty; y < b.ty + b.h; y++) {
       for (let x = b.tx; x < b.tx + b.w; x++) {
@@ -4218,7 +4242,8 @@ export class Sim {
       const team = t as Team;
       if (this.eliminated[team]) continue;
       const n = this.realBuildings(team);
-      if (n === 1) {
+      if (n >= 2) this.everMany[team] = true;
+      if (n === 1 && this.everMany[team]) {
         if (!this.lastOne[team]) {
           this.lastOne[team] = true;
           if (team === this.ear) this.say("Last building!", "lastb", 6);

@@ -5,6 +5,7 @@
  */
 
 import type { Theater } from "./data.ts";
+import { paintSceneryTree } from "./scenery.ts";
 import {
   TILE_BARN,
   TILE_BRIDGE,
@@ -485,8 +486,9 @@ function dress(
   }
   if (tile === TILE_ROCK || tile === TILE_CLIFF) {
     const south = at(terrain, ix, iy + 1, gw, gh);
-    if (south !== TILE_ROCK && south !== TILE_CLIFF && fy > 0.62) {
-      const k = (fy - 0.62) / 0.38 * 0.35;
+    const lip = 0.56 + Math.sin((ix + fx) * 5.4 + iy) * 0.05 + (hash(ix, iy) - 0.5) * 0.06;
+    if (south !== TILE_ROCK && south !== TILE_CLIFF && fy > lip) {
+      const k = ((fy - lip) / Math.max(0.12, 1 - lip)) * 0.4;
       return [r * (1 - k) + 62 * k, g * (1 - k) + 54 * k, b * (1 - k) + 42 * k];
     }
   }
@@ -904,29 +906,7 @@ export function paintOre(
 }
 
 export function paintTree(ctx: CanvasRenderingContext2D, x: number, y: number, stump: boolean) {
-  ctx.fillStyle = "rgba(0,0,0,0.35)";
-  ctx.beginPath();
-  ctx.ellipse(x + 0.55, y + 0.78, 0.22, 0.08, 0, 0, Math.PI * 2);
-  ctx.fill();
-  if (stump) {
-    ctx.fillStyle = "#6a4a28";
-    ctx.fillRect(x + 0.4, y + 0.62, 0.2, 0.14);
-    ctx.fillStyle = "#c4a06a";
-    ctx.fillRect(x + 0.38, y + 0.58, 0.24, 0.06);
-    return;
-  }
-  ctx.fillStyle = "#5a3a1c";
-  ctx.fillRect(x + 0.44, y + 0.55, 0.12, 0.24);
-  ctx.fillStyle = "#16381e";
-  ctx.beginPath();
-  ctx.arc(x + 0.42, y + 0.4, 0.22, 0, Math.PI * 2);
-  ctx.arc(x + 0.6, y + 0.36, 0.2, 0, Math.PI * 2);
-  ctx.arc(x + 0.5, y + 0.28, 0.16, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#2d6836";
-  ctx.beginPath();
-  ctx.arc(x + 0.36, y + 0.32, 0.08, 0, Math.PI * 2);
-  ctx.fill();
+  paintSceneryTree(ctx, x, y, stump, "temperate");
 }
 
 export function paintShell(ctx: CanvasRenderingContext2D, tile: number, x: number, y: number, mark: number) {

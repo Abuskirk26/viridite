@@ -272,19 +272,39 @@ function stealth(): Part[] {
   ];
 }
 
+function advpower(): Part[] {
+  return [
+    { t: "box", u: 0.06, v: 0.4, du: 0.88, dv: 0.48, z0: 0, z1: 0.42, mat: "concrete" },
+    { t: "drum", u: 0.28, v: 0.28, r: 0.16, z0: 0.42, z1: 1.7, mat: "metal" },
+    { t: "drum", u: 0.72, v: 0.28, r: 0.16, z0: 0.42, z1: 1.7, mat: "metal" },
+    { t: "box", u: 0.4, v: 0.55, du: 0.2, dv: 0.16, z0: 0.42, z1: 0.7, mat: "glow" },
+    { t: "box", u: 0.1, v: 0.72, du: 0.8, dv: 0.08, z0: 0.42, z1: 0.52, mat: "trim" },
+  ];
+}
+
+function silo(): Part[] {
+  return [
+    { t: "drum", u: 0.5, v: 0.55, r: 0.28, z0: 0, z1: 1.35, mat: "hazard" },
+    { t: "drum", u: 0.5, v: 0.55, r: 0.08, z0: 1.35, z1: 1.7, mat: "dark" },
+    { t: "box", u: 0.38, v: 0.78, du: 0.24, dv: 0.1, z0: 0.2, z1: 0.4, mat: "trim" },
+  ];
+}
+
 function hall(kind: string): Part[] {
   if (kind === "yard") return yard();
-  if (kind === "power" || kind === "advpower") return power();
+  if (kind === "advpower") return advpower();
+  if (kind === "power") return power();
   if (kind === "refinery") return refinery();
   if (kind === "barracks") return barracks();
+  if (kind === "stealth") return stealth();
   if (kind === "factory") return factory();
-  if (kind === "tower") return tower();
   if (kind === "dock") return dock();
   if (kind === "helipad") return helipad();
+  if (kind === "tower") return tower();
   if (kind === "aa") return aa();
   if (kind === "radar") return radar();
-  if (kind === "supply" || kind === "silo") return supply();
-  if (kind === "stealth") return stealth();
+  if (kind === "silo") return silo();
+  if (kind === "supply") return supply();
   return barracks();
 }
 

@@ -37,11 +37,13 @@ import {
 import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
-import { hallDrawMul, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
+import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
-import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintTree, paintWaterSheen, terrainFieldAlive, writeTerrain } from "./tileset.ts";
+import { ensureHallSheets, hallImage, hallSheetName } from "./hallart.ts";
+import { paintSceneryTree, type TreeBiome } from "./scenery.ts";
+import { beginTerrain, isShell, packTerrain, paintCell, paintCrater, paintOre, paintShell, paintWaterSheen, terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import { paintRoadNet } from "./roads.ts";
 
 /** Phone and 4K panels keep their real pixels. Capped so a buffer never goes past 4K-class. */
@@ -357,6 +359,7 @@ export function drawGame(
   GH = sim.gh;
   THEATER = sim.theater;
   ensureIso();
+  ensureHallSheets();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   const dpr = ctx.canvas.width / Math.max(1, view.w);
@@ -409,7 +412,6 @@ export function drawGame(
     }
   }
   paintMapRim(ctx, GW, GH);
-  let trees = 0;
   let shells = 0;
   const spark = new Set<number>();
   for (const u of sim.units) {
@@ -418,9 +420,8 @@ export function drawGame(
   for (let y = y0; y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       if (fog[y * GW + x] !== 2) continue;
-      const drew = paintFieldProps(ctx, sim, x, y, baked, spark, trees < 150, shells < 40);
-      if (drew === "tree") trees++;
-      else if (drew === "shell") shells++;
+      const drew = paintFieldProps(ctx, sim, x, y, baked, spark, shells < 40);
+      if (drew === "shell") shells++;
     }
   }
   paintCrossings(ctx, sim.terrain, GW, GH, x0, y0, x1, y1);
@@ -754,7 +755,7 @@ export function drawGame(
   }
 
   stepParticles(0.016);
-  drawParticles(ctx, sim.time);
+  drawParticles(ctx, sim.time, (x, y, r) => clipPlateau(ctx, sim, x, y, r));
   if (typeof localStorage !== "undefined" && localStorage.getItem("viridite-dmg-numbers") === "1") {
     for (const b of sim.buildings) {
       if (b.hit <= 0 || b.hp <= 0) continue;
@@ -773,10 +774,8 @@ export function drawGame(
     if (b && b.hp > 0 && b.kind !== "span") {
       ctx.save();
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 0.07;
-      ctx.beginPath();
-      ctx.ellipse(b.tx + b.w / 2, b.ty + b.h / 2, Math.max(0.55, b.w * 0.68), Math.max(0.4, b.h * 0.62), 0, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.lineWidth = 0.04;
+      ctx.strokeRect(b.tx + 0.05, b.ty + 0.05, Math.max(0.2, b.w - 0.1), Math.max(0.2, b.h - 0.1));
       if (!isFence(b.kind)) drawDoorArrow(ctx, sim, b);
       ctx.restore();
     }
@@ -956,13 +955,14 @@ export function drawGame(
     const selected = ui.selected.includes(u.id);
     const damaged = u.maxHp > 0 && u.hp < u.maxHp - 0.5;
     const cargo = selected && u.kind === "harvester" && u.cargoMax > 0;
-    if (!damaged && !cargo) continue;
+    if (!damaged && !cargo && !selected) continue;
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
-    if (damaged) {
-      const pct = u.hp / u.maxHp;
-      bar(ctx, s.x, s.y - 18, pct, "troop", hpInk(pct), selected ? `${Math.ceil(pct * 100)}%` : undefined);
+    const barW = Math.max(10, unitWorldSpan(u.kind) * cam.zoom * 0.9);
+    if (damaged || selected) {
+      const pct = u.maxHp > 0 ? u.hp / u.maxHp : 1;
+      bar(ctx, s.x, s.y - 10, pct, barW, hpInk(pct), selected ? `${Math.ceil(pct * 100)}%` : undefined);
     }
-    if (cargo) bar(ctx, s.x, s.y - (damaged ? 4 : 18), u.cargo / u.cargoMax, "troop", "#3dcc6e");
+    if (cargo) bar(ctx, s.x, s.y - (damaged || selected ? 2 : 10), u.cargo / u.cargoMax, barW, "#3dcc6e");
   }
   for (const b of sim.buildings) {
     if (b.hp <= 0 || b.maxHp <= 0 || isFence(b.kind) || b.kind === "span" || b.rubble > 0) continue;
@@ -973,8 +973,10 @@ export function drawGame(
     const s = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
     if (damaged || picked) {
       const pct = b.hp / b.maxHp;
-      const tag = b.mending ? `Repair ${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}` : `${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}`;
-      bar(ctx, s.x, s.y - 16, pct, "hall", hpInk(pct), tag);
+      const stagger = ((b.tx + b.ty * 2) % 3) * 4;
+      const barW = Math.min(42, Math.max(14, Math.min(b.w, 1.7) * cam.zoom * 0.7));
+      const tag = picked ? `${Math.ceil(b.hp)}/${Math.ceil(b.maxHp)}` : undefined;
+      bar(ctx, s.x, s.y - 6 - stagger, pct, barW, hpInk(pct), tag);
     }
     if (picked) {
       ctx.fillStyle = "#e7f6ea";
@@ -1599,25 +1601,27 @@ function hpInk(pct: number): string {
   return mix(red, gold, pct / 0.6);
 }
 
-const UNIT_BADGE_PX = 14;
-const HALL_BADGE_PX = 21;
+const UNIT_BADGE_PX = 11;
+const HALL_BADGE_PX = 12;
 
-function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, size: "troop" | "hall" = "troop", fill?: string, label?: string) {
-  const w = size === "hall" ? 48 : 34;
-  const h = size === "hall" ? 7 : 6;
+/** About 3px on a phone. Width is the footprint, never a neighbour's roof. */
+function bar(ctx: CanvasRenderingContext2D, x: number, y: number, pct: number, width = 28, fill?: string, label?: string) {
+  const w = Math.max(8, Math.min(42, width));
+  const h = 3;
   const p = Math.max(0, Math.min(1, pct));
   ctx.fillStyle = "rgba(8, 6, 4, 0.9)";
   ctx.fillRect(x - w / 2 - 1, y - 1, w + 2, h + 2);
   ctx.fillStyle = fill ?? hpInk(p);
   ctx.fillRect(x - w / 2, y, Math.max(2, w * p), h);
   if (!label) return;
-  ctx.font = "bold 12px sans-serif";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillStyle = "#14110e";
-  ctx.fillText(label, x + w / 2 + 5, y + h / 2 + 1);
+  ctx.font = "9px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#14110e";
+  ctx.strokeText(label, x, y - 1);
   ctx.fillStyle = "#f6efd2";
-  ctx.fillText(label, x + w / 2 + 4, y + h / 2);
+  ctx.fillText(label, x, y - 1);
 }
 
 function drawRock(ctx: CanvasRenderingContext2D, x: number, y: number, photo: boolean) {
@@ -1644,12 +1648,7 @@ function drawRock(ctx: CanvasRenderingContext2D, x: number, y: number, photo: bo
 
 function drawBush(ctx: CanvasRenderingContext2D, x: number, y: number) {
   if (THEATER === "snow") {
-    ctx.fillStyle = "#2d4a38";
-    ctx.beginPath();
-    ctx.moveTo(x + 0.5, y + 0.16);
-    ctx.lineTo(x + 0.78, y + 0.78);
-    ctx.lineTo(x + 0.22, y + 0.78);
-    ctx.fill();
+    paintSceneryTree(ctx, x, y, false, "snow");
     return;
   }
   if (THEATER === "temperate") {
@@ -1704,6 +1703,33 @@ function blendMichigan(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
   }
 }
 
+function treeBiome(sim: Sim): TreeBiome {
+  if (sim.theater === "snow") return "snow";
+  if (sim.theater === "desert") return "desert";
+  if (sim.mapId === "palm" || sim.mapId === "coast" || sim.mapId === "isles") return "tropic";
+  return "temperate";
+}
+
+/** How much of this tile is plateau. The rest is the rock face and must not take a decal. */
+function plateauSpan(sim: Sim, x: number, y: number): number {
+  if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return 1;
+  const h = tileElev(sim.terrain[y * sim.gw + x] ?? 0);
+  const below = y + 1 < sim.gh ? tileElev(sim.terrain[(y + 1) * sim.gw + x] ?? 0) : h;
+  const drop = h - below;
+  if (drop < 0.2) return 1;
+  const rise = drop * SOLID_LIFT / Math.max(0.62, viewPitch());
+  return Math.max(0.06, Math.min(0.7, 1 - rise * 0.42));
+}
+
+function clipPlateau(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number, _r: number) {
+  const tx = Math.floor(x);
+  const ty = Math.floor(y);
+  const span = plateauSpan(sim, tx, ty);
+  ctx.beginPath();
+  ctx.rect(tx, ty, 1, span);
+  ctx.clip();
+}
+
 /** Ore, trees, shells, craters, and the shoreline. Boring tiles return immediately. */
 function paintFieldProps(
   ctx: CanvasRenderingContext2D,
@@ -1712,7 +1738,6 @@ function paintFieldProps(
   y: number,
   baked: boolean,
   spark: Set<number>,
-  treeBudget: boolean,
   shellBudget: boolean,
 ): "tree" | "shell" | "" {
   const i = y * sim.gw + x;
@@ -1731,15 +1756,14 @@ function paintFieldProps(
   }
   if (t === TILE_ROAD) return "";
   if (t === TILE_BRIDGE) return "";
-  if (mark > 0 && !shell) paintCrater(ctx, x, y, mark);
-  if (tree) {
-    // Every scrub tile blocks movement, so every scrub tile draws a tree.
-    // The grove sprite is the expensive one; past the budget a flat canopy still marks the block.
+  if (mark > 0 && !shell) {
     ctx.save();
-    ctx.translate((hash(x + 2, y) - 0.5) * 0.22, (hash(x, y + 5) - 0.5) * 0.1);
-    if (sim.mapId === "michigan") paintLakesTree(ctx, sim, x, y, t === TILE_STUMP);
-    else if (!(treeBudget && paintGrove(ctx, x, y, t === TILE_STUMP))) paintTree(ctx, x, y, t === TILE_STUMP);
+    clipPlateau(ctx, sim, x + 0.5, y + 0.5, 0.2);
+    paintCrater(ctx, x, y, mark);
     ctx.restore();
+  }
+  if (tree) {
+    paintSceneryTree(ctx, x, y, t === TILE_STUMP, treeBiome(sim));
     if (raised) paintVolume(ctx, sim, x, y);
     return "tree";
   }
@@ -2565,6 +2589,7 @@ function aimOf(sim: Sim, u: Unit): number {
 
 type HallKey = "yard" | "power" | "refinery" | "barracks" | "factory" | "tower" | "supply";
 
+// Unused by the match. Live pictures are hallImage() / HALL_SHEET in hallart.ts.
 const HALL: Partial<Record<BuildingId, HallKey>> = {
   yard: "yard",
   power: "power",
@@ -2622,57 +2647,7 @@ function hallFrame(b: Building, img: CanvasImageSource) {
 
 function structureTop(b: Building): number {
   if (isFence(b.kind) || b.kind === "span") return b.ty;
-  const bank = art();
-  const key = HALL[b.kind] ?? "yard";
-  const img = bank?.[key];
-  if (!img) return b.ty;
-  return hallFrame(b, img).y;
-}
-
-function paintSnowTree(ctx: CanvasRenderingContext2D, x: number, y: number) {
-  const h = hash(x, y);
-  ctx.fillStyle = "rgba(16, 22, 28, 0.4)";
-  ctx.beginPath();
-  ctx.ellipse(x + 0.58, y + 0.88, 0.32, 0.09, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#3e342c";
-  ctx.fillRect(x + 0.44, y + 0.62, 0.12, 0.24);
-  ctx.fillStyle = "#5e7e96";
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, y + 0.06 + h * 0.1);
-  ctx.lineTo(x + 0.9, y + 0.72);
-  ctx.lineTo(x + 0.1, y + 0.72);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#f3f7fa";
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, y + 0.06 + h * 0.1);
-  ctx.lineTo(x + 0.72, y + 0.4);
-  ctx.lineTo(x + 0.28, y + 0.4);
-  ctx.closePath();
-  ctx.fill();
-}
-
-function paintGrove(ctx: CanvasRenderingContext2D, x: number, y: number, stump: boolean): boolean {
-  if (stump || THEATER === "desert") return false;
-  if (THEATER === "snow") {
-    paintSnowTree(ctx, x, y);
-    return true;
-  }
-  const bank = art();
-  if (!bank || bank.jungle.length < 1) return false;
-  const pick = hash(x, y);
-  const img = bank.jungle[pick < 0.5 ? 0 : bank.jungle.length - 1] ?? bank.jungle[0];
-  if (!img) return false;
-  const w = 1.55 + hash(x + 1, y + 3) * 0.85;
-  const grove = sourceSize(img);
-  const hh = w * (grove.h / Math.max(1, grove.w));
-  ctx.save();
-  ctx.translate(x + 0.5, y + 0.94);
-  ctx.scale(hash(x + 2, y + 5) > 0.5 ? -1 : 1, 1 / viewPitch());
-  ctx.drawImage(img, -w / 2, -hh, w, hh);
-  ctx.restore();
-  return true;
+  return b.ty + b.h - hallPictureLift(b.kind, b.w, b.h);
 }
 
 function tileElev(t: number): number {
@@ -2685,34 +2660,22 @@ function tileElev(t: number): number {
   return 0;
 }
 
-function volumeQuad(
-  ctx: CanvasRenderingContext2D,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  cx: number,
-  cy: number,
-  dx: number,
-  dy: number,
-  color: string,
-) {
-  ctx.beginPath();
-  ctx.moveTo(ax, ay);
-  ctx.lineTo(bx, by);
-  ctx.lineTo(cx, cy);
-  ctx.lineTo(dx, dy);
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
-}
-
 function rockTone(n: number, snow: boolean): string {
   if (snow) return n > 0.72 ? "#d7e4ec" : n > 0.4 ? "#8ea6b6" : "#516676";
   return n > 0.72 ? "#d2bba0" : n > 0.4 ? "#9a7d64" : "#5a483c";
 }
 
-/** A continuous rock wall along a high-ground edge. Lit lip, textured face, one soft shadow. */
+/** Shared along the cliff so the next tile starts where this one ends. */
+function edgeWave(along: number, salt: number): number {
+  const i = Math.floor(along * 4);
+  const f = along * 4 - i;
+  const a = (hash(i, salt) - 0.5) * 0.22;
+  const b = (hash(i + 1, salt) - 0.5) * 0.22;
+  const smooth = a * (1 - f) + b * f;
+  return smooth + Math.sin(along * 3.1 + salt) * 0.04;
+}
+
+/** A continuous rock wall. Wavy lip, strata, base shadow, scree. Corners pull in. */
 function paintRockFace(
   ctx: CanvasRenderingContext2D,
   x0: number,
@@ -2724,71 +2687,81 @@ function paintRockFace(
   alongX: boolean,
   snow: boolean,
   seed: number,
+  inset0 = 0,
+  inset1 = 0,
 ) {
   const span = Math.max(0.2, alongX ? x1 - x0 : y1 - y0);
-  const steps = Math.max(4, Math.round(span * 5));
-  const lip = snow ? "#e7eef4" : "#e4d2bc";
-  const strata = snow ? "rgba(18, 26, 32, 0.35)" : "rgba(24, 16, 12, 0.4)";
-  ctx.fillStyle = snow ? "rgba(8, 12, 16, 0.2)" : "rgba(12, 8, 6, 0.22)";
+  const steps = 7;
+  const lip = snow ? "#e7eef4" : "#e6d3ba";
+  const strata = snow ? "rgba(18, 26, 32, 0.4)" : "rgba(28, 16, 10, 0.45)";
+  const a0 = inset0;
+  const a1 = 1 - inset1;
+  const samples: { base: number; top: number; along: number }[] = [];
+  for (let i = 0; i <= steps; i++) {
+    const u = a0 + ((a1 - a0) * i) / steps;
+    const along = (alongX ? x0 : y0) + span * u;
+    const wave = edgeWave(along, seed);
+    const bulge = Math.sin((i / steps) * Math.PI) * 0.04;
+    samples.push({ along, base: wave * 0.35 + bulge, top: wave });
+  }
+  ctx.fillStyle = snow ? "rgba(8, 12, 16, 0.28)" : "rgba(16, 10, 6, 0.32)";
   ctx.beginPath();
-  if (alongX) ctx.ellipse((x0 + x1) / 2, y1 + 0.16, span * 0.46, 0.11, 0, 0, Math.PI * 2);
-  else ctx.ellipse(x1 + 0.14, (y0 + y1) / 2, 0.1, span * 0.42, 0, 0, Math.PI * 2);
+  if (alongX) ctx.ellipse((x0 + x1) / 2, y1 + 0.2, span * 0.42, 0.1, 0, 0, Math.PI * 2);
+  else ctx.ellipse(x1 + 0.18, (y0 + y1) / 2, 0.09, span * 0.4, 0, 0, Math.PI * 2);
   ctx.fill();
-  for (let i = 0; i < steps; i++) {
-    const u0 = i / steps;
-    const u1 = (i + 1) / steps;
-    const n = hash(seed + i * 3, 17);
-    const color = rockTone(0.22 + n * 0.28, snow);
-    const top0 = (hash(seed + i, 11) - 0.5) * 0.06;
-    const top1 = (hash(seed + i + 1, 13) - 0.5) * 0.06;
-    if (alongX) {
-      const ax0 = x0 + span * u0;
-      const ax1 = x0 + span * u1;
-      volumeQuad(ctx, ax0, y1, ax1, y1, ax1 + shear, y1 - rise + top1, ax0 + shear, y1 - rise + top0, color);
-      if (n > 0.4) {
-        const band = 0.32 + hash(seed + i, 31) * 0.28;
-        volumeQuad(
-          ctx,
-          ax0,
-          y1 - rise * band,
-          ax1,
-          y1 - rise * band,
-          ax1 + shear * (1 - band),
-          y1 - rise * (band + 0.07),
-          ax0 + shear * (1 - band),
-          y1 - rise * (band + 0.07),
-          strata,
-        );
-      }
-      volumeQuad(
-        ctx,
-        ax0 + shear * 0.92,
-        y1 - rise + top0 + 0.02,
-        ax1 + shear * 0.92,
-        y1 - rise + top1 + 0.02,
-        ax1 + shear,
-        y1 - rise + top1 - 0.045,
-        ax0 + shear,
-        y1 - rise + top0 - 0.045,
-        lip,
-      );
-    } else {
-      const ay0 = y0 + span * u0;
-      const ay1 = y0 + span * u1;
-      volumeQuad(ctx, x1, ay0, x1, ay1, x1 + shear, ay1 - rise + top1, x1 + shear, ay0 - rise + top0, color);
-      volumeQuad(
-        ctx,
-        x1 + shear * 0.9,
-        ay0 - rise + top0,
-        x1 + shear * 0.9,
-        ay1 - rise + top1,
-        x1 + shear,
-        ay1 - rise + top1 - 0.04,
-        x1 + shear,
-        ay0 - rise + top0 - 0.04,
-        lip,
-      );
+  ctx.beginPath();
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]!;
+    const px = alongX ? s.along : x1 + s.base;
+    const py = alongX ? y1 + s.base : s.along;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  for (let i = samples.length - 1; i >= 0; i--) {
+    const s = samples[i]!;
+    const px = alongX ? s.along + shear : x1 + shear;
+    const py = alongX ? y1 - rise + s.top : s.along - rise + s.top;
+    ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = rockTone(0.34 + hash(seed, 3) * 0.2, snow);
+  ctx.fill();
+  ctx.strokeStyle = strata;
+  ctx.lineWidth = 0.025;
+  for (let band = 0; band < 3; band++) {
+    const t = 0.28 + band * 0.22;
+    ctx.beginPath();
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i]!;
+      const crack = (hash(seed + i, band + 9) - 0.5) * 0.04;
+      const px = alongX ? s.along + shear * (1 - t) : x1 + shear * (1 - t);
+      const py = alongX ? y1 - rise * t + s.top * t + crack : s.along - rise * t + crack;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
     }
+    ctx.stroke();
+  }
+  ctx.strokeStyle = lip;
+  ctx.lineWidth = 0.045;
+  ctx.beginPath();
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]!;
+    const px = alongX ? s.along + shear : x1 + shear;
+    const py = alongX ? y1 - rise + s.top - 0.02 : s.along - rise + s.top - 0.02;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  const nBoulder = 2 + ((hash(seed, 21) * 2) | 0);
+  for (let i = 0; i < nBoulder; i++) {
+    const u = 0.15 + hash(seed + i * 5, 4) * 0.7;
+    const s = samples[Math.min(samples.length - 1, Math.round(u * steps))]!;
+    const r = 0.05 + hash(seed, i + 8) * 0.07;
+    ctx.fillStyle = rockTone(0.2 + hash(seed, i) * 0.35, snow);
+    ctx.beginPath();
+    if (alongX) ctx.ellipse(s.along, y1 + 0.08 + hash(seed, i + 2) * 0.1, r * 1.4, r * 0.7, 0.2, 0, Math.PI * 2);
+    else ctx.ellipse(x1 + 0.1, s.along, r * 0.7, r * 1.2, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -2870,48 +2843,39 @@ function paintVolume(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: numb
     return tileElev(sim.terrain[ny * sim.gw + nx] ?? 0);
   };
   const snow = THEATER === "snow";
+  if (t === TILE_HIGH || t === TILE_CLIFF || t === TILE_ROCK) {
+    const shade = ctx.createLinearGradient(x, y, x + 1, y + 1);
+    shade.addColorStop(0, snow ? "rgba(236,244,248,0.2)" : "rgba(255,244,224,0.16)");
+    shade.addColorStop(0.55, "rgba(0,0,0,0)");
+    shade.addColorStop(1, "rgba(0,0,0,0.12)");
+    ctx.fillStyle = shade;
+    ctx.fillRect(x, y, 1, 1);
+  }
   // Pitch squashes world Y. Grow the face so a drop still reads as rock at the phone zoom.
   const face = 1 / Math.max(0.62, viewPitch());
   const south = h - at(x, y + 1);
   if (south >= 0.2) {
     const rise = south * SOLID_LIFT * face;
-    if (rise >= 0.2) paintRockFace(ctx, x, y, x + 1, y + 1, rise, south * SOLID_SHEAR, true, snow, x * 17 + y);
+    const westDrop = h - at(x - 1, y + 1) < 0.2 && at(x - 1, y) - at(x - 1, y + 1) < 0.2;
+    const eastDrop = at(x + 1, y) - at(x + 1, y + 1) < 0.2;
+    if (rise >= 0.2) {
+      paintRockFace(ctx, x, y, x + 1, y + 1, rise, south * SOLID_SHEAR, true, snow, x * 17 + y, westDrop ? 0.2 : 0, eastDrop ? 0.2 : 0);
+    }
   }
   const east = h - at(x + 1, y);
   if (east >= 0.28) {
     const rise = east * SOLID_LIFT * face;
-    if (rise >= 0.24) paintRockFace(ctx, x, y, x + 1, y + 1, rise, east * SOLID_SHEAR * 0.85, false, snow, x * 13 + y * 3);
+    const northDrop = at(x + 1, y - 1) - at(x + 2, y - 1) < 0.2 && at(x, y - 1) - at(x + 1, y - 1) < 0.28;
+    const southDrop = at(x, y + 1) - at(x + 1, y + 1) < 0.28;
+    if (rise >= 0.24) {
+      paintRockFace(ctx, x, y, x + 1, y + 1, rise, east * SOLID_SHEAR * 0.85, false, snow, x * 13 + y * 3, northDrop ? 0.18 : 0, southDrop ? 0.18 : 0);
+    }
   }
 }
 
 function bridgeTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): boolean {
   if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
   return (terrain[y * gw + x] ?? 0) === TILE_BRIDGE;
-}
-
-function groundTile(terrain: Uint8Array, gw: number, gh: number, x: number, y: number): number {
-  if (x < 0 || y < 0 || x >= gw || y >= gh) return TILE_ROCK;
-  return terrain[y * gw + x] ?? 0;
-}
-
-function waterTile(t: number): boolean {
-  return t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_FORD || t === TILE_WRECK;
-}
-
-function bankTile(t: number): boolean {
-  return (
-    t === TILE_SAND ||
-    t === TILE_CLEAR ||
-    t === TILE_ROUGH ||
-    t === TILE_SHORE ||
-    t === TILE_ROAD ||
-    t === TILE_HIGH ||
-    t === TILE_RAMP ||
-    t === TILE_STUMP ||
-    t === TILE_SPENT ||
-    t === TILE_SCRUB ||
-    t === TILE_VALLEY
-  );
 }
 
 function paintPlankDeck(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, alongY: boolean) {
@@ -2929,31 +2893,14 @@ function paintPlankDeck(ctx: CanvasRenderingContext2D, x: number, y: number, w: 
   }
 }
 
-function paintNarrowBridge(
-  ctx: CanvasRenderingContext2D,
-  terrain: Uint8Array,
-  gw: number,
-  gh: number,
-  x: number,
-  y: number,
-  alongY: boolean,
-) {
+function paintNarrowBridge(ctx: CanvasRenderingContext2D, x: number, y: number, alongY: boolean) {
   ctx.fillStyle = "#1a5670";
   ctx.fillRect(x, y, 1, 1);
   ctx.fillStyle = "#143e54";
   ctx.fillRect(x + 0.06, y + 0.06, 0.88, 0.88);
   ctx.fillStyle = "rgba(214, 236, 232, 0.28)";
   ctx.fillRect(alongY ? x + 0.08 : x, alongY ? y + 0.42 : y + 0.08, alongY ? 0.18 : 1, alongY ? 0.05 : 0.16);
-  const bank = (nx: number, ny: number, rx: number, ry: number, rw: number, rh: number) => {
-    if (!bankTile(groundTile(terrain, gw, gh, nx, ny))) return;
-    ctx.fillStyle = "#6e5434";
-    ctx.fillRect(rx, ry, rw, rh);
-    ctx.fillStyle = "#a78452";
-    ctx.fillRect(rx + (rw > rh ? 0.06 : 0.04), ry + (rh > rw ? 0.06 : 0.04), Math.max(0.08, rw * 0.72), Math.max(0.08, rh * 0.55));
-  };
   if (alongY) {
-    bank(x, y - 1, x + 0.22, y - 0.08, 0.56, 0.28);
-    bank(x, y + 1, x + 0.22, y + 0.8, 0.56, 0.28);
     paintPlankDeck(ctx, x + 0.27, y - 0.04, 0.46, 1.08, true);
     ctx.fillStyle = "#f4ecdc";
     ctx.fillRect(x + 0.24, y, 0.05, 1);
@@ -2969,8 +2916,6 @@ function paintNarrowBridge(
     ctx.fillRect(x + 0.3, y + 1.02, 0.4, 0.12);
     return;
   }
-  bank(x - 1, y, x - 0.08, y + 0.22, 0.28, 0.56);
-  bank(x + 1, y, x + 0.8, y + 0.22, 0.28, 0.56);
   paintPlankDeck(ctx, x - 0.04, y + 0.27, 1.08, 0.46, false);
   ctx.fillStyle = "#f4ecdc";
   ctx.fillRect(x, y + 0.24, 1, 0.05);
@@ -2986,36 +2931,76 @@ function paintNarrowBridge(
   ctx.fillRect(x + 1.02, y + 0.3, 0.12, 0.4);
 }
 
-function paintBridgeRamps(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
-  const n = bridgeTile(terrain, gw, gh, x, y - 1);
-  const s = bridgeTile(terrain, gw, gh, x, y + 1);
-  const e = bridgeTile(terrain, gw, gh, x + 1, y);
-  const w = bridgeTile(terrain, gw, gh, x - 1, y);
-  if ((n || s) !== (e || w)) return;
-  const dirt = (rx: number, ry: number, rw: number, rh: number, a: number) => {
-    ctx.fillStyle = `rgba(112, 84, 52, ${a})`;
-    ctx.fillRect(rx, ry, rw, rh);
-  };
-  if (bankTile(groundTile(terrain, gw, gh, x, y - 1))) {
-    dirt(x, y - 1.05, 1, 0.42, 0.16);
-    dirt(x, y - 0.64, 1, 0.42, 0.38);
-    dirt(x, y - 0.24, 1, 0.3, 0.78);
+function bridgeRun(
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+): { len: number; offset: number } {
+  let pos = 0;
+  let neg = 0;
+  while (bridgeTile(terrain, gw, gh, x + dx * (pos + 1), y + dy * (pos + 1))) pos++;
+  while (bridgeTile(terrain, gw, gh, x - dx * (neg + 1), y - dy * (neg + 1))) neg++;
+  return { len: pos + neg + 1, offset: pos - neg };
+}
+
+function widthCenter(offset: number, len: number): boolean {
+  if (len <= 1) return true;
+  if (len % 2 === 1) return offset === 0;
+  return offset === 1;
+}
+
+function paintPier(ctx: CanvasRenderingContext2D, x: number, y: number, alongY: boolean, offset: number) {
+  const toward = offset > 0 ? -1 : 1;
+  const px = alongY ? x + 0.5 + toward * 0.32 : x + 0.5;
+  const py = alongY ? y + 0.5 : y + 0.5 + toward * 0.32;
+  ctx.fillStyle = "rgba(4, 10, 16, 0.4)";
+  ctx.beginPath();
+  ctx.ellipse(px + 0.05, py + 0.14, 0.14, 0.06, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#5c5148";
+  ctx.beginPath();
+  ctx.ellipse(px, py, alongY ? 0.1 : 0.14, alongY ? 0.18 : 0.1, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#8d8174";
+  ctx.beginPath();
+  ctx.ellipse(px - 0.02, py - 0.05, alongY ? 0.06 : 0.09, alongY ? 0.07 : 0.05, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function paintWideBridgeTile(
+  ctx: CanvasRenderingContext2D,
+  terrain: Uint8Array,
+  gw: number,
+  gh: number,
+  x: number,
+  y: number,
+  hx: { len: number; offset: number },
+  hy: { len: number; offset: number },
+) {
+  const alongY = hy.len >= hx.len;
+  const width = alongY ? hx : hy;
+  const crossing = hx.len > 3 && hy.len > 3 && hx.offset === 0 && hy.offset === 0;
+  if (!widthCenter(width.offset, width.len) && !crossing) {
+    paintPier(ctx, x, y, alongY, width.offset);
+    return;
   }
-  if (bankTile(groundTile(terrain, gw, gh, x, y + 1))) {
-    dirt(x, y + 1.58, 1, 0.4, 0.16);
-    dirt(x, y + 1.18, 1, 0.42, 0.38);
-    dirt(x, y + 0.92, 1, 0.3, 0.78);
+  paintNarrowBridge(ctx, x, y, alongY);
+  if (!crossing) return;
+  if (alongY) {
+    paintPlankDeck(ctx, x - 0.04, y + 0.27, 1.08, 0.46, false);
+    ctx.fillStyle = "#f4ecdc";
+    ctx.fillRect(x, y + 0.24, 1, 0.05);
+    ctx.fillRect(x, y + 0.71, 1, 0.05);
+    return;
   }
-  if (bankTile(groundTile(terrain, gw, gh, x - 1, y))) {
-    dirt(x - 1.05, y, 0.42, 1, 0.16);
-    dirt(x - 0.64, y, 0.42, 1, 0.38);
-    dirt(x - 0.24, y, 0.3, 1, 0.78);
-  }
-  if (bankTile(groundTile(terrain, gw, gh, x + 1, y))) {
-    dirt(x + 1.58, y, 0.4, 1, 0.16);
-    dirt(x + 1.18, y, 0.42, 1, 0.38);
-    dirt(x + 0.94, y, 0.3, 1, 0.78);
-  }
+  paintPlankDeck(ctx, x + 0.27, y - 0.04, 0.46, 1.08, true);
+  ctx.fillStyle = "#f4ecdc";
+  ctx.fillRect(x + 0.24, y, 0.05, 1);
+  ctx.fillRect(x + 0.71, y, 0.05, 1);
 }
 
 function paintBridgeDeckTile(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
@@ -3047,52 +3032,13 @@ function paintBridgeDeckTile(ctx: CanvasRenderingContext2D, terrain: Uint8Array,
     ctx.restore();
     return;
   }
-  const alongY = (n || s) && !(e || w) ? true : (e || w) && !(n || s) ? false : n || s;
-  if ((n || s) !== (e || w)) {
-    paintNarrowBridge(ctx, terrain, gw, gh, x, y, !!(n || s) && !(e || w));
+  const hx = bridgeRun(terrain, gw, gh, x, y, 1, 0);
+  const hy = bridgeRun(terrain, gw, gh, x, y, 0, 1);
+  if (hx.len > 1 && hy.len > 1) {
+    paintWideBridgeTile(ctx, terrain, gw, gh, x, y, hx, hy);
     return;
   }
-  paintPlankDeck(ctx, x - 0.015, y - 0.015, 1.03, 1.03, alongY);
-  ctx.fillStyle = "#efe4d2";
-  const rail = (nx: number, ny: number, rx: number, ry: number, rw: number, rh: number) => {
-    if (!waterTile(groundTile(terrain, gw, gh, nx, ny))) return;
-    ctx.fillRect(rx, ry, rw, rh);
-  };
-  rail(x, y - 1, x, y + 0.02, 1, 0.08);
-  rail(x, y + 1, x, y + 0.9, 1, 0.08);
-  rail(x - 1, y, x + 0.02, y, 0.08, 1);
-  rail(x + 1, y, x + 0.9, y, 0.08, 1);
-  ctx.fillStyle = "#3a2c1e";
-  const post = (px: number, py: number) => ctx.fillRect(px, py, 0.11, 0.12);
-  if (waterTile(groundTile(terrain, gw, gh, x, y - 1)) && x % 2 === 0) {
-    post(x + 0.06, y);
-    post(x + 0.82, y);
-  }
-  if (waterTile(groundTile(terrain, gw, gh, x, y + 1)) && x % 2 === 0) {
-    post(x + 0.06, y + 0.86);
-    post(x + 0.82, y + 0.86);
-  }
-  if (waterTile(groundTile(terrain, gw, gh, x - 1, y)) && y % 2 === 0) {
-    post(x, y + 0.08);
-    post(x, y + 0.78);
-  }
-  if (waterTile(groundTile(terrain, gw, gh, x + 1, y)) && y % 2 === 0) {
-    post(x + 0.86, y + 0.08);
-    post(x + 0.86, y + 0.78);
-  }
-}
-
-function paintBridgeShadow(ctx: CanvasRenderingContext2D, terrain: Uint8Array, gw: number, gh: number, x: number, y: number) {
-  const n = bridgeTile(terrain, gw, gh, x, y - 1);
-  const s = bridgeTile(terrain, gw, gh, x, y + 1);
-  const e = bridgeTile(terrain, gw, gh, x + 1, y);
-  const w = bridgeTile(terrain, gw, gh, x - 1, y);
-  if ((n || s) !== (e || w)) return;
-  ctx.fillStyle = "rgba(4, 10, 16, 0.42)";
-  if (waterTile(groundTile(terrain, gw, gh, x, y + 1))) ctx.fillRect(x + 0.08, y + 1.0, 0.9, 0.22);
-  if (waterTile(groundTile(terrain, gw, gh, x + 1, y))) ctx.fillRect(x + 1.0, y + 0.12, 0.2, 0.86);
-  if (waterTile(groundTile(terrain, gw, gh, x, y - 1))) ctx.fillRect(x + 0.12, y - 0.16, 0.84, 0.16);
-  if (waterTile(groundTile(terrain, gw, gh, x - 1, y))) ctx.fillRect(x - 0.16, y + 0.16, 0.16, 0.8);
+  paintNarrowBridge(ctx, x, y, !!(n || s) && !(e || w));
 }
 
 function paintBridges(
@@ -3115,8 +3061,6 @@ function paintBridges(
       }
     }
   };
-  visit((x, y) => paintBridgeShadow(ctx, terrain, gw, gh, x, y));
-  visit((x, y) => paintBridgeRamps(ctx, terrain, gw, gh, x, y));
   visit((x, y) => paintBridgeDeckTile(ctx, terrain, gw, gh, x, y));
 }
 
@@ -3144,27 +3088,40 @@ function paintShoreLip(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: nu
     const n = sim.terrain[ny * sim.gw + nx] ?? 0;
     return n !== TILE_DEEP && n !== TILE_SHALLOW && n !== TILE_FORD && n !== TILE_WRECK && n !== TILE_BRIDGE;
   };
-  const soft = THEATER === "snow" ? "rgba(226, 236, 242, 0.34)" : "rgba(214, 232, 226, 0.32)";
-  const body = THEATER === "snow" ? "rgba(244, 250, 252, 0.28)" : "rgba(236, 248, 244, 0.26)";
-  const wash = (alongX: boolean, edge: number) => {
-    for (let i = 0; i < 3; i++) {
-      const h1 = hash(x * 4 + i * 11, y * 3 + i + (alongX ? 1 : 5));
-      const h2 = hash(x + i * 5 + (alongX ? 2 : 8), y * 6 + 2);
-      if (h1 < 0.06) continue;
-      const along = (alongX ? x : y) + 0.05 + h1 * 0.9;
-      const perp = edge + (h2 - 0.42) * 0.36;
-      const wide = 0.26 + h1 * 0.38;
-      const thick = 0.09 + h2 * 0.16;
-      ctx.fillStyle = i === 1 ? body : soft;
+  const wet = THEATER === "snow" ? "rgba(168, 148, 120, 0.28)" : "rgba(92, 74, 48, 0.32)";
+  const foam = THEATER === "snow" ? "rgba(244, 250, 252, 0.72)" : "rgba(236, 248, 244, 0.7)";
+  const strokeEdge = (alongX: boolean, edge: number, sign: number) => {
+    const wave = (i: number) => {
+      const t = i / 6;
+      const along = (alongX ? x : y) + t;
+      return Math.sin(along * 4.2 + hash(x, y) * 5) * 0.05 + (hash(x * 3 + i, y * 4 + (alongX ? 1 : 2)) - 0.5) * 0.07;
+    };
+    const trace = (push: number) => {
       ctx.beginPath();
-      ctx.ellipse(alongX ? along : perp, alongX ? perp : along, alongX ? wide : thick, alongX ? thick : wide, (h1 - 0.5) * 0.5, 0, Math.PI * 2);
-      ctx.fill();
-    }
+      for (let i = 0; i <= 6; i++) {
+        const t = i / 6;
+        const along = (alongX ? x : y) + t;
+        const perp = edge + sign * (push + wave(i));
+        const px = alongX ? along : perp;
+        const py = alongX ? perp : along;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+    };
+    ctx.strokeStyle = wet;
+    ctx.lineWidth = 0.09;
+    ctx.lineCap = "round";
+    trace(0.02);
+    ctx.stroke();
+    ctx.strokeStyle = foam;
+    ctx.lineWidth = 0.035;
+    trace(0.07);
+    ctx.stroke();
   };
-  if (land(x, y - 1)) wash(true, y + 0.04);
-  if (land(x, y + 1)) wash(true, y + 0.96);
-  if (land(x - 1, y)) wash(false, x + 0.04);
-  if (land(x + 1, y)) wash(false, x + 0.96);
+  if (land(x, y - 1)) strokeEdge(true, y + 0.02, 1);
+  if (land(x, y + 1)) strokeEdge(true, y + 0.98, -1);
+  if (land(x - 1, y)) strokeEdge(false, x + 0.02, 1);
+  if (land(x + 1, y)) strokeEdge(false, x + 0.98, -1);
 }
 
 function paintBuilding(
@@ -3568,13 +3525,18 @@ function drawFence(
 }
 
 function hallPlate(kind: string): keyof IsoBank | null {
-  if (kind === "yard") return "yard";
-  if (kind === "power" || kind === "advpower") return "power";
-  if (kind === "barracks") return "barracks";
-  if (kind === "factory") return "factory";
-  if (kind === "tower" || kind === "aa") return "tower";
-  if (kind === "refinery") return "refinery";
-  if (kind === "supply" || kind === "silo") return "supply";
+  const file = hallSheetName(kind);
+  if (
+    file === "yard" ||
+    file === "power" ||
+    file === "barracks" ||
+    file === "factory" ||
+    file === "tower" ||
+    file === "refinery" ||
+    file === "supply"
+  ) {
+    return file;
+  }
   return null;
 }
 
@@ -3709,6 +3671,36 @@ function clearOfBar(x: number, y: number, r: number, barX: number, barY: number,
   return hit ? bottom + r + 2 : y;
 }
 
+/** Grey-white flag for a capture point nobody owns. Not a seat shape, and never red or green. */
+function paintNeutralFlag(ctx: CanvasRenderingContext2D, x: number, y: number, size: number) {
+  const pole = size * 0.46;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#1a1510";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-size * 0.2, pole);
+  ctx.lineTo(-size * 0.2, -pole);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-size * 0.14, -pole + 1);
+  ctx.lineTo(size * 0.4, -size * 0.12);
+  ctx.lineTo(-size * 0.14, size * 0.16);
+  ctx.closePath();
+  ctx.fillStyle = "#f4f1ea";
+  ctx.fill();
+  ctx.fillStyle = "#d7d1c4";
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function structureMark(sim: Sim, b: Building): string {
+  return sim.unheld(b) ? "#d7d1c4" : seatPaint(sim, b.team);
+}
+
 /** Filled seat shape. Field badges carry a 2 px dark outline so the color is not the only tell. Size is in screen pixels. */
 export function paintTeamShape(
   ctx: CanvasRenderingContext2D,
@@ -3765,20 +3757,23 @@ function paintSeatBadges(
     const s = worldToScreen(cam, x + o.x, y + o.y, view);
     if (s.x < -pad || s.y < -pad || s.x > view.w + pad || s.y > view.h + pad) continue;
     const style = teamStyle(u.team);
-    const barY = s.y - 18;
-    const badgeY = barY - 1 - 2 - UNIT_BADGE_PX / 2;
+    const barY = s.y - 10;
+    const badgeY = barY - 2 - UNIT_BADGE_PX / 2;
     paintTeamShape(ctx, s.x, badgeY, UNIT_BADGE_PX, seatPaint(sim, u.team), style.shape);
   }
   for (const b of sim.buildings) {
     if (b.hp <= 0 || b.rubble > 0 || isFence(b.kind) || b.kind === "span") continue;
-    if (!sim.buildingVisible(VIEWER, b) && b.team !== VIEWER) continue;
-    const plate = hallPlate(b.kind);
-    const img = plate ? iso()?.[plate] : undefined;
+    if (!sim.buildingVisible(VIEWER, b) && (sim.unheld(b) || b.team !== VIEWER)) continue;
+    const img = hallImage(b.kind);
     const color = seatPaint(sim, b.team);
     const style = teamStyle(b.team);
     let sx: number;
     let sy: number;
-    if (img) {
+    if (b.prize) {
+      const s = worldToScreen(cam, b.tx + b.w / 2, b.ty - 0.5, view);
+      sx = s.x;
+      sy = s.y;
+    } else if (img) {
       const at = hallBadgeWorld(b, img, color);
       const s = worldToScreen(cam, at.x, at.y, view);
       sx = s.x;
@@ -3800,8 +3795,12 @@ function paintSeatBadges(
       sy = near.y + (top.y - near.y) * 0.32;
     }
     const bar = worldToScreen(cam, b.tx + b.w / 2, structureTop(b), view);
-    sy = clearOfBar(sx, sy, HALL_BADGE_PX / 2, bar.x, bar.y - 16, 44, 6);
+    sy = clearOfBar(sx, sy, HALL_BADGE_PX / 2, bar.x, bar.y - 8, 36, 3);
     if (sx < -pad || sy < -pad || sx > view.w + pad || sy > view.h + pad) continue;
+    if (sim.unheld(b)) {
+      paintNeutralFlag(ctx, sx, sy, HALL_BADGE_PX);
+      continue;
+    }
     paintTeamShape(ctx, sx, sy, HALL_BADGE_PX, color, style.shape);
   }
   if (ui.buildingId) {
@@ -3882,31 +3881,20 @@ function paintPlate(
   ctx.restore();
 }
 
-/** Base ring under a troop, tinted 35% with the seat color. Selection is a white ring. */
+/** Thin ellipse just under the footprint. About 0.9x the unit width. */
 function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
-  const rx = Math.max(0.16, wide * 0.72);
-  const ry = Math.max(0.1, rx * 0.38);
+  const rx = Math.max(0.1, wide * 0.45);
+  const ry = Math.max(0.035, rx * 0.32);
   ctx.save();
-  ctx.strokeStyle = color;
-  ctx.globalAlpha = 0.35;
-  ctx.lineWidth = Math.max(0.035, wide * 0.05);
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.16;
   ctx.beginPath();
   ctx.ellipse(x, y + 0.02, rx, ry, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = selected ? 0.9 : 0.55;
+  ctx.strokeStyle = selected ? "#ffffff" : color;
+  ctx.lineWidth = selected ? 0.028 : 0.018;
   ctx.stroke();
-  if (selected) {
-    ctx.globalAlpha = 0.9;
-    ctx.strokeStyle = "rgba(16, 12, 8, 0.9)";
-    ctx.lineWidth = Math.max(0.09, wide * 0.09);
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = Math.max(0.055, wide * 0.06);
-    ctx.beginPath();
-    ctx.ellipse(x, y + 0.02, rx + 0.12, ry + 0.06, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
   ctx.restore();
 }
 
@@ -3938,6 +3926,23 @@ function drawBuilding(
   sim?: Sim,
 ) {
   if (isFence(b.kind)) {
+    const fence = hallImage(b.kind);
+    if (fence) {
+      const footX = b.tx + b.w / 2;
+      const footY = b.ty + b.h - 0.02;
+      const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
+      paintPlate(ctx, fence, footX, footY, wide, false, true, "hall", color, null);
+      if (b.kind === "gate" && b.open && b.complete) {
+        ctx.fillStyle = "rgba(18, 22, 16, 0.55)";
+        ctx.fillRect(b.tx + 0.28, b.ty + 0.42, 0.44, 0.28);
+      }
+      if (selected) {
+        ctx.strokeStyle = "#f3ead7";
+        ctx.lineWidth = 0.04;
+        ctx.strokeRect(b.tx + 0.08, b.ty + 0.08, 0.84, 0.84);
+      }
+      return;
+    }
     if (sim) drawFence(ctx, b, color, selected, time, sim);
     return;
   }
@@ -3965,17 +3970,22 @@ function drawBuilding(
     return;
   }
   const plate = hallPlate(b.kind);
-  const healthy = plate ? iso()?.[plate] : undefined;
   const frac = b.maxHp > 0 ? b.hp / b.maxHp : 1;
-  const img = (plate && b.complete && frac < 0.5 ? isoDmg(plate) : null) ?? healthy;
+  const img = (plate && b.complete && frac < 0.5 ? isoDmg(plate) : null) ?? hallImage(b.kind);
   if (img) {
     const footX = b.tx + b.w / 2;
     const footY = b.ty + b.h - 0.02;
     const wide = Math.max(b.w, b.h) * hallDrawMul(b.kind);
     ctx.fillStyle = "rgba(20, 16, 10, 0.2)";
     ctx.beginPath();
-    ctx.ellipse(footX + 0.26, footY + 0.2, wide * 0.34, wide * 0.09, 0.4, 0, Math.PI * 2);
+    ctx.ellipse(footX + 0.12, footY + 0.06, Math.min(b.w, wide) * 0.28, 0.07, 0.2, 0, Math.PI * 2);
     ctx.fill();
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 0.03;
+    ctx.strokeRect(b.tx + 0.08, b.ty + 0.08, Math.max(0.2, b.w - 0.16), Math.max(0.2, b.h - 0.16));
+    ctx.restore();
     ctx.globalAlpha = low && b.complete ? 0.62 : 1;
     if (!b.complete) {
       const p = Math.max(0.08, 1 - b.buildLeft / Math.max(0.01, b.buildTotal));
@@ -3995,10 +4005,8 @@ function drawBuilding(
     paintStructureHurt(ctx, b, footX, footY, wide, time);
     if (selected) {
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 0.05;
-      ctx.beginPath();
-      ctx.ellipse(footX, footY, Math.max(0.35, b.w * 0.42), Math.max(0.14, b.h * 0.16), 0, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.lineWidth = 0.04;
+      ctx.strokeRect(b.tx + 0.04, b.ty + 0.04, Math.max(0.2, b.w - 0.08), Math.max(0.2, b.h - 0.08));
     }
     return;
   }
@@ -4033,21 +4041,12 @@ function paintStructureHurt(
   ctx.beginPath();
   ctx.ellipse(0, roof + wide * 0.08, wide * 0.46, wide * 0.2, 0, 0, Math.PI * 2);
   ctx.fill();
-  const points = burning ? 5 : 3;
+  const points = burning ? 3 : 2;
   for (let i = 0; i < points; i++) {
-    const ox = (i - (points - 1) / 2) * wide * 0.3;
-    const oy = roof - (i % 2) * wide * 0.16;
-    paintSmoke(ctx, ox, oy, wide * (burning ? 0.32 : 0.2), time + i * 0.7, !burning);
-    if (burning) {
-      ctx.save();
-      ctx.globalAlpha = 0.35;
-      ctx.fillStyle = "#ff7a1a";
-      ctx.beginPath();
-      ctx.ellipse(ox, oy + wide * 0.18, wide * 0.22, wide * 0.12, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-      paintFlame(ctx, ox, oy + wide * 0.22, wide * 0.42, time + i);
-    }
+    const ox = (i - (points - 1) / 2) * wide * 0.18;
+    const oy = roof + wide * 0.1;
+    paintSmoke(ctx, ox, oy - wide * 0.34, wide * (burning ? 0.26 : 0.18), time + i * 0.7, !burning);
+    if (burning) paintFlame(ctx, ox, oy, wide * 0.32, time + i * 1.7);
   }
   ctx.restore();
 }
@@ -4123,34 +4122,48 @@ function paintDeathFx(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, view
     if (f.kind !== "boom") continue;
     const s = worldToScreen(cam, f.x, f.y, view);
     const lift = f.r > 0.7 ? cam.zoom * 0.55 : cam.zoom * 0.12;
-    const rad = Math.max(18, f.r * cam.zoom * (1.45 + k * 0.9));
-    const punch = k < 0.42 ? 1 : life;
+    const rad = Math.max(16, f.r * cam.zoom * (0.9 + k * 0.7));
+    const punch = k < 0.35 ? 1 : life;
+    const seed = Math.imul((f.x * 10) | 0, 374761393) ^ Math.imul((f.y * 10) | 0, 668265263);
     ctx.save();
     ctx.translate(s.x, s.y - lift);
+    ctx.globalAlpha = punch * 0.45;
+    ctx.fillStyle = "#3a342e";
+    for (let i = 0; i < 4; i++) {
+      const a = ((seed >> (i * 3)) & 7) / 7 * Math.PI * 2;
+      const rise = rad * (0.15 + k * 0.9) * (0.4 + ((seed >> i) & 3) * 0.15);
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(a) * rise * 0.35, -rise * 0.55, rad * 0.22, rad * 0.16, a, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.globalAlpha = punch;
-    ctx.strokeStyle = "#fff6d0";
-    ctx.lineWidth = Math.max(2.5, rad * 0.07);
+    if (k < 0.45) {
+      ctx.fillStyle = k < 0.12 ? "#fff6d8" : "#ffb04a";
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2 + 0.4;
+        const len = rad * (0.35 + (i % 3) * 0.12) * (0.5 + k);
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * rad * 0.08, Math.sin(a) * rad * 0.08);
+        ctx.quadraticCurveTo(Math.cos(a + 0.4) * len * 0.6, Math.sin(a + 0.2) * len * 0.45, Math.cos(a) * len, Math.sin(a) * len * 0.72);
+        ctx.quadraticCurveTo(Math.cos(a - 0.35) * len * 0.5, Math.sin(a - 0.2) * len * 0.4, Math.cos(a) * rad * 0.08, Math.sin(a) * rad * 0.08);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = punch * 0.9;
+    ctx.fillStyle = k < 0.18 ? "#fffdf6" : "#e23b18";
     ctx.beginPath();
-    ctx.arc(0, 0, rad * (0.62 + k * 0.55), 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = k < 0.22 ? "#fff8e6" : k < 0.5 ? "#ff9a1f" : "#e23b18";
-    ctx.beginPath();
-    ctx.arc(0, 0, rad * (k < 0.28 ? 0.7 : 0.48), 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#fffdf6";
-    ctx.beginPath();
-    ctx.arc(0, 0, rad * 0.24, 0, Math.PI * 2);
+    ctx.ellipse(0, 0, rad * (k < 0.2 ? 0.22 : 0.1), rad * 0.08, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.globalAlpha = punch * 0.95;
     for (let i = 0; i < 7; i++) {
-      const a = (i / 7) * Math.PI * 2 + 0.35;
-      const d = rad * (0.4 + k * 0.85);
+      const a = (i / 7) * Math.PI * 2 + ((seed >> 4) & 7) * 0.05;
+      const d = rad * (0.35 + k * 0.95);
       ctx.save();
-      ctx.translate(Math.cos(a) * d, Math.sin(a) * d);
-      ctx.rotate(a + k * 2.4);
-      ctx.fillStyle = i % 2 ? "#241810" : "#f0c078";
-      const w = Math.max(6, rad * 0.16);
-      ctx.fillRect(-w * 0.5, -w * 0.22, w, w * 0.44);
+      ctx.translate(Math.cos(a) * d, Math.sin(a) * d * 0.72);
+      ctx.rotate(a + k * 3);
+      ctx.fillStyle = i % 2 ? "#241810" : "#c98448";
+      const w = Math.max(4, rad * 0.12);
+      ctx.fillRect(-w * 0.5, -w * 0.18, w, w * 0.36);
       ctx.restore();
     }
     ctx.restore();
@@ -4168,23 +4181,55 @@ function paintSmoke(ctx: CanvasRenderingContext2D, x: number, y: number, r: numb
   ctx.restore();
 }
 
+function paintFlameTongue(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  h: number,
+  half: number,
+  lean: number,
+  flick: number,
+) {
+  const tip = y - h * flick;
+  ctx.beginPath();
+  ctx.moveTo(x - half, y);
+  ctx.bezierCurveTo(x - half * 0.15 + lean, y - h * 0.38, x + lean * 0.4, tip + h * 0.28, x + lean * 0.25, tip);
+  ctx.bezierCurveTo(x + half * 0.2 + lean * 0.3, y - h * 0.46, x + half * 0.85, y - h * 0.08, x + half * 0.7, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** Layered tongues on the roof. A single orange wedge reads as the orange seat badge. */
 function paintFlame(ctx: CanvasRenderingContext2D, x: number, y: number, h: number, time: number) {
-  const flick = 0.75 + 0.25 * Math.sin(time * 11);
+  const flick = 0.84 + 0.16 * Math.sin(time * 13);
+  const sway = Math.sin(time * 7.4) * h * 0.08;
+  const tongues = [
+    { dx: -0.16, half: 0.34, lift: 0.92, lean: -0.08 },
+    { dx: 0.18, half: 0.28, lift: 0.78, lean: 0.1 },
+    { dx: 0.02, half: 0.22, lift: 1.12, lean: 0.02 },
+  ];
   ctx.save();
-  ctx.globalAlpha = 0.9;
-  ctx.fillStyle = "#e25822";
-  ctx.beginPath();
-  ctx.moveTo(x - h * 0.35, y);
-  ctx.quadraticCurveTo(x - h * 0.1, y - h * flick, x, y - h * 1.3 * flick);
-  ctx.quadraticCurveTo(x + h * 0.1, y - h * flick, x + h * 0.35, y);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#ffe7a0";
-  ctx.beginPath();
-  ctx.moveTo(x - h * 0.15, y);
-  ctx.quadraticCurveTo(x, y - h * 0.7 * flick, x + h * 0.15, y);
-  ctx.closePath();
-  ctx.fill();
+  for (const tongue of tongues) {
+    const cx = x + sway + h * tongue.dx;
+    const rise = h * tongue.lift;
+    ctx.globalAlpha = 0.4;
+    ctx.fillStyle = "rgba(140, 42, 18, 0.55)";
+    paintFlameTongue(ctx, cx, y, rise * 1.08, h * tongue.half, h * tongue.lean, flick);
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = "rgba(232, 112, 28, 0.9)";
+    paintFlameTongue(ctx, cx, y, rise * 0.78, h * tongue.half * 0.62, h * tongue.lean * 0.6, flick);
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = "rgba(255, 236, 170, 0.95)";
+    paintFlameTongue(ctx, cx, y, rise * 0.46, h * tongue.half * 0.28, h * tongue.lean * 0.3, flick);
+  }
+  for (let i = 0; i < 4; i++) {
+    const p = (time * 0.65 + i * 0.23) % 1;
+    ctx.globalAlpha = (1 - p) * 0.75;
+    ctx.fillStyle = i % 2 === 0 ? "rgba(255, 228, 160, 0.9)" : "rgba(160, 54, 22, 0.65)";
+    ctx.beginPath();
+    ctx.arc(x + Math.sin(time * 3.1 + i * 1.7) * h * 0.22, y - p * h * 1.35, Math.max(0.015, h * 0.035), 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
@@ -4268,69 +4313,113 @@ function paintCaptureBars(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, 
   }
 }
 
+function paintPrizeFlag(ctx: CanvasRenderingContext2D, x: number, y: number) {
+  ctx.strokeStyle = "#f7f4ee";
+  ctx.lineWidth = 0.03;
+  ctx.beginPath();
+  ctx.moveTo(x, y + 0.32);
+  ctx.lineTo(x, y);
+  ctx.stroke();
+  ctx.fillStyle = "#f4f1ea";
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + 0.28, y + 0.1);
+  ctx.lineTo(x, y + 0.2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#d7d1c4";
+  ctx.fill();
+}
+
+/** Derrick and watchtower are landmarks at the phone zoom. A 1×1 pad still owns the footprint. */
 function paintPrize(ctx: CanvasRenderingContext2D, b: Building, color: string, time: number) {
-  const x = b.tx;
-  const y = b.ty;
+  const cx = b.tx + b.w / 2;
+  const ground = b.ty + b.h * 0.92;
   ctx.save();
   ctx.fillStyle = "rgba(20, 16, 10, 0.28)";
   ctx.beginPath();
-  ctx.ellipse(x + b.w / 2 + 0.12, y + b.h * 0.82, b.w * 0.42, 0.14, 0.3, 0, Math.PI * 2);
+  ctx.ellipse(cx + 0.1, ground + 0.08, Math.max(0.55, b.w * 0.62), 0.16, 0.25, 0, Math.PI * 2);
   ctx.fill();
   if (b.kind === "tower") {
-    ctx.strokeStyle = "rgba(214, 232, 255, 0.45)";
-    ctx.lineWidth = 0.04;
-    ctx.setLineDash([0.18, 0.14]);
+    ctx.strokeStyle = "rgba(220, 226, 216, 0.4)";
+    ctx.lineWidth = 0.035;
+    ctx.setLineDash([0.16, 0.12]);
     ctx.beginPath();
-    ctx.arc(x + 0.5, y + 0.5, 2.5, 0, Math.PI * 2);
+    ctx.arc(cx, b.ty + 0.55, 1.65, 0, Math.PI * 2);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = "#6a5a48";
-    ctx.fillRect(x + 0.28, y + 0.34, 0.44, 0.5);
+    ctx.fillStyle = "#6a5c4c";
+    ctx.fillRect(cx - 0.22, ground - 1.2, 0.44, 1.2);
+    ctx.fillStyle = "#8a7b68";
+    ctx.fillRect(cx - 0.16, ground - 1.2, 0.08, 1.2);
+    ctx.fillStyle = "#4e4338";
+    ctx.fillRect(cx - 0.36, ground - 1.48, 0.72, 0.32);
     ctx.fillStyle = color;
-    ctx.fillRect(x + 0.32, y + 0.18, 0.36, 0.22);
-    ctx.fillStyle = "#2a241c";
+    ctx.fillRect(cx - 0.24, ground - 1.4, 0.48, 0.1);
+    ctx.fillStyle = "#2c261f";
     ctx.beginPath();
-    ctx.moveTo(x + 0.18, y + 0.22);
-    ctx.lineTo(x + 0.5, y + 0.02);
-    ctx.lineTo(x + 0.82, y + 0.22);
-    ctx.closePath();
+    ctx.moveTo(cx - 0.42, ground - 1.46);
+    ctx.quadraticCurveTo(cx, ground - 1.78, cx + 0.42, ground - 1.46);
     ctx.fill();
-    ctx.fillStyle = "#f4ecdc";
-    ctx.fillRect(x + 0.46, y + 0.08, 0.08, 0.16);
+    ctx.strokeStyle = "#efe8dc";
+    ctx.lineWidth = 0.03;
+    ctx.beginPath();
+    ctx.moveTo(cx, ground - 1.72);
+    ctx.lineTo(cx, ground - 1.98);
+    ctx.stroke();
+    if (b.neutral) paintPrizeFlag(ctx, cx + 0.16, ground - 1.95);
+  } else if (b.kind === "supply") {
+    ctx.fillStyle = "#5c4e3e";
+    ctx.fillRect(cx - 0.62, ground - 0.78, 1.24, 0.78);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - 0.62, ground - 0.92, 1.24, 0.16);
+    ctx.fillStyle = "#3a3228";
+    ctx.fillRect(cx - 0.16, ground - 0.46, 0.32, 0.46);
+    ctx.fillStyle = "#efe8dc";
+    ctx.fillRect(cx - 0.28, ground - 0.62, 0.16, 0.12);
+    ctx.fillRect(cx + 0.12, ground - 0.62, 0.16, 0.12);
+    if (b.neutral) paintPrizeFlag(ctx, cx + 0.4, ground - 1.15);
   } else {
-    ctx.strokeStyle = "#4a3c2c";
+    ctx.strokeStyle = "#3a3026";
+    ctx.lineWidth = 0.07;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(cx - 0.52, ground);
+    ctx.lineTo(cx - 0.12, ground - 1.5);
+    ctx.moveTo(cx + 0.52, ground);
+    ctx.lineTo(cx + 0.12, ground - 1.5);
+    ctx.moveTo(cx - 0.52, ground);
+    ctx.lineTo(cx + 0.12, ground - 1.5);
+    ctx.moveTo(cx + 0.52, ground);
+    ctx.lineTo(cx - 0.12, ground - 1.5);
+    ctx.moveTo(cx - 0.32, ground - 0.72);
+    ctx.lineTo(cx + 0.32, ground - 0.72);
+    ctx.stroke();
+    ctx.fillStyle = "#2a241c";
+    ctx.fillRect(cx - 0.22, ground - 1.68, 0.44, 0.2);
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - 0.14, ground - 1.62, 0.28, 0.08);
+    const bob = Math.sin(time * 2.2 + b.tx) * 0.05;
+    ctx.strokeStyle = "#1c1a16";
     ctx.lineWidth = 0.045;
     ctx.beginPath();
-    ctx.moveTo(x + 0.22, y + 0.78);
-    ctx.lineTo(x + 0.38, y + 0.22);
-    ctx.moveTo(x + 0.78, y + 0.78);
-    ctx.lineTo(x + 0.62, y + 0.22);
-    ctx.moveTo(x + 0.22, y + 0.78);
-    ctx.lineTo(x + 0.62, y + 0.22);
-    ctx.moveTo(x + 0.78, y + 0.78);
-    ctx.lineTo(x + 0.38, y + 0.22);
+    ctx.moveTo(cx - 0.46, ground - 1.2 + bob);
+    ctx.lineTo(cx + 0.4, ground - 1.52 + bob);
     ctx.stroke();
-    ctx.fillStyle = "#3a3026";
-    ctx.fillRect(x + 0.34, y + 0.12, 0.32, 0.16);
-    ctx.fillStyle = color;
-    ctx.fillRect(x + 0.4, y + 0.16, 0.2, 0.08);
-    const bob = Math.sin(time * 2.2 + x) * 0.03;
-    ctx.fillStyle = "#1c1a16";
-    ctx.fillRect(x + 0.46, y + 0.28 + bob, 0.08, 0.42);
     ctx.fillStyle = "#6a5840";
     ctx.beginPath();
-    ctx.arc(x + 0.5, y + 0.72, 0.16, 0, Math.PI * 2);
+    ctx.arc(cx + 0.42, ground - 1.54 + bob, 0.11, 0, Math.PI * 2);
     ctx.fill();
+    ctx.fillStyle = "#1c1a16";
+    ctx.fillRect(cx - 0.04, ground - 0.9, 0.08, 0.78);
+    if (b.neutral) paintPrizeFlag(ctx, cx + 0.24, ground - 1.7);
   }
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 0.06;
-  ctx.strokeRect(x + 0.08, y + 0.08, b.w - 0.16, b.h - 0.16);
   if (b.cap > 0.05) {
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 0.07;
     ctx.beginPath();
     const frac = b.capTeam < 0 ? 1 : Math.max(0, Math.min(1, b.cap / 3));
-    ctx.arc(x + b.w / 2, y + b.h / 2, Math.max(b.w, b.h) * 0.72, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.arc(cx, b.ty + b.h / 2, Math.max(b.w, b.h) * 0.72, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
     ctx.stroke();
   }
   ctx.restore();
@@ -4450,7 +4539,7 @@ function drawUnit(
     ctx.beginPath();
     ctx.ellipse(x + 0.08, y + 0.06, wide * 0.34, wide * 0.1, 0.4, 0, Math.PI * 2);
     ctx.fill();
-    paintUnitMark(ctx, x, y + 0.04, wide, color, selected);
+    paintUnitMark(ctx, x, y + 0.04, unitWorldSpan(u.kind), color, selected);
   }
   // The battle camera stays close. A dot is only for a sprite that would
   // be smaller than a finger-tip, which this zoom range does not reach.
@@ -4465,67 +4554,7 @@ function drawUnit(
   }
   paintSolidUnit(ctx, u, x, y, color, selected, time, aim, moving, THEATER === "snow", VIEWER);
   if (leaf) paintLeaf(ctx, x, y);
-  if (selected) paintUnitMark(ctx, x, y + 0.04, wide, color, true);
-}
-
-/** Birch on the ragged edge, pine in the middle. Michigan only. */
-function paintLakesTree(ctx: CanvasRenderingContext2D, sim: Sim, x: number, y: number, stump: boolean) {
-  if (stump) {
-    paintTree(ctx, x, y, true);
-    return;
-  }
-  let n = 0;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      if (!dx && !dy) continue;
-      const nx = x + dx;
-      const ny = y + dy;
-      if (nx < 0 || ny < 0 || nx >= sim.gw || ny >= sim.gh) continue;
-      if ((sim.terrain[ny * sim.gw + nx] ?? 0) === TILE_SCRUB) n++;
-    }
-  }
-  const h = hash(x, y);
-  const birch = n < 5 ? h > 0.46 : h > 0.84;
-  const scale = 0.62 + hash(x * 3 + 1, y * 5 + 2) * 0.85;
-  ctx.save();
-  ctx.translate(x + 0.5, y + 0.78);
-  ctx.scale(scale, scale);
-  ctx.translate(-(x + 0.5), -(y + 0.78));
-  ctx.fillStyle = "rgba(0,0,0,0.28)";
-  ctx.beginPath();
-  ctx.ellipse(x + 0.55, y + 0.8, 0.2, 0.07, 0, 0, Math.PI * 2);
-  ctx.fill();
-  if (birch) {
-    ctx.fillStyle = "#f4f1ea";
-    ctx.fillRect(x + 0.46, y + 0.52, 0.08, 0.26);
-    ctx.fillStyle = h > 0.7 ? "#d7e38a" : "#b7d46a";
-    ctx.beginPath();
-    ctx.arc(x + 0.4, y + 0.4, 0.18, 0, Math.PI * 2);
-    ctx.arc(x + 0.58, y + 0.36, 0.16, 0, Math.PI * 2);
-    ctx.arc(x + 0.48, y + 0.26, 0.13, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#f7f4ee";
-    ctx.fillRect(x + 0.44, y + 0.5, 0.12, 0.04);
-    ctx.restore();
-    return;
-  }
-  ctx.fillStyle = "#4a3424";
-  ctx.fillRect(x + 0.47, y + 0.58, 0.07, 0.22);
-  ctx.fillStyle = h > 0.55 ? "#1c4630" : "#143628";
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, y + 0.08 + h * 0.06);
-  ctx.lineTo(x + 0.86, y + 0.62);
-  ctx.lineTo(x + 0.14, y + 0.62);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#2f6a40";
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, y + 0.16);
-  ctx.lineTo(x + 0.72, y + 0.42);
-  ctx.lineTo(x + 0.28, y + 0.42);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
+  if (selected) paintUnitMark(ctx, x, y + 0.04, unitWorldSpan(u.kind), color, true);
 }
 
 function paintLeaf(ctx: CanvasRenderingContext2D, x: number, y: number) {
@@ -4713,7 +4742,7 @@ function minimapSheet(sim: Sim): HTMLCanvasElement | null {
   g.putImageData(img, 0, 0);
   for (const b of sim.buildings) {
     if (b.hp <= 0 || !sim.buildingVisible(VIEWER, b)) continue;
-    g.fillStyle = seatPaint(sim, b.team);
+    g.fillStyle = structureMark(sim, b);
     g.fillRect(b.tx, b.ty, Math.max(1, b.w), Math.max(1, b.h));
   }
   miniSheet = { key, canvas };
@@ -4907,7 +4936,7 @@ function drawMinimap(
     ctx.drawImage(relief, r.x, r.y, r.s, r.s);
     for (const b of sim.buildings) {
       if (b.hp <= 0 || !sim.buildingVisible(VIEWER, b)) continue;
-      ctx.fillStyle = seatPaint(sim, b.team);
+      ctx.fillStyle = structureMark(sim, b);
       ctx.fillRect(r.x + b.tx * cell, r.y + b.ty * cell, Math.max(2, b.w * cell), Math.max(2, b.h * cell));
     }
   } else {
@@ -4932,7 +4961,7 @@ function drawMinimap(
     }
     for (const b of sim.buildings) {
       if (b.hp <= 0 || !sim.buildingVisible(VIEWER, b)) continue;
-      ctx.fillStyle = seatPaint(sim, b.team);
+      ctx.fillStyle = structureMark(sim, b);
       ctx.fillRect(r.x + b.tx * cell, r.y + b.ty * cell, Math.max(2, b.w * cell), Math.max(2, b.h * cell));
     }
   }
