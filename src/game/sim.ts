@@ -88,7 +88,7 @@ import {
 } from "./data.ts";
 import { unpack, type CustomMap } from "./custom.ts";
 import { lobbySize, offersNavy } from "./editor.ts";
-import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, matchNorthwestOre, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, shelveNorthwest, snapLand, stampCamp, waterKind, widenNorthwest, type FieldProp } from "./maps.ts";
+import { dressBattlefield, dressProps, evenMichiganFields, fairExpansionOre, fairNearbyOre, generateMap, matchNorthwestOre, openBuildPads, paveMichigan, plantCorners, plantMichiganHeart, resampleMap, seedScars, separateForests, shelveNorthwest, snapLand, stampCamp, waterKind, widenNorthwest, type FieldProp } from "./maps.ts";
 import { aiCount, alliances, navyHidden, orderCorners, type OpponentCount } from "./lobby.ts";
 import { findPath, nearestOpen } from "./path.ts";
 import { linkStarts } from "./pass.ts";
@@ -496,6 +496,7 @@ export function footprintOrigin(kind: BuildingId, wx: number, wy: number): { tx:
 export function shortPlaceReason(reason: string): string {
   if (!reason) return "";
   const r = reason.toLowerCase();
+  if (r.includes("tree") || r.includes("forest") || r.includes("scrub")) return "Blocked by trees";
   if (r.includes("unit")) return "On unit";
   if (r.includes("credit") || r.includes("fund")) return "Insufficient funds";
   if (r.includes("power")) return "No power";
@@ -514,6 +515,7 @@ export function ghostPlaceReason(reason: string): string {
   if (r.includes("overlap") || r.includes("unit")) return "Overlapping";
   if (r.includes("too far")) return "Out of build radius";
   if (r.includes("water")) return "That's water";
+  if (r.includes("tree") || r.includes("forest") || r.includes("scrub")) return "Blocked by trees";
   if (r.includes("rock")) return "Blocked by rock";
   if (r.includes("shore")) return "Shore only";
   if (r.includes("credit") || r.includes("fund")) return "Insufficient funds";
@@ -826,6 +828,7 @@ export class Sim {
         shelveNorthwest(this.terrain, this.crystal, gw, gh, slots);
       }
       this.clearStartClutter(slots);
+      if (!custom) separateForests(this.terrain, this.crystal, gw, gh, slots, 5);
       linkStarts(this.terrain, gw, gh, slots);
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
@@ -1247,7 +1250,7 @@ export class Sim {
         if (this.terrain[i] === TILE_DEEP || this.terrain[i] === TILE_SHALLOW || this.terrain[i] === TILE_WRECK) {
           return { ok: false, reason: "That's water" };
         }
-        if (this.terrain[i] === TILE_SCRUB) return { ok: false, reason: "Blocked" };
+        if (this.terrain[i] === TILE_SCRUB) return { ok: false, reason: "Blocked by trees" };
         if (isShell(this.terrain[i] ?? 0) && (this.craters[i] ?? 0) < 2) return { ok: false, reason: "Blocked" };
         if (def.shore && this.terrain[i] !== TILE_SHORE) return { ok: false, reason: "Shore only" };
         if (!def.shore && this.terrain[i] === TILE_SHORE && kind !== "wall") {
@@ -1304,6 +1307,38 @@ export class Sim {
       if (found) return { tx: pickX, ty: pickY };
     }
     return { tx, ty };
+  }
+
+  /**
+   * First ghost cell. The nearest tile the player can actually build on,
+   * measured from their Construction Yard, or from their start if the yard is not up yet.
+   */
+  nearestBuildPad(team: Team, kind: BuildingId): { tx: number; ty: number } | null {
+    const yard = this.buildings.find((b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0);
+    const home = this.starts.slots[team] ?? this.starts.player;
+    const ax = yard ? yard.tx + Math.floor(yard.w / 2) : Math.round(home.x);
+    const ay = yard ? yard.ty + Math.floor(yard.h / 2) : Math.round(home.y);
+    let best: { tx: number; ty: number } | null = null;
+    let bestD = Infinity;
+    for (let r = 0; r <= 22; r++) {
+      let found = false;
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (r > 0 && Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const tx = ax + dx;
+          const ty = ay + dy;
+          if (!this.canPlace(team, kind, tx, ty).ok) continue;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) {
+            bestD = d;
+            best = { tx, ty };
+            found = true;
+          }
+        }
+      }
+      if (found) return best;
+    }
+    return best;
   }
 
   tryPlace(team: Team, kind: BuildingId, tx: number, ty: number): PlaceResult {
@@ -3359,7 +3394,7 @@ export class Sim {
     const t = this.terrain[i];
     if (t === TILE_ROCK || t === TILE_CLIFF) return "Blocked by rock";
     if (t === TILE_DEEP || t === TILE_SHALLOW || t === TILE_WRECK) return "That's water";
-    if (t === TILE_SCRUB) return "Blocked";
+    if (t === TILE_SCRUB) return "Blocked by trees";
     if (isShell(t) && (this.craters[i] ?? 0) < 2) return "Blocked";
     if (this.crystal[i] > 0) return "Can't build on crystal";
     if (!canBuild(kind, this.factionOf(team))) return "Other faction";

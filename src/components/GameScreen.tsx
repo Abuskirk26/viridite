@@ -101,7 +101,7 @@ import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
 import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 import { getRenderMode } from "@/game/render3d/mode";
-import { projectSurface, projectWorld } from "@/game/render3d/camera";
+import { focusWorld, projectSurface, projectWorld } from "@/game/render3d/camera";
 import { sampleHeight } from "@/game/render3d/terrain";
 import { Scene3D } from "@/game/render3d/scene";
 
@@ -391,7 +391,19 @@ export function GameScreen() {
   const lastSave = useRef(0);
   const speedRef = useRef(1);
   const optsRef = useRef<SkirmishSetup>(DEFAULT_SETUP);
-  const draftRef = useRef<PointerDraft>({ box: null, hoverX: 0, hoverY: 0, hovering: false, wallPts: [], lift: false });
+  const draftRef = useRef<PointerDraft>({
+    box: null,
+    hoverX: 0,
+    hoverY: 0,
+    hovering: false,
+    wallPts: [],
+    lift: false,
+    anchor: false,
+    pressed: false,
+    follow: false,
+    cellTx: null,
+    cellTy: null,
+  });
   const touchPlaceRef = useRef(false);
   const shiftPlaceRef = useRef(false);
   const netRef = useRef<NetPlay | null>(null);
@@ -952,11 +964,31 @@ export function GameScreen() {
       }
       shakeRef.current = Math.max(0, shakeRef.current * 0.86) + sim.impulse;
       sim.impulse = 0;
-      const fingerX = draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2;
-      const fingerY = draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2;
-      const hover = placingRef.current
-        ? aimedCell(sim, camRef.current, viewRef.current, placingRef.current, fingerX, fingerY, false)
-        : null;
+      if (!placingRef.current) {
+        draftRef.current.anchor = false;
+        draftRef.current.lift = false;
+        draftRef.current.pressed = false;
+        draftRef.current.follow = false;
+        draftRef.current.cellTx = null;
+        draftRef.current.cellTy = null;
+      } else if (draftRef.current.follow) {
+        const cell = aimedCell(
+          sim,
+          camRef.current,
+          viewRef.current,
+          placingRef.current,
+          draftRef.current.hoverX,
+          draftRef.current.hoverY,
+          draftRef.current.lift,
+        );
+        draftRef.current.cellTx = cell.tx;
+        draftRef.current.cellTy = cell.ty;
+        draftRef.current.anchor = true;
+      }
+      const hover =
+        placingRef.current && draftRef.current.cellTx != null && draftRef.current.cellTy != null
+          ? { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy }
+          : null;
       const ghost = hover;
       let wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null = null;
       if (placingRef.current && isFence(placingRef.current)) {
@@ -1012,7 +1044,7 @@ export function GameScreen() {
         shake: shakeRef.current,
         viewer: viewerRef.current,
         placeGrid: true,
-        touchPlace: touchPlaceRef.current,
+        touchPlace: touchPlaceRef.current || (viewRef.current.h < 500 && viewRef.current.w > viewRef.current.h),
         glass: mode3d ? ("3d" as const) : ("2d" as const),
         project: mode3d
           ? (wx: number, wy: number) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy))
@@ -1085,8 +1117,11 @@ export function GameScreen() {
         return selRef.current.length ? "delay" : "immediate";
       },
       onMinimap: (wx, wy) => {
-        camRef.current.x = wx;
-        camRef.current.y = wy;
+        if (getRenderMode() === "3d") focusWorld(camRef.current, viewRef.current, wx, wy, terrainHeight);
+        else {
+          camRef.current.x = wx;
+          camRef.current.y = wy;
+        }
         camRef.current.vx = 0;
         camRef.current.vy = 0;
         clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64, viewRef.current, wideField(simRef.current?.mapSize ?? "skirmish"));
@@ -1109,11 +1144,24 @@ export function GameScreen() {
         const sim = simRef.current;
         if (!sim) return;
         const home = sim.starts.slots[viewerRef.current] ?? sim.starts.player;
-        camRef.current.x = home.x;
-        camRef.current.y = home.y;
+        if (getRenderMode() === "3d") focusWorld(camRef.current, viewRef.current, home.x, home.y, terrainHeight);
+        else {
+          camRef.current.x = home.x;
+          camRef.current.y = home.y;
+        }
         camRef.current.vx = 0;
         camRef.current.vy = 0;
         clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
+      },
+      overUi: (sx, sy) => {
+        const col = document.querySelector("[data-testid='build-column']");
+        const canvas = canvasRef.current;
+        if (!col || !canvas) return false;
+        const cr = canvas.getBoundingClientRect();
+        const r = col.getBoundingClientRect();
+        const x = cr.left + sx;
+        const y = cr.top + sy;
+        return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
       },
       placing: () => !!placingRef.current,
       placingWall: () => !!placingRef.current && isFence(placingRef.current),
@@ -1123,16 +1171,10 @@ export function GameScreen() {
       placeUi: (sx, sy) => {
         const sim = simRef.current;
         const kind = placingRef.current;
-        if (!sim || !kind || isFence(kind) || !touchPlaceRef.current || !draftRef.current.hovering) return null;
-        const show = aimedCell(
-          sim,
-          camRef.current,
-          viewRef.current,
-          kind,
-          draftRef.current.hoverX,
-          draftRef.current.hoverY,
-          false,
-        );
+        const phone = viewRef.current.h < 500 && viewRef.current.w > viewRef.current.h;
+        if (!sim || !kind || isFence(kind) || (!touchPlaceRef.current && !phone)) return null;
+        if (draftRef.current.cellTx == null || draftRef.current.cellTy == null) return null;
+        const show = { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy };
         const box = placeChrome(
           camRef.current,
           viewRef.current,
@@ -1154,15 +1196,12 @@ export function GameScreen() {
           setPlacing(null);
           return;
         }
-        const origin = aimedCell(
-          sim,
-          camRef.current,
-          viewRef.current,
-          kind,
-          draftRef.current.hoverX,
-          draftRef.current.hoverY,
-        );
+        const origin =
+          draftRef.current.cellTx != null && draftRef.current.cellTy != null
+            ? { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy }
+            : aimedCell(sim, camRef.current, viewRef.current, kind, draftRef.current.hoverX, draftRef.current.hoverY, draftRef.current.lift);
         const me = viewerRef.current as 0;
+        // Friends and skirmish share this order. Online it is lockstep; offline it applies now.
         actRef.current("build", { kind, tx: origin.tx, ty: origin.ty }, () => {
           const res = sim.tryPlace(me, kind, origin.tx, origin.ty);
           if (res.ok) setPlacing(null);
@@ -1232,7 +1271,10 @@ export function GameScreen() {
         if (placingRef.current) {
           const kind = placingRef.current;
           if (isFence(kind)) return;
-          const origin = aimedCell(sim, camRef.current, viewRef.current, kind, sx, sy);
+          const tapped = aimedCell(sim, camRef.current, viewRef.current, kind, sx, sy);
+          const origin = { tx: tapped.tx, ty: tapped.ty };
+          draftRef.current.cellTx = origin.tx;
+          draftRef.current.cellTy = origin.ty;
           const keep = shift;
           actRef.current("build", { kind, tx: origin.tx, ty: origin.ty }, () => {
             const res = sim.tryPlace(me, kind, origin.tx, origin.ty);
@@ -1380,14 +1422,8 @@ export function GameScreen() {
   const sim = simRef.current;
   const ghostReason = (() => {
     if (!sim || !placing) return "";
-    const origin = aimedCell(
-      sim,
-      camRef.current,
-      viewRef.current,
-      placing,
-      draftRef.current.hovering ? draftRef.current.hoverX : viewRef.current.w / 2,
-      draftRef.current.hovering ? draftRef.current.hoverY : viewRef.current.h / 2,
-    );
+    if (draftRef.current.cellTx == null || draftRef.current.cellTy == null) return "";
+    const origin = { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy };
     if (isFence(placing)) {
       const step = sim.previewFence(viewer as 0, placing, [origin])[0];
       if (!step) return "Drag a line";
@@ -1402,6 +1438,15 @@ export function GameScreen() {
 
   const placeKind = (kind: BuildingId) => {
     unlockAudio();
+    const live = simRef.current;
+    const spot = live ? live.nearestBuildPad(viewerRef.current as 0, kind) : null;
+    placingRef.current = kind;
+    draftRef.current.anchor = true;
+    draftRef.current.lift = false;
+    draftRef.current.pressed = false;
+    draftRef.current.follow = false;
+    draftRef.current.cellTx = spot?.tx ?? null;
+    draftRef.current.cellTy = spot?.ty ?? null;
     setPlacing(kind);
     setSel([]);
     setSelB(null);
@@ -1811,7 +1856,7 @@ export function GameScreen() {
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
               <canvas ref={glRef} className="pointer-events-none absolute inset-0 hidden h-full w-full" data-testid="battlefield-3d" />
-              <canvas ref={canvasRef} className="relative z-[1] h-full w-full touch-none" data-testid="battlefield" />
+              <canvas ref={canvasRef} className="relative z-0 h-full w-full touch-none" data-testid="battlefield" />
               <div
                 data-testid="alert-lane"
                 className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
@@ -1889,6 +1934,7 @@ export function GameScreen() {
               {phase === "play" && !paused && (
                 <FieldPad
                   buildOn={buildOpen || !!placing}
+                  placing={!!placing}
                   moveOn={sel.length > 0 && !selecting}
                   selecting={selecting}
                   armed={arming}
@@ -2008,7 +2054,8 @@ export function GameScreen() {
                   </p>
                   <BarButton
                     label="Resume"
-                    slim
+                    testId="pause-resume"
+                    block
                     onClick={() => {
                       unlockAudio();
                       setPaused(false);
@@ -2016,52 +2063,32 @@ export function GameScreen() {
                   >
                     <Play className="size-4" /> Resume
                   </BarButton>
-                  <p data-testid="pause-ai" className="line-clamp-2 max-w-xs text-center text-xs text-pretty text-gold">
+                  <p data-testid="pause-ai" className="line-clamp-1 max-w-xs text-center text-xs text-pretty text-gold">
                     {botBrief(sim)}
                   </p>
-                  <PauseSound />
-                  <p data-testid="pause-rules" className="max-w-xs text-center text-xs text-pretty text-gold">
-                    {SIZE_LABEL[sim.mapSize]} · {sim.gw}² · {TEAM_LABEL[sim.teamMode]} ·{" "}
-                    {sim.sharedVision ? "shared sight" : "own sight"}
+                  <p data-testid="pause-rules" className="line-clamp-2 max-w-xs text-center text-[11px] leading-tight text-pretty text-muted">
+                    {sim.mapName} · {SIZE_LABEL[sim.mapSize]} · {sim.fogOn ? "fog" : "no fog"} ·{" "}
+                    {sim.startCredits.toLocaleString("en-US")} · {sim.difficulty} · {TEAM_LABEL[sim.teamMode]}
                   </p>
-                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-muted">
-                    {sim.mapName} · {FACTION_NAME[sim.playerFaction]} vs {FACTION_NAME[sim.enemyFaction]}
-                    {sim.opponents >= 2 ? ` · East ${FACTION_NAME[sim.factionOf(2)]}` : ""}
-                    {sim.opponents >= 3 ? ` · South ${FACTION_NAME[sim.factionOf(3)]}` : ""} ·{" "}
-                    {sim.startCredits.toLocaleString("en-US")} each · {sim.stanceEach ? "per-seat AI" : `${sim.ai} AI`} ·{" "}
-                    {sim.difficulty} · {sim.fogOn ? "fog" : "no fog"} · {sim.cratesOn ? "crates" : "no crates"} ·{" "}
-                    {sim.wallsOn ? "walls" : "no walls"} · {START_LABEL[sim.startPos]} · {optsRef.current.speed}×
-                  </p>
-                  <p className="max-w-xs text-center text-[11px] leading-tight text-pretty text-brass">
-                    {packById(doctrineOf()).name}. Restart same rules. Doctrine stays locked.
-                  </p>
-                  <BarButton label="Match settings" slim testId="pause-settings" onClick={() => setPauseSheet(true)}>
-                    Settings
-                  </BarButton>
-                  <BarButton
-                    label="Resume"
-                    slim
-                    onClick={() => {
-                      unlockAudio();
-                      setPaused(false);
-                    }}
-                  >
-                    <Play className="size-4" /> Resume
-                  </BarButton>
-                  <BarButton label="Restart with these rules" slim testId="restart-skirmish" onClick={restartSame}>
-                    <RotateCcw className="size-4" /> Restart
-                  </BarButton>
-                  <BarButton
-                    label="Save and leave"
-                    slim
-                    onClick={() => {
-                      if (simRef.current) writeSave(simRef.current, camRef.current);
-                      setHasSave(true);
-                      setPhase("menu");
-                    }}
-                  >
-                    Menu
-                  </BarButton>
+                  <div className="flex w-full gap-1">
+                    <BarButton label="Match settings" testId="pause-settings" block onClick={() => setPauseSheet(true)}>
+                      Settings
+                    </BarButton>
+                    <BarButton label="Restart with these rules" testId="restart-skirmish" block onClick={restartSame}>
+                      <RotateCcw className="size-4" /> Restart
+                    </BarButton>
+                    <BarButton
+                      label="Save and leave"
+                      block
+                      onClick={() => {
+                        if (simRef.current) writeSave(simRef.current, camRef.current);
+                        setHasSave(true);
+                        setPhase("menu");
+                      }}
+                    >
+                      Menu
+                    </BarButton>
+                  </div>
                 </Overlay>
               )}
               {phase === "over" && (
@@ -3194,7 +3221,16 @@ function BuildColumn({
   return (
     <aside
       data-testid="build-column"
-      className={`absolute top-1 right-[104px] z-30 flex w-44 flex-col border border-brass-dim bg-field/94 ${placing ? "bottom-[108px]" : "bottom-1"}`}
+      className={`pointer-events-auto absolute top-1 right-[104px] z-40 flex w-44 flex-col border border-brass-dim bg-field/94 ${placing ? "bottom-[108px]" : "bottom-1"}`}
+      style={{ touchAction: "none" }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      onTouchStart={(e) => e.stopPropagation()}
+      onTouchMove={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+      }}
     >
       <div className="flex h-11 shrink-0 items-center justify-between px-1">
         <p className="font-display text-[11px] uppercase tracking-wide text-gold">Build</p>
@@ -3228,8 +3264,10 @@ function BuildColumn({
           const d = drag.current;
           if (!el || !d.active) return;
           const dy = e.clientY - d.y;
-          if (Math.abs(dy) > 8) d.moved = true;
+          if (Math.abs(dy) > 4) d.moved = true;
           el.scrollTop = d.top - dy;
+          e.stopPropagation();
+          e.preventDefault();
         }}
         onPointerUp={() => {
           const d = drag.current;
@@ -3304,6 +3342,7 @@ function BuildColumn({
 
 function FieldPad({
   buildOn,
+  placing = false,
   moveOn,
   selecting,
   armed,
@@ -3318,6 +3357,7 @@ function FieldPad({
   onArmy,
 }: {
   buildOn: boolean;
+  placing?: boolean;
   moveOn: boolean;
   selecting: boolean;
   armed: boolean;
@@ -3370,26 +3410,30 @@ function FieldPad({
         </button>
       </div>
       <div className={`pointer-events-auto absolute flex flex-col gap-2 ${right} ${spot}`}>
-        <button
-          type="button"
-          data-testid="pad-attack-move"
-          aria-pressed={armed}
-          aria-label={armed ? "Tap the map or minimap to attack-move" : "Attack-move"}
-          className={`${key} px-1 font-display text-[10px] uppercase leading-none ${armed ? "border-danger bg-danger text-ink" : ""}`}
-          onClick={onAttackMove}
-        >
-          {armed ? "Tap" : "A-Move"}
-        </button>
-        <button
-          type="button"
-          data-testid="pad-move"
-          aria-pressed={moveOn}
-          aria-label="Move"
-          className={`${key} ${moveOn ? "bg-crystal text-crystal-ink" : ""}`}
-          onClick={onMove}
-        >
-          <Move className="size-6" />
-        </button>
+        {placing ? null : (
+          <button
+            type="button"
+            data-testid="pad-attack-move"
+            aria-pressed={armed}
+            aria-label={armed ? "Tap the map or minimap to attack-move" : "Attack-move"}
+            className={`${key} px-1 font-display text-[10px] uppercase leading-none ${armed ? "border-danger bg-danger text-ink" : ""}`}
+            onClick={onAttackMove}
+          >
+            {armed ? "Tap" : "A-Move"}
+          </button>
+        )}
+        {placing ? null : (
+          <button
+            type="button"
+            data-testid="pad-move"
+            aria-pressed={moveOn}
+            aria-label="Move"
+            className={`${key} ${moveOn ? "bg-crystal text-crystal-ink" : ""}`}
+            onClick={onMove}
+          >
+            <Move className="size-6" />
+          </button>
+        )}
         <button
           type="button"
           data-testid="pad-select"
@@ -4116,9 +4160,9 @@ function IconButton({
 function Overlay({ title, children, wide = false, fit = false }: { title: string; children: ReactNode; wide?: boolean; fit?: boolean }) {
   if (fit) {
     return (
-      <div className="fixed inset-0 z-50 overflow-y-auto overscroll-contain bg-field/80" data-testid="match-end">
-        <div className={`steel mx-auto my-1 flex w-full flex-col items-center gap-1 px-3 py-2 ${wide ? "max-w-lg" : "max-w-sm"}`}>
-          <h2 data-testid="match-end-title" className="font-display text-xl uppercase tracking-widest text-gold">{title}</h2>
+      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-hidden bg-field/80 p-2" data-testid="match-end">
+        <div className={`steel flex max-h-full w-full flex-col items-center gap-1 overflow-hidden px-3 py-2 ${wide ? "max-w-lg" : "max-w-sm"}`}>
+          <h2 data-testid="match-end-title" className="font-display text-lg uppercase tracking-widest text-gold">{title}</h2>
           {children}
         </div>
       </div>

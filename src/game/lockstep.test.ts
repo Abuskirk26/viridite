@@ -488,6 +488,32 @@ test("diverging state hashes resync from the host, then offer a rematch", () => 
   assert.equal(fatal.some((o) => o.msg.op === "desync"), true);
 });
 
+test("a friends build order places the same hall on both phones", () => {
+  const { a, b } = bootPair();
+  const mcvA = a.sim!.units.find((u) => u.team === 0 && u.kind === "mcv");
+  const mcvB = b.sim!.units.find((u) => u.team === 1 && u.kind === "mcv");
+  assert.ok(mcvA && mcvB);
+  a.command("deploy", { ids: [mcvA.id] });
+  b.command("deploy", { ids: [mcvB.id] });
+  for (let i = 0; i < 50; i++) {
+    assert.equal(a.step(), true, a.waiting);
+    assert.equal(b.step(), true, b.waiting);
+  }
+  const spot = a.sim!.nearestBuildPad(0, "power");
+  assert.ok(spot);
+  assert.equal(a.sim!.canPlace(0, "power", spot.tx, spot.ty).ok, true);
+  a.command("build", { kind: "power", tx: spot.tx, ty: spot.ty });
+  for (let i = 0; i < 16; i++) {
+    assert.equal(a.step(), true, a.waiting);
+    assert.equal(b.step(), true, b.waiting);
+  }
+  const placed = (sim: NonNullable<typeof a.sim>) =>
+    sim.buildings.some((u) => u.team === 0 && u.kind === "power" && u.tx === spot.tx && u.ty === spot.ty);
+  assert.equal(placed(a.sim!), true);
+  assert.equal(placed(b.sim!), true);
+  assert.equal(a.sim!.checksum(), b.sim!.checksum());
+});
+
 test("both phones deploy the MCV, move, and keep the same checksum", () => {
   const { a, b } = bootPair();
   assert.equal(a.sim!.seed, b.sim!.seed);
