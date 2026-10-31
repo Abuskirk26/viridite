@@ -51,7 +51,7 @@ const CONTROLS: { how: string; what: string }[] = [
   { how: "Drag", what: "Box-select your units." },
   { how: "Order", what: "With units selected, tap ground to move. Tap an enemy to attack." },
   { how: "Double-tap", what: "Attack-move. Or tap A-Move on the pad, then the map or the minimap." },
-  { how: "Minimap", what: "Below the top bar. Red diamonds are enemy starts, even in the fog. Tap or drag to jump. Tap while A-Move is on to send troops." },
+  { how: "Minimap", what: "Below the top bar. Enemy camps stay hidden until you scout them. Tap or drag to jump. Tap while A-Move is on to send troops." },
   { how: "Build", what: "Landscape: right-hand column. Portrait: bottom drawer. Ghost is green if legal, red if blocked." },
   { how: "Orders", what: "Stop, Guard, Attack-Move, and Scatter sit on the bottom bar." },
   { how: "Pause", what: "Restart uses this same lobby setup." },

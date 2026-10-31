@@ -40,6 +40,15 @@ export interface PointerDraft {
   wallPts: { x: number; y: number }[];
   /** True after the place finger has moved. The ghost lifts only while this is set. */
   lift: boolean;
+  /** True once this placement has a cell. The first cell is the pad by the base. */
+  anchor: boolean;
+  /** True while the place finger is down. A hover must not steal the starting pad. */
+  pressed: boolean;
+  /** True after the pointer moves during this placement. Until then the ghost stays on the base pad. */
+  follow: boolean;
+  /** Ghost tile. Null until placement picks the pad by the base. */
+  cellTx: number | null;
+  cellTy: number | null;
 }
 
 export interface InputHooks {
@@ -73,6 +82,8 @@ export interface InputHooks {
   onPlaceUi?: (action: "confirm" | "cancel") => void;
   /** Fired after pinch or wheel so the battle can ease the +/- rocker to the same zoom. */
   onZoom?: (zoom: number) => void;
+  /** True when this pixel is over the build list. The map must not pan. */
+  overUi?: (sx: number, sy: number) => boolean;
   /** Screen-space polyline. A tap is a one-point run. */
   onWall?: (screenPts: { x: number; y: number }[]) => void;
   /**
@@ -206,14 +217,14 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
 
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === "mouse" && e.button === 2) e.preventDefault();
-    el.setPointerCapture(e.pointerId);
     const p = local(e);
+    if (hooks.overUi?.(p.x, p.y)) return;
+    el.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { id: e.pointerId, x: p.x, y: p.y, sx: p.x, sy: p.y, px: p.x, py: p.y, button: e.button });
     hooks.onPointerKind?.(e.pointerType !== "mouse");
     hooks.camera.hold = true;
     hooks.camera.vx = 0;
     hooks.camera.vy = 0;
-    hooks.draft.lift = false;
 
     if (pts.size >= 2) {
       const pair = pinchPair();
@@ -259,9 +270,16 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       hooks.onPlaceUi?.(chrome);
       return;
     }
+    // A new press starts on the finger. Confirm already returned, so it still sees the lifted ghost.
+    hooks.draft.lift = false;
     hooks.draft.hoverX = p.x;
     hooks.draft.hoverY = p.y;
     hooks.draft.hovering = true;
+    if (hooks.placing?.()) {
+      hooks.draft.anchor = true;
+      hooks.draft.pressed = true;
+      hooks.draft.follow = true;
+    }
     if (hooks.placingWall?.()) {
       mode = "wall";
       hooks.draft.wallPts = [{ x: p.x, y: p.y }];
@@ -289,6 +307,9 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     hooks.draft.hoverX = p.x;
     hooks.draft.hoverY = p.y;
     hooks.draft.hovering = true;
+    // Follow only while a finger or mouse button is down. Before that press the
+    // ghost stays on the nearest legal pad beside the yard.
+    if (hooks.placing?.() && pts.has(e.pointerId)) hooks.draft.follow = true;
     hooks.onPointerKind?.(e.pointerType !== "mouse");
     const cur = pts.get(e.pointerId);
     if (!cur) return;
@@ -325,7 +346,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       return;
     }
     if (mode === "place") {
-      if (Math.hypot(p.x - cur.sx, p.y - cur.sy) > 8) hooks.draft.lift = true;
+      // A finger drag lifts the ghost above the hand. A mouse cursor stays on the tile.
+      if (e.pointerType !== "mouse" && Math.hypot(p.x - cur.sx, p.y - cur.sy) > 8) hooks.draft.lift = true;
       return;
     }
     if (mode === "pending") {
@@ -411,7 +433,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     }
     if (mode === "place") {
       mode = "none";
-      hooks.draft.lift = false;
+      hooks.draft.pressed = false;
+      // Leave lift and the cell so the ghost stays where it was drawn.
       if (performance.now() < suppressUntil) return;
       if (e.pointerType !== "mouse") return;
       fireTap(p.x, p.y, false, e.shiftKey);

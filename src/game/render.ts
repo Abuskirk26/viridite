@@ -1074,6 +1074,12 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
   ctx.restore();
 }
 
+/** Keep Confirm / Cancel off the phone dock, the top bar, and the build pad. */
+export function placeSafeMargin(view: View): { l: number; t: number; r: number; b: number } {
+  const land = view.h > 0 && view.h < 500 && view.w > view.h;
+  return land ? { l: 64, t: 40, r: 12, b: 76 } : { l: 8, t: 8, r: 8, b: 8 };
+}
+
 export function placeChrome(
   cam: Camera,
   view: View,
@@ -1086,6 +1092,7 @@ export function placeChrome(
   const bw = 112;
   const bh = 48;
   const gap = 10;
+  const margin = placeSafeMargin(view);
   const to = project ?? ((x: number, y: number) => worldToScreen(cam, x, y, view));
   const a = to(tx, ty);
   const b = to(tx + w, ty + h);
@@ -1096,10 +1103,11 @@ export function placeChrome(
   const stack = bh * 2 + 6;
   let x = Math.round(right + gap);
   let y = Math.round((top + bottom) / 2 - stack / 2);
-  if (x + bw > view.w - 4) x = Math.round(left - gap - bw);
-  if (x < 4) x = 4;
-  if (y < 4) y = 4;
-  if (y + stack > view.h - 4) y = Math.max(4, Math.round(view.h - 4 - stack));
+  if (x + bw > view.w - margin.r) x = Math.round(left - gap - bw);
+  if (x < margin.l) x = margin.l;
+  if (x + bw > view.w - margin.r) x = Math.max(margin.l, Math.round(view.w - margin.r - bw));
+  if (y < margin.t) y = margin.t;
+  if (y + stack > view.h - margin.b) y = Math.max(margin.t, Math.round(view.h - margin.b - stack));
   return {
     confirm: { x, y, w: bw, h: bh },
     cancel: { x, y: y + bh + 6, w: bw, h: bh },
@@ -1224,7 +1232,8 @@ function drawPlaceLabel(
     text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
     const s = to(tx + def.w / 2, ty);
-    const lines = check.ok ? [text, power] : [text];
+    const mark = check.ok ? "✓" : "✕";
+    const lines = check.ok ? [`${mark}  ${text}`, power] : [mark, text];
     paintPlaceCard(ctx, s.x, s.y, lines, bad);
     return;
   } else return;
@@ -5002,7 +5011,8 @@ function drawMinimap(
       const tx = c.x | 0;
       const ty = c.y | 0;
       const seen = tx >= 0 && ty >= 0 && tx < sim.gw && ty < sim.gh ? (sim.fog[VIEWER]?.[ty * sim.gw + tx] ?? 0) : 0;
-      if (seen === 0) continue;
+      // Fog off fills every tile with 2. A real shroud keeps the camp hidden until it is scouted.
+      if (sim.fogOn && seen === 0) continue;
     }
     if (seat >= 0) paintTeamShape(ctx, cx, cy, 6, seatPaint(sim, seat), teamStyle(seat).shape, 1);
     else {

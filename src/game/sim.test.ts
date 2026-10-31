@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_FORD, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
 import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
-import { DEPLOY_SECS, NORMAL_HARASS_AT, NORMAL_PUSH_AT, Sim, footprintOrigin, shortPlaceReason, type Building } from "./sim.ts";
+import { DEPLOY_SECS, NORMAL_HARASS_AT, NORMAL_PUSH_AT, Sim, footprintOrigin, ghostPlaceReason, shortPlaceReason, type Building } from "./sim.ts";
 import { findPath } from "./path.ts";
 import { hallPictureLift, screenToWorld, setViewPitch, tacticalHome, viewPitch, worldToScreen } from "./view.ts";
 import { aiHeat, aiPace, aiThink } from "./ai.ts";
@@ -90,6 +90,8 @@ test("a ghost snaps onto the yard radius and names a miss", () => {
   assert.equal(shortPlaceReason("Not enough credits"), "Insufficient funds");
   assert.equal(shortPlaceReason("Too far from your buildings"), "Too far");
   assert.equal(shortPlaceReason("Blocked"), "Blocked");
+  assert.equal(shortPlaceReason("Blocked by trees"), "Blocked by trees");
+  assert.equal(ghostPlaceReason("Blocked by trees"), "Blocked by trees");
 });
 
 test("deploy MCV into a construction yard", () => {
@@ -2835,6 +2837,85 @@ test("the northwest michigan pad fits a full base beside its ore", () => {
     if (d <= 15) oreClose = true;
   }
   assert.equal(oreClose, true, "ore left the camp");
+});
+
+test("forests stay at least five tiles from ore and start bases", () => {
+  const gap = 5;
+  const gap2 = gap * gap;
+  for (const mapId of ["coast", "dry", "palm", "michigan"] as const) {
+    const sim = new Sim({
+      mapId,
+      faction: "concord",
+      mode: "destroy",
+      fog: true,
+      crates: false,
+      cpu: [false, false, false, false],
+      seed: 1,
+      ...(mapId === "michigan" ? { mapSize: "continent" as const } : {}),
+    });
+    const ore: [number, number][] = [];
+    for (let y = 0; y < sim.gh; y++) {
+      for (let x = 0; x < sim.gw; x++) {
+        if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) ore.push([x, y]);
+      }
+    }
+    let scrub = 0;
+    for (let y = 0; y < sim.gh; y++) {
+      for (let x = 0; x < sim.gw; x++) {
+        if (sim.terrain[y * sim.gw + x] !== TILE_SCRUB) continue;
+        scrub++;
+        const cx = x + 0.5;
+        const cy = y + 0.5;
+        for (const start of sim.starts.slots) {
+          const dx = cx - start.x;
+          const dy = cy - start.y;
+          assert.ok(dx * dx + dy * dy >= gap2, `${mapId} trees on a start at ${x},${y}`);
+        }
+        for (const [ox, oy] of ore) {
+          const dx = ox + 0.5 - cx;
+          const dy = oy + 0.5 - cy;
+          assert.ok(dx * dx + dy * dy >= gap2, `${mapId} trees on ore at ${x},${y}`);
+        }
+      }
+    }
+    assert.ok(scrub > 8, `${mapId} forests ${scrub}`);
+  }
+});
+
+test("the first ghost cell is the nearest pad by the yard", () => {
+  const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  const yard = deployPlayer(sim);
+  assert.ok(yard);
+  sim.credits[0] = 8000;
+  const spot = sim.nearestBuildPad(0, "power");
+  assert.ok(spot);
+  assert.equal(sim.canPlace(0, "power", spot.tx, spot.ty).ok, true);
+  const dx = spot.tx + 1 - (yard.tx + yard.w / 2);
+  const dy = spot.ty + 1 - (yard.ty + yard.h / 2);
+  assert.ok(dx * dx + dy * dy < 12 * 12, `pad drifted to ${spot.tx},${spot.ty}`);
+});
+
+test("a tree tile tells the player it is blocked by trees", () => {
+  const sim = new Sim({ mapId: "dry", faction: "concord", mode: "destroy", fog: false, crates: false, cpu: [false, false, false, false], seed: 1 });
+  const yard = deployPlayer(sim);
+  assert.ok(yard);
+  sim.credits[0] = 8000;
+  const tx = yard.tx + yard.w + 1;
+  const ty = yard.ty;
+  sim.terrain[ty * sim.gw + tx] = TILE_SCRUB;
+  const bag = sim.canPlace(0, "sandbag", tx, ty);
+  assert.equal(bag.ok, false);
+  assert.equal(bag.reason, "Blocked by trees");
+  assert.equal(ghostPlaceReason(bag.reason), "Blocked by trees");
+  assert.equal(shortPlaceReason(bag.reason), "Blocked by trees");
+  for (let dy = 0; dy < 2; dy++) {
+    for (let dx = 0; dx < 2; dx++) sim.terrain[(ty + dy) * sim.gw + (tx + dx)] = TILE_SCRUB;
+  }
+  const hall = sim.canPlace(0, "power", tx, ty);
+  assert.equal(hall.ok, false);
+  assert.equal(hall.reason, "Blocked by trees");
+  assert.equal(ghostPlaceReason(hall.reason), "Blocked by trees");
+  assert.equal(shortPlaceReason(hall.reason), "Blocked by trees");
 });
 
 

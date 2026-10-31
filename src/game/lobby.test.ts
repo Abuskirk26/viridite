@@ -404,3 +404,16 @@ test("loading viridite-skirmish-rules always starts every bot at Normal", () => 
     else delete (globalThis as { localStorage?: Storage }).localStorage;
   }
 });
+
+test("a default skirmish keeps fog on and hides the enemy camp", () => {
+  assert.equal(DEFAULT_SETUP.fog, true);
+  assert.equal(toNewGame(DEFAULT_SETUP).fog, true);
+  const sim = new Sim({ ...toNewGame(DEFAULT_SETUP), seed: 1, cpu: [false, true, false, false] });
+  assert.equal(sim.fogOn, true);
+  const enemy = sim.units.find((u) => u.team === 1 && u.hp > 0);
+  assert.ok(enemy);
+  assert.equal(sim.visibleUnit(0, enemy), false);
+  assert.equal(sim.minimapUnit(0, enemy), false);
+  const seen = sim.fog[0]?.[(enemy.y | 0) * sim.gw + (enemy.x | 0)] ?? 0;
+  assert.equal(seen, 0);
+});

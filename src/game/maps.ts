@@ -1081,6 +1081,102 @@ function dressHash(x: number, y: number, salt: number): number {
   return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
 }
 
+/**
+ * Trees may not touch an ore field or a start. `gap` is the minimum distance
+ * in tiles from a scrub cell to the nearest ore tile or camp.
+ */
+export function separateForests(
+  terrain: Uint8Array,
+  crystal: Uint16Array,
+  gw: number,
+  gh: number,
+  pads: { x: number; y: number }[],
+  gap = 5,
+) {
+  const gap2 = gap * gap;
+  const tooClose = (x: number, y: number) => {
+    const cx = x + 0.5;
+    const cy = y + 0.5;
+    for (const p of pads) {
+      const dx = cx - p.x;
+      const dy = cy - p.y;
+      if (dx * dx + dy * dy < gap2) return true;
+    }
+    const x0 = Math.max(0, x - gap + 1);
+    const y0 = Math.max(0, y - gap + 1);
+    const x1 = Math.min(gw - 1, x + gap - 1);
+    const y1 = Math.min(gh - 1, y + gap - 1);
+    for (let ty = y0; ty <= y1; ty++) {
+      for (let tx = x0; tx <= x1; tx++) {
+        if ((crystal[ty * gw + tx] ?? 0) <= 0) continue;
+        const dx = tx + 0.5 - cx;
+        const dy = ty + 0.5 - cy;
+        if (dx * dx + dy * dy < gap2) return true;
+      }
+    }
+    return false;
+  };
+  const open = (t: number) => t === TILE_SAND || t === TILE_CLEAR || t === TILE_ROUGH;
+  const doomed: { x: number; y: number }[] = [];
+  for (let y = 0; y < gh; y++) {
+    for (let x = 0; x < gw; x++) {
+      const i = y * gw + x;
+      if ((terrain[i] ?? 0) !== TILE_SCRUB) continue;
+      if (!tooClose(x, y)) continue;
+      doomed.push({ x, y });
+      terrain[i] = TILE_CLEAR;
+    }
+  }
+  // Slide each cleared tree outward so the wood still stands, just off the ore and the camps.
+  for (const cell of doomed) {
+    let nx = cell.x + 0.5;
+    let ny = cell.y + 0.5;
+    let best = gap2;
+    let ox = nx;
+    let oy = ny;
+    for (const p of pads) {
+      const dx = nx - p.x;
+      const dy = ny - p.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < best) {
+        best = d2;
+        ox = p.x;
+        oy = p.y;
+      }
+    }
+    for (let ty = Math.max(0, cell.y - gap); ty <= Math.min(gh - 1, cell.y + gap); ty++) {
+      for (let tx = Math.max(0, cell.x - gap); tx <= Math.min(gw - 1, cell.x + gap); tx++) {
+        if ((crystal[ty * gw + tx] ?? 0) <= 0) continue;
+        const dx = nx - (tx + 0.5);
+        const dy = ny - (ty + 0.5);
+        const d2 = dx * dx + dy * dy;
+        if (d2 < best) {
+          best = d2;
+          ox = tx + 0.5;
+          oy = ty + 0.5;
+        }
+      }
+    }
+    const dx = nx - ox;
+    const dy = ny - oy;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    for (let step = gap; step <= gap + 3; step += 1) {
+      const tx = Math.round(ox + ux * step);
+      const ty = Math.round(oy + uy * step);
+      if (tx < 1 || ty < 1 || tx >= gw - 1 || ty >= gh - 1) continue;
+      if (tooClose(tx, ty)) continue;
+      const i = ty * gw + tx;
+      const t = terrain[i] ?? 0;
+      if (t === TILE_SCRUB) break;
+      if (!open(t)) continue;
+      terrain[i] = TILE_SCRUB;
+      break;
+    }
+  }
+}
+
 function nearPad(pads: { x: number; y: number }[], x: number, y: number, r: number): boolean {
   const px = x + 0.5;
   const py = y + 0.5;

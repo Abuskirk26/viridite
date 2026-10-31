@@ -106,6 +106,34 @@ export function projectSurface(
   return projectGround(cam, view, sx, sy);
 }
 
+/**
+ * Put (wx, wy) under the middle of the glass. Flat ground is the look point.
+ * A hill, or the tilted ray, shifts the hit, so the look point steps until
+ * the screen-center ray lands on the tapped tile.
+ */
+export function focusWorld(
+  cam: Camera,
+  view: View,
+  wx: number,
+  wy: number,
+  heightAt: (x: number, y: number) => number = () => 0,
+): void {
+  cam.x = wx;
+  cam.y = wy;
+  if (view.w < 2 || view.h < 2) return;
+  const sx = view.w / 2;
+  const sy = view.h / 2;
+  for (let i = 0; i < 4; i++) {
+    const hit = projectSurface(cam, view, sx, sy, heightAt);
+    if (!hit) break;
+    const dx = hit.x - wx;
+    const dy = hit.y - wy;
+    if (Math.abs(dx) < 0.02 && Math.abs(dy) < 0.02) break;
+    cam.x -= dx;
+    cam.y -= dy;
+  }
+}
+
 /** World tile (wx, wy) on the ground plane to a screen pixel. */
 export function projectWorld(cam: Camera, view: View, wx: number, wy: number, lift = 0): { x: number; y: number } {
   const eye = eyeOf(cam, view);
