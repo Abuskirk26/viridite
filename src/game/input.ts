@@ -80,6 +80,8 @@ export interface InputHooks {
    * Absent on the 2D battlefield, which keeps dx/zoom.
    */
   projectGround?: (sx: number, sy: number) => { x: number; y: number } | null;
+  /** True while a BUILD-list finger is down. That pointer must not pan or tap the field. */
+  uiOwnsPointer?: () => boolean;
 }
 
 interface Pt {
@@ -205,6 +207,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onDown = (e: PointerEvent) => {
+    if (hooks.uiOwnsPointer?.()) return;
     if (e.pointerType === "mouse" && e.button === 2) e.preventDefault();
     el.setPointerCapture(e.pointerId);
     const p = local(e);
@@ -285,6 +288,16 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onMove = (e: PointerEvent) => {
+    if (hooks.uiOwnsPointer?.()) {
+      if (mode === "pan" || mode === "pending" || mode === "box") {
+        mode = "none";
+        fromPending = false;
+        hooks.draft.box = null;
+        hooks.camera.vx = 0;
+        hooks.camera.vy = 0;
+      }
+      return;
+    }
     const p = local(e);
     hooks.draft.hoverX = p.x;
     hooks.draft.hoverY = p.y;

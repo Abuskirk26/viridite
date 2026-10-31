@@ -7,6 +7,7 @@ import {
   LOBBY_MAPS,
   SIZE_CHOICES,
   SIZE_LABEL,
+  LIMIT_CHOICES,
   listMyMaps,
   netRulesFromSetup,
   resolveMyMap,
@@ -27,6 +28,8 @@ import {
   type InviteRelay,
 } from "@/game/netplay";
 import { makeCode, type LobbyView, type NetRules, type SeatView } from "@/game/relay-room";
+import { eraForYear, DEFAULT_YEAR } from "@/game/eras";
+import { YearSlider } from "@/components/YearSlider";
 import { lobbySize, offersNavy } from "@/game/editor";
 import { Sim } from "@/game/sim";
 
@@ -870,6 +873,16 @@ export function NetLobby({
                     </SegBtn>
                   ))}
                 </Seg>
+                <Seg label="Time">
+                  {LIMIT_CHOICES.map((min) => (
+                    <SegBtn key={min} active={(rules.limit ?? 60) === min} onClick={() => patch({ limit: min })}>
+                      {min === 0 ? "None" : `${min}m`}
+                    </SegBtn>
+                  ))}
+                </Seg>
+                <div className="mt-2">
+                  <YearSlider dense year={rules.year ?? DEFAULT_YEAR} onChange={(year) => patch({ year })} />
+                </div>
                 {onShowAi && (
                   <Seg label="AI labels">
                     <SegBtn active={showAi} onClick={() => onShowAi(true)}>On</SegBtn>
@@ -897,7 +910,7 @@ export function NetLobby({
             ) : (
               <>
                 <p className="text-sm text-pretty text-muted" data-testid="net-guest-rules">
-                  {rules.customName || rules.mapId} · {SIZE_LABEL[rules.size]} · {rules.fog ? "fog" : "no fog"} · {rules.walls ? "walls" : "no walls"} · {rules.credits.toLocaleString("en-US")}
+                  {rules.customName || rules.mapId} · {SIZE_LABEL[rules.size]} · {eraForYear(rules.year ?? DEFAULT_YEAR).label} {eraForYear(rules.year ?? DEFAULT_YEAR).year} · {rules.fog ? "fog" : "no fog"} · {rules.walls ? "walls" : "no walls"} · {rules.credits.toLocaleString("en-US")} · {(rules.limit ?? 60) === 0 ? "no clock" : `${rules.limit ?? 60} min`}
                 </p>
                 <button
                   type="button"

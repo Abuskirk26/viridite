@@ -5,9 +5,11 @@ import { generateMap, MAP_LIST, plantCorners, waterKind } from "@/game/maps";
 import { paintDocThumb, paintTeamShape } from "@/game/render";
 import { TeamPip } from "@/components/TeamPip";
 import { VersionPick } from "@/components/SettingsSheet";
+import { YearSlider } from "@/components/YearSlider";
 import {
   CREDIT_CHOICES,
   DIFFICULTY_CHOICES,
+  LIMIT_CHOICES,
   LOBBY_MAPS,
   START_CHOICES,
   START_LABEL,
@@ -251,6 +253,23 @@ export function ReadyUp({
               Survive
             </button>
           </div>
+          <p className="mt-1 font-display text-[10px] uppercase tracking-wide text-muted">Time limit</p>
+          <div className="grid grid-cols-4 gap-1" data-testid="time-limit">
+            {LIMIT_CHOICES.map((min) => (
+              <button
+                key={min}
+                type="button"
+                data-testid={`limit-${min}`}
+                aria-pressed={setup.limit === min}
+                aria-label={min === 0 ? "Unlimited time" : `${min} minute time limit`}
+                className={`h-11 font-display text-xs uppercase ${setup.limit === min ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+                onClick={() => onChange({ limit: min })}
+              >
+                {min === 0 ? "None" : `${min}m`}
+              </button>
+            ))}
+          </div>
+          <YearSlider dense year={setup.year} onChange={(year) => onChange({ year })} />
         </section>
       </div>
 
@@ -352,7 +371,20 @@ function OptionsScreen({
           </Section>
           <Section title="Win">
             <Wide on={setup.mode === "destroy"} testId="mode-destroy" label="Destroy the enemy base" onClick={() => onChange({ mode: "destroy" })}>Destroy</Wide>
-            <Wide on={setup.mode === "survive"} testId="mode-survive" label="Survive the clock" onClick={() => onChange({ mode: "survive" })}>Survive</Wide>
+            <Wide on={setup.mode === "survive"} testId="mode-survive" label="Survive until the time limit" onClick={() => onChange({ mode: "survive" })}>Survive</Wide>
+          </Section>
+          <Section title="Time">
+            {LIMIT_CHOICES.map((min) => (
+              <Wide
+                key={min}
+                on={setup.limit === min}
+                testId={`limit-${min}`}
+                label={min === 0 ? "Unlimited time" : `${min} minute time limit`}
+                onClick={() => onChange({ limit: min })}
+              >
+                {min === 0 ? "None" : `${min}m`}
+              </Wide>
+            ))}
           </Section>
           <Section title="Speed">
             {([0.75, 1, 1.5, 2] as const).map((s) => (

@@ -53,8 +53,7 @@ test("deploy, low power, and a finished structure cue the listener", () => {
   for (let i = 0; i < 30; i++) sim.tick(0.1);
   assert.ok(heard.some((c) => c.t === "sfx" && c.id === "deploy"));
   assert.ok(heard.some((c) => c.t === "voice" && c.id === "constructDone"));
-  assert.ok(heard.some((c) => c.t === "voice" && c.id === "lowPower"));
-  assert.ok(heard.some((c) => c.t === "bed" && c.id === "brownout" && c.on));
+  assert.equal(heard.some((c) => c.t === "voice" && c.id === "lowPower"), false);
 
   const yard = sim.buildings.find((b) => b.team === 0 && b.kind === "yard");
   assert.ok(yard);
@@ -65,6 +64,15 @@ test("deploy, low power, and a finished structure cue the listener", () => {
   assert.ok(heard.slice(before).some((c) => c.t === "voice" && c.id === "building"));
   for (let i = 0; i < 5; i++) sim.tick(0.1);
   assert.ok(heard.some((c) => c.t === "bed" && c.id === "construct" && c.on));
+
+  const plant = sim.buildings.find((b) => b.team === 0 && b.kind === "power");
+  assert.ok(plant);
+  plant.complete = true;
+  plant.powerOut = 10;
+  yard.powerUse = 40;
+  sim.tick(0.1);
+  assert.ok(heard.some((c) => c.t === "voice" && c.id === "lowPower"));
+  assert.ok(heard.some((c) => c.t === "bed" && c.id === "brownout" && c.on));
 
   const rifle = sim.units.find((u) => u.team === 0 && u.kind === "mcv");
   assert.equal(rifle, undefined);

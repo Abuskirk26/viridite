@@ -312,7 +312,7 @@ const HALL_ASPECT: Record<string, number> = {
   radar: 1102 / 668,
   supply: 1.05,
   silo: 981 / 437,
-  dock: 300 / 360,
+  dock: 1008 / 1000,
   helipad: 745 / 1079,
   stealth: 798 / 835,
   wall: 807 / 1010,

@@ -4,6 +4,7 @@
  */
 
 import { isFactionId, type AiDifficulty, type FactionId, type MapId, type MapSizeId, type TeamMode } from "./data.ts";
+import { clampYear, DEFAULT_YEAR } from "./eras.ts";
 import type { Cmd } from "./orders.ts";
 
 export const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -28,6 +29,10 @@ export interface NetRules {
   delay: 4 | 8;
   /** How sharp empty-seat AI plays. Defaults to normal for older rooms. */
   difficulty: AiDifficulty;
+  /** Match clock in minutes. 0 is unlimited. Missing means 60. */
+  limit?: 20 | 40 | 60 | 0;
+  /** Era year. Missing means the latest era, so the full roster stays. */
+  year?: number;
   /** Editor map id. Tiles travel on the lobby as `chart`, and again on start. */
   customId?: string;
   customName?: string;
@@ -180,6 +185,8 @@ export const DEFAULT_RULES: NetRules = {
   enemy: "syndicate",
   delay: 8,
   difficulty: "normal",
+  limit: 60,
+  year: DEFAULT_YEAR,
 };
 
 function freshSeat(fill: SeatFill, name: string): Seat {
@@ -217,6 +224,8 @@ function clampRules(prev: NetRules, patch: Partial<NetRules> | undefined): NetRu
   if (patch.difficulty === "easy" || patch.difficulty === "normal" || patch.difficulty === "hard") {
     next.difficulty = patch.difficulty;
   }
+  if (patch.limit === 0 || patch.limit === 20 || patch.limit === 40 || patch.limit === 60) next.limit = patch.limit;
+  if (typeof patch.year === "number") next.year = clampYear(patch.year);
   if (typeof patch.customId === "string") next.customId = patch.customId.slice(0, 40);
   if (typeof patch.customName === "string") next.customName = patch.customName.slice(0, 32);
   if (typeof patch.customStarts === "number") next.customStarts = Math.max(0, Math.min(4, patch.customStarts | 0));

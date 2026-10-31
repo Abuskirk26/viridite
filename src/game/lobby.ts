@@ -28,6 +28,7 @@ import {
 import { listMaps, loadMap, pack, shareCode } from "./custom.ts";
 import { cloneDoc, lobbySize, offersNavy, type EditorDoc } from "./editor.ts";
 import { FEATURED, buildFeatured, type FeaturedCard } from "./featured.ts";
+import { DEFAULT_YEAR, buildingInYear, clampYear, unitInYear } from "./eras.ts";
 import type { NetRules } from "./relay-room.ts";
 import { TEMPLATES, buildTemplate } from "./templates.ts";
 
@@ -232,6 +233,24 @@ export interface SkirmishSetup {
   bots: [FactionId, FactionId, FactionId];
   /** Easy, normal, or hard for each bot. Index 0 is the first enemy. */
   skills: [AiDifficulty, AiDifficulty, AiDifficulty];
+  /** Match clock in minutes. 0 is unlimited. */
+  limit: LimitChoice;
+  /** Era stop. The bar offers pieces from this year and earlier. */
+  year: number;
+}
+
+/** Minutes on the match clock. 0 means unlimited: the fight ends only when a side is gone. */
+export const LIMIT_CHOICES = [20, 40, 60, 0] as const;
+export type LimitChoice = (typeof LIMIT_CHOICES)[number];
+
+export function isLimit(n: unknown): n is LimitChoice {
+  return n === 20 || n === 40 || n === 60 || n === 0;
+}
+
+/** Seconds the sim should run. 0 is no clock. */
+export function limitSeconds(min: number): number {
+  if (!isLimit(min) || min <= 0) return 0;
+  return min * 60;
 }
 
 export const DEFAULT_SETUP: SkirmishSetup = {
@@ -257,6 +276,8 @@ export const DEFAULT_SETUP: SkirmishSetup = {
   customId: "",
   bots: ["syndicate", "steel", "prism"],
   skills: ["normal", "normal", "normal"],
+  limit: 60,
+  year: DEFAULT_YEAR,
 };
 
 /** The friends room should open on the skirmish the host already set. */
@@ -277,6 +298,8 @@ export function netRulesFromSetup(setup: SkirmishSetup): { rules: Partial<NetRul
       player: setup.player,
       enemy: setup.enemy,
       difficulty: setup.difficulty,
+      limit: setup.limit,
+      year: clampYear(setup.year),
       customId: doc ? setup.customId : "",
       customName: doc ? doc.name.slice(0, 32) : "",
       customStarts: doc ? doc.starts.length : 0,
@@ -331,15 +354,17 @@ export function lobbyBlock(
   return `Island Chain needs a Dock. ${stuck.join(" and ")} can't build one.`;
 }
 
-export function buildingOffered(mapId: MapId, faction: FactionId, id: BuildingId, walls = true): boolean {
+export function buildingOffered(mapId: MapId, faction: FactionId, id: BuildingId, walls = true, year = DEFAULT_YEAR): boolean {
   if (id === "span" || id === "silo") return false;
+  if (!buildingInYear(id, year)) return false;
   if (!walls && (id === "sandbag" || id === "wall" || id === "gate")) return false;
   if (!canBuild(id, faction)) return false;
   if (id === "dock" && navyHidden(mapId)) return false;
   return true;
 }
 
-export function unitOffered(mapId: MapId, faction: FactionId, id: UnitId): boolean {
+export function unitOffered(mapId: MapId, faction: FactionId, id: UnitId, year = DEFAULT_YEAR): boolean {
+  if (!unitInYear(id, year)) return false;
   if (!canTrain(id, faction)) return false;
   const def = UNITS[id];
   if (navyHidden(mapId) && (def.loco === "sea" || def.trainedAt === "dock")) return false;
@@ -347,8 +372,8 @@ export function unitOffered(mapId: MapId, faction: FactionId, id: UnitId): boole
 }
 
 /** Boat buttons exist only once a Dock is finished. */
-export function trainOffered(mapId: MapId, faction: FactionId, id: UnitId, hasDock: boolean): boolean {
-  if (!unitOffered(mapId, faction, id)) return false;
+export function trainOffered(mapId: MapId, faction: FactionId, id: UnitId, hasDock: boolean, year = DEFAULT_YEAR): boolean {
+  if (!unitOffered(mapId, faction, id, year)) return false;
   if (UNITS[id].trainedAt === "dock" && !hasDock) return false;
   return true;
 }
@@ -506,6 +531,8 @@ export function randomSetup(rng: () => number = Math.random): SkirmishSetup {
       customId: "",
       bots: [enemy, pick(rng, FACTIONS), pick(rng, FACTIONS)],
       skills: [difficulty, difficulty, difficulty],
+      limit: 60,
+      year: DEFAULT_YEAR,
     };
     if (!lobbyBlock(setup)) return clampSetup(setup);
   }
@@ -561,6 +588,8 @@ export function parseSetup(raw: unknown): SkirmishSetup | null {
     customId?: unknown;
     bots?: unknown;
     skills?: unknown;
+    limit?: unknown;
+    year?: unknown;
   };
   if (!isLobbyMap(data.mapId)) return null;
   const player = isFaction(data.player) ? data.player : isFaction(data.faction) ? data.faction : null;
@@ -608,6 +637,8 @@ export function parseSetup(raw: unknown): SkirmishSetup | null {
     customId: typeof data.customId === "string" ? data.customId : "",
     bots: botTriple(data.bots, player, enemy),
     skills,
+    limit: isLimit(data.limit) ? data.limit : 60,
+    year: clampYear(data.year),
   });
 }
 
@@ -663,5 +694,7 @@ export function toNewGame(setup: SkirmishSetup) {
     ],
     custom: doc ? pack(doc) : undefined,
     seatFactions: [setup.player, setup.bots[0], setup.bots[1], setup.bots[2]],
+    limit: limitSeconds(setup.limit),
+    year: clampYear(setup.year),
   };
 }

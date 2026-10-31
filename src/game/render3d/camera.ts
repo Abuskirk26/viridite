@@ -83,7 +83,7 @@ export function projectSurface(
   }
   if (t1 < 0) return null;
   if (t0 < 0) t0 = 0;
-  const steps = 32;
+  const steps = 48;
   let prevT = t0;
   let prevY = eye.y + t0 * dy;
   let prevH = heightAt(eye.x + t0 * dx, eye.z + t0 * dz);
@@ -94,9 +94,16 @@ export function projectSurface(
     const y = eye.y + t * dy;
     const h = heightAt(x, z);
     if (prevY > prevH && y <= h) {
-      const span = prevY - prevH - (y - h);
-      const u = span === 0 ? 0 : (prevY - prevH) / span;
-      const tt = prevT + (t - prevT) * Math.min(1, Math.max(0, u));
+      let lo = prevT;
+      let hi = t;
+      for (let k = 0; k < 12; k++) {
+        const mid = (lo + hi) / 2;
+        const my = eye.y + mid * dy;
+        const mh = heightAt(eye.x + mid * dx, eye.z + mid * dz);
+        if (my > mh) lo = mid;
+        else hi = mid;
+      }
+      const tt = (lo + hi) / 2;
       return { x: eye.x + tt * dx, y: eye.z + tt * dz };
     }
     prevT = t;
@@ -127,4 +134,55 @@ export function projectWorld(cam: Camera, view: View, wx: number, wy: number, li
     x: (ndcX + 1) * 0.5 * view.w,
     y: (1 - ndcY) * 0.5 * view.h,
   };
+}
+
+/**
+ * Footprint centre for a 3D placement ghost. The centre is the terrain point
+ * under the tap, for every footprint size. Snapping happens only on confirm.
+ */
+export function placementGhost(
+  cam: Camera,
+  view: View,
+  sx: number,
+  sy: number,
+  _w: number,
+  _h: number,
+  heightAt: (x: number, y: number) => number,
+): { x: number; y: number; lift: number; screen: { x: number; y: number } } | null {
+  const hit = projectSurface(cam, view, sx, sy, heightAt);
+  if (!hit) return null;
+  const lift = heightAt(hit.x, hit.y);
+  return { x: hit.x, y: hit.y, lift, screen: projectWorld(cam, view, hit.x, hit.y, lift) };
+}
+
+/**
+ * Point the tilted camera so the screen-center ray hits this ground point.
+ * The eye sits south of the look point and looks down. On flat ground the
+ * look point is the hit. On a hill or a shore the ray meets the surface
+ * before the y = 0 plane, so the look point has to sit further along the
+ * ray — otherwise a tap on the treeline centers on the water in front of it.
+ */
+export function focusOnGround(
+  cam: Camera,
+  view: View,
+  wx: number,
+  wy: number,
+  heightAt: (x: number, y: number) => number = () => 0,
+): void {
+  const sample = heightAt(wx, wy);
+  const h = Number.isFinite(sample) ? sample : 0;
+  cam.x = wx;
+  cam.y = wy - h / Math.tan(CAM_PITCH);
+  if (view.w < 2 || view.h < 2) return;
+  const sx = view.w / 2;
+  const sy = view.h / 2;
+  for (let i = 0; i < 6; i++) {
+    const hit = projectSurface(cam, view, sx, sy, heightAt);
+    if (!hit) break;
+    const dx = wx - hit.x;
+    const dy = wy - hit.y;
+    if (Math.hypot(dx, dy) < 0.02) break;
+    cam.x += dx;
+    cam.y += dy;
+  }
 }

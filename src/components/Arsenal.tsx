@@ -259,7 +259,7 @@ function buildingLine(b: ResolvedBuilding): string {
   if (b.id === "yard") return "The base. Lose it with no MCV left and the match is over.";
   if (b.trains === "infantry") return "Trains infantry.";
   if (b.trains === "vehicle") return "Trains vehicles, including the harvester and the MCV.";
-  if (b.trains === "navy") return "Trains ships. Has to sit on a shore.";
+  if (b.trains === "navy") return "Trains ships. Sits in the water, along the coast.";
   if (b.trains === "air") return "Trains aircraft and rearms the ones that land.";
   if (b.powerOut > 0) return `Feeds the base ${b.powerOut} power.`;
   if (b.special === "aa") return "Shoots aircraft. Goes dark when power is low.";
@@ -653,7 +653,7 @@ function Detail({
         <Meta label="Storage" value={b.storage > 0 ? b.storage.toLocaleString("en-US") : "—"} />
         <Meta label="Requires" value={b.requires ? BUILDINGS[b.requires].name : def.requires ? BUILDINGS[def.requires].name : "Nothing"} />
         <Meta label="Move" value="Fixed" />
-        {b.shore && <Meta label="Placement" value="Shore" />}
+        {b.shore && <Meta label="Placement" value="Waterline" />}
         {b.special && <Meta label="Special" value={b.special} />}
       </div>
     </article>

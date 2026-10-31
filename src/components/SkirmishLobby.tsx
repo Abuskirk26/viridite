@@ -10,6 +10,7 @@ import {
   DIFFICULTY_CHOICES,
   FACTIONS,
   LOBBY_MAPS,
+  LIMIT_CHOICES,
   OPPONENT_CHOICES,
   SIZE_CHOICES,
   SIZE_LABEL,
@@ -32,6 +33,7 @@ import {
   type SkirmishSetup,
 } from "@/game/lobby";
 import { MAP_LIST } from "@/game/maps";
+import { YearSlider } from "@/components/YearSlider";
 
 const AI_LABEL: Record<AiProfile, string> = {
   passive: "Passive",
@@ -568,12 +570,26 @@ export function SkirmishLobby({
               <Chip
                 testId="mode-survive"
                 active={setup.mode === "survive"}
-                label="Hold for ten minutes"
+                label="Hold until the time limit"
                 onClick={() => onChange({ mode: "survive" })}
               >
                 Hold
               </Chip>
             </Row>
+            <Row label="Time">
+              {LIMIT_CHOICES.map((min) => (
+                <Chip
+                  key={min}
+                  testId={`limit-${min}`}
+                  active={setup.limit === min}
+                  label={min === 0 ? "Unlimited time" : `${min} minute time limit`}
+                  onClick={() => onChange({ limit: min })}
+                >
+                  {min === 0 ? "None" : `${min}m`}
+                </Chip>
+              ))}
+            </Row>
+            <YearSlider year={setup.year} onChange={(year) => onChange({ year })} />
             <SegmentRow label="Show AI intent" testId="lobby-ai-intent">
               <Segment
                 testId="ai-intent-on"
@@ -608,7 +624,7 @@ export function SkirmishLobby({
             ))}
           </ul>
           <p className="text-xs text-pretty text-muted">
-            Destroy the enemy Construction Yard, or hold the clock. You lose only if the yard is gone and no MCV is left
+            Destroy the enemy Construction Yard, or hold until the time limit. You lose only if the yard is gone and no MCV is left
             to deploy. Best played sideways.
           </p>
         </section>

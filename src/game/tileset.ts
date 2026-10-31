@@ -49,6 +49,50 @@ export function isWater(tile: number): boolean {
   return g === "deep" || g === "shallow";
 }
 
+/** Open harbor water. Fords and wrecks are not a dock. */
+function harborWater(tile: number): boolean {
+  return tile === TILE_SHALLOW || tile === TILE_DEEP;
+}
+
+/**
+ * A dock footprint is water, and one full side sits on the coast.
+ * The beach itself is refused. So is water that does not touch land.
+ */
+export function dockOnWaterline(
+  terrain: ArrayLike<number>,
+  gw: number,
+  gh: number,
+  tx: number,
+  ty: number,
+  w = 2,
+  h = 2,
+): boolean {
+  if (w < 1 || h < 1 || tx < 1 || ty < 1 || tx + w >= gw - 1 || ty + h >= gh - 1) return false;
+  for (let y = ty; y < ty + h; y++) {
+    for (let x = tx; x < tx + w; x++) {
+      if (!harborWater(terrain[y * gw + x] ?? 0)) return false;
+    }
+  }
+  const land = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= gw || y >= gh) return false;
+    const t = terrain[y * gw + x] ?? 0;
+    return !harborWater(t) && t !== TILE_FORD && t !== TILE_WRECK && t !== TILE_BRIDGE;
+  };
+  let north = 0;
+  let south = 0;
+  let east = 0;
+  let west = 0;
+  for (let y = ty; y < ty + h; y++) {
+    for (let x = tx; x < tx + w; x++) {
+      if (land(x, y - 1)) north++;
+      if (land(x, y + 1)) south++;
+      if (land(x + 1, y)) east++;
+      if (land(x - 1, y)) west++;
+    }
+  }
+  return north >= w || south >= w || east >= h || west >= h;
+}
+
 export function isTree(tile: number): boolean {
   return tile === TILE_SCRUB;
 }

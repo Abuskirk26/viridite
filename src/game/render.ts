@@ -38,6 +38,7 @@ import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
+import { placeChrome, type ScreenRect } from "./placeui.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
@@ -81,6 +82,8 @@ export interface DrawUi {
   glass?: "2d" | "3d";
   /** World-to-screen used by Confirm / Cancel when the 3D camera is up. */
   project?: (wx: number, wy: number) => { x: number; y: number };
+  /** Screen rectangles Confirm / Cancel must not cover (minimap, A-MOVE, army). */
+  avoid?: ScreenRect[];
 }
 
 function hash(x: number, y: number): number {
@@ -907,7 +910,7 @@ export function drawGame(
       for (let tx = 0; tx < w; tx++) {
         const cx = origin.tx + tx;
         const cy = origin.ty + ty;
-        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, !!resolveBuilding(ui.placing, sim.factionOf(VIEWER)).shore);
+        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, ui.placing === "dock");
         ctx.globalAlpha = bdef.ok ? 0.5 : blocked ? 0.72 : 0.4;
         ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
         ctx.fillRect(cx + 0.05, cy + 0.05, 0.9, 0.9);
@@ -1074,37 +1077,7 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
   ctx.restore();
 }
 
-export function placeChrome(
-  cam: Camera,
-  view: View,
-  tx: number,
-  ty: number,
-  w: number,
-  h = w,
-  project?: (wx: number, wy: number) => { x: number; y: number },
-): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
-  const bw = 112;
-  const bh = 48;
-  const gap = 10;
-  const to = project ?? ((x: number, y: number) => worldToScreen(cam, x, y, view));
-  const a = to(tx, ty);
-  const b = to(tx + w, ty + h);
-  const left = Math.min(a.x, b.x);
-  const right = Math.max(a.x, b.x);
-  const top = Math.min(a.y, b.y);
-  const bottom = Math.max(a.y, b.y);
-  const stack = bh * 2 + 6;
-  let x = Math.round(right + gap);
-  let y = Math.round((top + bottom) / 2 - stack / 2);
-  if (x + bw > view.w - 4) x = Math.round(left - gap - bw);
-  if (x < 4) x = 4;
-  if (y < 4) y = 4;
-  if (y + stack > view.h - 4) y = Math.max(4, Math.round(view.h - 4 - stack));
-  return {
-    confirm: { x, y, w: bw, h: bh },
-    cancel: { x, y: y + bh + 6, w: bw, h: bh },
-  };
-}
+export { placeChrome } from "./placeui.ts";
 
 function paintPlaceChrome(
   ctx: CanvasRenderingContext2D,
@@ -1196,7 +1169,7 @@ function drawPlaceLabel(
   if (ui.touchPlace) {
     const visual = ui.ghost ?? ui.hover;
     const placed = BUILDINGS[ui.placing];
-    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h, ui.project));
+    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h, ui.project, ui.avoid));
   }
   let tx = 0;
   let ty = 0;
@@ -1306,11 +1279,18 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
 }
 
 /** Legal cells are green. A blocked cell in the footprint is a stronger red. Not a team color. */
-function footprintCellBlocked(sim: Sim, x: number, y: number, shore: boolean): boolean {
+function footprintCellBlocked(sim: Sim, x: number, y: number, dock: boolean): boolean {
   if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+  const i = y * sim.gw + x;
+  const tile = sim.terrain[i] ?? 0;
+  if (dock) {
+    if (tile !== TILE_SHALLOW && tile !== TILE_DEEP) return true;
+    if ((sim.occ[i] ?? 0) !== 0) return true;
+    if ((sim.crystal[i] ?? 0) > 0) return true;
+    return false;
+  }
   if (sim.blockedTile(x, y)) return true;
-  if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) return true;
-  if (shore && sim.terrain[y * sim.gw + x] !== TILE_SHORE) return true;
+  if ((sim.crystal[i] ?? 0) > 0) return true;
   return false;
 }
 

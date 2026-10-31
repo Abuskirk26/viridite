@@ -1219,6 +1219,8 @@ export class NetPlay {
       start: "sw",
       walls: go.rules.walls,
       shared: go.shared,
+      limit: go.rules.limit == null ? 60 * 60 : go.rules.limit <= 0 ? 0 : go.rules.limit * 60,
+      year: go.rules.year,
       seed: go.seed,
       cpu: go.cpu,
       custom: doc ? pack(doc) : undefined,

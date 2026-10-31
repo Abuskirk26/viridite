@@ -1,0 +1,85 @@
+{
+  "note": "A piece is offered when the match year is this year or later. Do not date a unit earlier than the building it requires.",
+  "eras": [
+    {
+      "id": "ww1",
+      "year": 1914,
+      "label": "WW1",
+      "name": "The Great War",
+      "blurb": "Rifles, light tanks, and gunboats. No aircraft, and no heavy guns yet.",
+      "signatures": ["rifle", "tank", "gunboat"],
+      "opening": ["mcv"]
+    },
+    {
+      "id": "ww2",
+      "year": 1936,
+      "label": "WW2",
+      "name": "Interwar / WW2",
+      "blurb": "Medium armor, rockets, radar, and the advanced plant that feeds the heavier guns.",
+      "signatures": ["medium", "rocket", "artillery"],
+      "opening": ["mcv"]
+    },
+    {
+      "id": "cold",
+      "year": 1947,
+      "label": "Cold War",
+      "name": "Cold War / Modern",
+      "blurb": "Helicopters, missile boats, and the pads that launch them.",
+      "signatures": ["attackheli", "missile", "helipad"],
+      "opening": ["mcv"]
+    },
+    {
+      "id": "future",
+      "year": 2045,
+      "label": "Future",
+      "name": "Near-Future",
+      "blurb": "Stealth, strike buggies, and the fighter-bomber. The full roster.",
+      "signatures": ["stealth", "bomber", "razor"],
+      "opening": ["mcv"]
+    }
+  ],
+  "units": {
+    "rifle": 1914,
+    "marksman": 1914,
+    "scout": 1914,
+    "tank": 1914,
+    "harvester": 1914,
+    "mcv": 1914,
+    "engineer": 1914,
+    "gunboat": 1914,
+    "rocket": 1936,
+    "wader": 1936,
+    "medium": 1936,
+    "artillery": 1936,
+    "apc": 1936,
+    "frigate": 1936,
+    "transport": 1936,
+    "vanguard": 1947,
+    "scatter": 1947,
+    "missile": 1947,
+    "chinook": 1947,
+    "attackheli": 1947,
+    "razor": 2045,
+    "bomber": 2045
+  },
+  "buildings": {
+    "yard": 1914,
+    "power": 1914,
+    "refinery": 1914,
+    "barracks": 1914,
+    "factory": 1914,
+    "tower": 1914,
+    "silo": 1914,
+    "dock": 1914,
+    "sandbag": 1914,
+    "wall": 1914,
+    "gate": 1914,
+    "span": 1914,
+    "supply": 1936,
+    "aa": 1936,
+    "radar": 1936,
+    "advpower": 1936,
+    "helipad": 1947,
+    "stealth": 2045
+  }
+}

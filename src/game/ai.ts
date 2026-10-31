@@ -27,6 +27,7 @@ import {
   type Team,
   type UnitId,
 } from "./data.ts";
+import { buildingInYear, unitInYear } from "./eras.ts";
 import {
   EASY_PUSH_AT,
   EASY_SCOUT_UNTIL,
@@ -251,7 +252,7 @@ function nextBuild(
     return "power";
   }
   if (count("refinery") === 0) return "refinery";
-  if (count("supply") < 1) return "supply";
+  if (count("supply") < 1 && buildingInYear("supply", sim.year)) return "supply";
   if (forecast.supply < forecast.use + 12 && count("power") < 4) return "power";
   if (count("barracks") === 0) return "barracks";
   if (
@@ -273,7 +274,7 @@ function nextBuild(
 
   if (stance === "builder") {
     if (count("refinery") < 2) return "refinery";
-    if (count("supply") < 2 && done("factory")) return "supply";
+    if (count("supply") < 2 && done("factory") && buildingInYear("supply", sim.year)) return "supply";
     if (count("tower") < 2 && done("barracks")) return "tower";
     if (forecast.supply < forecast.use + 20 && count("power") < 3) return "power";
     if (book === "concord" && count("aa") < 2 && done("barracks") && sim.time > 80) {
@@ -299,7 +300,7 @@ function nextBuild(
   }
 
   // Raider: army first. A harbor flank waits until that push is out.
-  if (count("supply") < 2 && done("factory")) {
+  if (count("supply") < 2 && done("factory") && buildingInYear("supply", sim.year)) {
     const need = resolveBuilding("supply", faction).powerUse;
     if (forecast.supply >= forecast.use + need) return "supply";
   }
@@ -417,7 +418,7 @@ function train(sim: Sim, team: Team, stance: AiProfile, pace: Pace, coreOnly: bo
   }
   // Easy and Normal hold tanks until the push. One scout buggy may leave earlier.
   if (stance === "raider" && sim.difficultyOf(team) !== "hard" && sim.time < pace.armor) {
-    const scoutId: UnitId = book === "syndicate" ? "razor" : "scout";
+    const scoutId: UnitId = book === "syndicate" && unitInYear("razor", sim.year) ? "razor" : "scout";
     const scoutReady =
       sim.units.some((u) => u.team === team && u.hp > 0 && (u.kind === "scout" || u.kind === "razor")) ||
       factory.queue.includes("scout") ||
@@ -446,7 +447,7 @@ function train(sim: Sim, team: Team, stance: AiProfile, pace: Pace, coreOnly: bo
       factory.queue.includes("scout") ||
       factory.queue.includes("razor");
     if (heatOf(sim, team) !== "easy" && !scoutReady && credits >= resolveUnit("scout", faction).cost) {
-      sim.queueUnit(factory.id, book === "syndicate" ? "razor" : "scout");
+      sim.queueUnit(factory.id, book === "syndicate" && unitInYear("razor", sim.year) ? "razor" : "scout");
     }
     trainSupport(sim, team, stance, have, credits, faction);
     return;
@@ -578,6 +579,7 @@ function flank(sim: Sim, team: Team, stance: AiProfile) {
 }
 
 function techReady(sim: Sim, team: Team, id: UnitId): boolean {
+  if (!unitInYear(id, sim.year)) return false;
   const need = unitRequires(id);
   if (!need) return true;
   return sim.buildings.some((b) => b.team === team && b.kind === need && b.complete && b.hp > 0 && b.rubble <= 0);
@@ -600,13 +602,13 @@ function vehiclePick(sim: Sim, team: Team, book: "concord" | "syndicate", stance
     sim.units.some((u) => u.team === team && u.hp > 0 && u.kind === k) ||
     sim.buildings.some((b) => b.team === team && b.queue.includes(k));
   if (stance === "raider" && heatOf(sim, team) === "easy" && sim.time < 240) return "scout";
-  if (stance === "raider" && !has("scout") && !has("razor")) return book === "syndicate" ? "razor" : "scout";
+  if (stance === "raider" && !has("scout") && !has("razor")) return book === "syndicate" && unitInYear("razor", sim.year) ? "razor" : "scout";
   // Artillery must not steal the first gun. A tank (or the Razor, after) is the fight.
   if (stance === "raider" && !has("tank")) return "tank";
   if (stance === "builder" && sim.time > 150 && !has("artillery") && techReady(sim, team, "artillery")) return "artillery";
   if (stance === "raider" && sim.time > 160 && !has("scatter") && techReady(sim, team, "scatter") && (sim.time | 0) % 5 === 0) return "scatter";
-  if (book === "syndicate" && !has("razor")) return "razor";
-  if (book === "syndicate") return (sim.time | 0) % 2 === 0 ? "razor" : "tank";
+  if (book === "syndicate" && !has("razor") && unitInYear("razor", sim.year)) return "razor";
+  if (book === "syndicate") return unitInYear("razor", sim.year) && (sim.time | 0) % 2 === 0 ? "razor" : "tank";
   const pick: UnitId = (sim.time | 0) % 3 === 0 ? "artillery" : "tank";
   return techReady(sim, team, pick) ? pick : "tank";
 }

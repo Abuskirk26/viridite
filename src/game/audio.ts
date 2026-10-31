@@ -432,15 +432,16 @@ function playSfx(name: SfxName, pan = 0, gain = 1) {
   const now = ctx.currentTime;
   switch (name) {
     case "select":
-      toneAt(now, 680, 0.045, "square", 0.2, dest);
+      noiseAt(now, 0.045, 880, "bandpass", 0.1, dest);
+      toneAt(now, 196, 0.07, "sawtooth", 0.1, dest);
       break;
     case "move":
-      toneAt(now, 392, 0.08, "triangle", 0.22, dest);
-      toneAt(now + 0.05, 523, 0.09, "sine", 0.14, dest);
+      toneAt(now, 174, 0.1, "triangle", 0.16, dest);
+      toneAt(now + 0.07, 220, 0.11, "triangle", 0.12, dest);
       break;
     case "attack":
-      toneAt(now, 220, 0.06, "square", 0.2, dest);
-      toneAt(now + 0.045, 330, 0.07, "square", 0.16, dest);
+      toneAt(now, 146, 0.09, "sawtooth", 0.2, dest);
+      noiseAt(now, 0.05, 420, "bandpass", 0.12, dest);
       break;
     case "place":
       noiseAt(now, 0.09, 700, "bandpass", 0.4, dest);
@@ -448,9 +449,8 @@ function playSfx(name: SfxName, pan = 0, gain = 1) {
       toneAt(now + 0.06, 90, 0.16, "triangle", 0.36, dest);
       break;
     case "build":
-      toneAt(now, 523, 0.1, "square", 0.26, dest);
-      toneAt(now + 0.09, 784, 0.14, "square", 0.24, dest);
-      toneAt(now + 0.18, 1046, 0.18, "square", 0.2, dest);
+      noiseAt(now, 0.12, 180, "lowpass", 0.28, dest);
+      toneAt(now, 110, 0.16, "sawtooth", 0.18, dest, 74);
       break;
     case "deploy":
       noiseAt(now, 0.35, 140, "lowpass", 0.5, dest);
@@ -481,14 +481,12 @@ function playSfx(name: SfxName, pan = 0, gain = 1) {
       noiseAt(now, 0.05, 3200, "highpass", 0.18, dest);
       break;
     case "harvest":
-      toneAt(now, 880, 0.045, "sine", 0.14, dest);
-      toneAt(now + 0.03, 1320, 0.05, "sine", 0.1, dest);
+      toneAt(now, 96, 0.1, "triangle", 0.18, dest, 54);
+      noiseAt(now, 0.08, 220, "lowpass", 0.22, dest);
       break;
     case "unload":
-      toneAt(now, 660, 0.14, "triangle", 0.22, dest);
-      toneAt(now + 0.08, 880, 0.16, "triangle", 0.2, dest);
-      toneAt(now + 0.16, 1320, 0.18, "sine", 0.16, dest);
-      noiseAt(now, 0.22, 1800, "bandpass", 0.1, dest);
+      noiseAt(now, 0.1, 220, "lowpass", 0.26, dest);
+      toneAt(now, 128, 0.12, "triangle", 0.16, dest, 64);
       break;
     case "error":
       toneAt(now, 110, 0.12, "square", 0.3, dest);
@@ -723,7 +721,7 @@ interface NoteEv {
 }
 interface DrumEv {
   s: number;
-  k: "kick" | "snare" | "hat";
+  k: "kick" | "snare" | "hat" | "tom";
   v: number;
 }
 interface Score {
@@ -735,142 +733,136 @@ interface Score {
   drums: DrumEv[];
 }
 
-function eighths(midis: number[], wave: OscillatorType, v: number, step0 = 0): NoteEv[] {
-  return midis.map((midi, i) => ({ s: step0 + i * 2, midi, d: 2, wave, v }));
-}
-
-function repeatBars(pattern: NoteEv[], bars: number, barSteps: number): NoteEv[] {
-  const out: NoteEv[] = [];
-  for (let b = 0; b < bars; b++) {
-    for (const n of pattern) out.push({ ...n, s: n.s + b * barSteps });
-  }
-  return out;
-}
-
-function drumLine(step0: number, stride: number, count: number, k: DrumEv["k"], v: number): DrumEv[] {
-  const out: DrumEv[] = [];
-  for (let i = 0; i < count; i++) out.push({ s: step0 + i * stride, k, v });
-  return out;
-}
-
-/** Original beds. Menu is E phrygian and slow. Combat A drives in A. Combat B syncopates in F#. */
+/** Original beds. Long brass and low strings, not short beeps. Menu is slow and minor. Combat A marches. Combat B stays tense. */
 const SCORES: Record<ScoreId, Score> = {
   menu: {
-    bpm: 84,
+    bpm: 72,
     steps: 64,
     loop: true,
-    drone: 40,
+    drone: 41,
     notes: [
-      ...eighths([40, 40, 40, 35, 40, 43, 45, 40, 38, 40, 43, 40, 35, 38, 40, 40], "triangle", 0.34, 0),
-      ...eighths([40, 40, 40, 35, 40, 43, 45, 40, 38, 40, 43, 40, 35, 38, 40, 40], "triangle", 0.34, 32),
-      { s: 4, midi: 71, d: 3, wave: "square", v: 0.16 },
-      { s: 8, midi: 74, d: 3, wave: "square", v: 0.16 },
-      { s: 12, midi: 76, d: 4, wave: "square", v: 0.17 },
-      { s: 16, midi: 74, d: 3, wave: "square", v: 0.16 },
-      { s: 20, midi: 71, d: 3, wave: "square", v: 0.15 },
-      { s: 24, midi: 69, d: 3, wave: "square", v: 0.15 },
-      { s: 28, midi: 67, d: 4, wave: "square", v: 0.15 },
-      { s: 36, midi: 69, d: 3, wave: "square", v: 0.16 },
-      { s: 40, midi: 71, d: 3, wave: "square", v: 0.16 },
-      { s: 44, midi: 72, d: 4, wave: "square", v: 0.16 },
-      { s: 48, midi: 71, d: 3, wave: "square", v: 0.15 },
-      { s: 52, midi: 69, d: 3, wave: "square", v: 0.15 },
-      { s: 56, midi: 67, d: 3, wave: "square", v: 0.15 },
-      { s: 60, midi: 64, d: 4, wave: "square", v: 0.16 },
+      { s: 0, midi: 41, d: 16, wave: "triangle", v: 0.22 },
+      { s: 0, midi: 48, d: 16, wave: "triangle", v: 0.12 },
+      { s: 16, midi: 36, d: 16, wave: "sawtooth", v: 0.18 },
+      { s: 16, midi: 43, d: 16, wave: "triangle", v: 0.12 },
+      { s: 32, midi: 38, d: 16, wave: "triangle", v: 0.2 },
+      { s: 32, midi: 45, d: 16, wave: "triangle", v: 0.11 },
+      { s: 48, midi: 41, d: 16, wave: "sawtooth", v: 0.2 },
+      { s: 48, midi: 48, d: 16, wave: "triangle", v: 0.12 },
+      { s: 0, midi: 65, d: 8, wave: "sawtooth", v: 0.12 },
+      { s: 8, midi: 68, d: 8, wave: "triangle", v: 0.14 },
+      { s: 16, midi: 63, d: 10, wave: "sawtooth", v: 0.12 },
+      { s: 28, midi: 60, d: 8, wave: "triangle", v: 0.12 },
+      { s: 36, midi: 63, d: 8, wave: "sawtooth", v: 0.13 },
+      { s: 48, midi: 68, d: 10, wave: "triangle", v: 0.14 },
+      { s: 58, midi: 65, d: 6, wave: "sawtooth", v: 0.12 },
     ],
-    drums: [...drumLine(0, 8, 8, "kick", 0.62), ...drumLine(4, 8, 8, "hat", 0.14)],
+    drums: [
+      { s: 0, k: "kick", v: 0.45 },
+      { s: 16, k: "kick", v: 0.4 },
+      { s: 32, k: "tom", v: 0.32 },
+      { s: 48, k: "kick", v: 0.48 },
+    ],
   },
   combatA: {
-    bpm: 124,
+    bpm: 132,
     steps: 64,
     loop: true,
     drone: 33,
     notes: [
-      ...repeatBars(eighths([33, 33, 36, 33, 40, 33, 36, 38], "sawtooth", 0.3), 4, 16),
-      ...repeatBars(
-        [
-          { s: 2, midi: 72, d: 1, wave: "square", v: 0.15 },
-          { s: 6, midi: 76, d: 1, wave: "square", v: 0.15 },
-          { s: 10, midi: 79, d: 1, wave: "square", v: 0.16 },
-          { s: 14, midi: 75, d: 1, wave: "square", v: 0.14 },
-        ],
-        4,
-        16,
-      ),
+      ...[0, 16, 32, 48].flatMap((b, i) => [
+        { s: b, midi: 33, d: 8, wave: "sawtooth" as const, v: 0.26 },
+        { s: b + 8, midi: i === 2 ? 31 : 28, d: 4, wave: "sawtooth" as const, v: 0.24 },
+        { s: b + 12, midi: 33, d: 4, wave: "sawtooth" as const, v: 0.24 },
+      ]),
+      { s: 0, midi: 45, d: 16, wave: "triangle", v: 0.1 },
+      { s: 16, midi: 48, d: 16, wave: "triangle", v: 0.1 },
+      { s: 32, midi: 43, d: 16, wave: "triangle", v: 0.1 },
+      { s: 48, midi: 45, d: 16, wave: "triangle", v: 0.1 },
+      { s: 0, midi: 57, d: 6, wave: "sawtooth", v: 0.15 },
+      { s: 0, midi: 64, d: 6, wave: "sawtooth", v: 0.11 },
+      { s: 8, midi: 69, d: 6, wave: "triangle", v: 0.16 },
+      { s: 16, midi: 67, d: 6, wave: "sawtooth", v: 0.15 },
+      { s: 24, midi: 64, d: 8, wave: "triangle", v: 0.16 },
+      { s: 32, midi: 60, d: 6, wave: "sawtooth", v: 0.14 },
+      { s: 40, midi: 64, d: 6, wave: "triangle", v: 0.16 },
+      { s: 48, midi: 67, d: 8, wave: "sawtooth", v: 0.15 },
+      { s: 56, midi: 69, d: 8, wave: "triangle", v: 0.17 },
     ],
-    drums: [...drumLine(0, 8, 8, "kick", 0.7), ...drumLine(4, 8, 8, "snare", 0.42), ...drumLine(2, 4, 16, "hat", 0.12)],
+    drums: [0, 16, 32, 48].flatMap((b) => [
+      { s: b, k: "kick" as const, v: 0.72 },
+      { s: b + 4, k: "snare" as const, v: 0.48 },
+      { s: b + 8, k: "kick" as const, v: 0.62 },
+      { s: b + 12, k: "snare" as const, v: 0.5 },
+      { s: b + 14, k: "tom" as const, v: 0.28 },
+    ]),
   },
   combatB: {
-    bpm: 102,
+    bpm: 90,
     steps: 64,
     loop: true,
-    drone: 42,
+    drone: 34,
     notes: [
-      ...repeatBars(
-        [
-          { s: 0, midi: 42, d: 2, wave: "triangle", v: 0.36 },
-          { s: 3, midi: 49, d: 2, wave: "triangle", v: 0.32 },
-          { s: 6, midi: 45, d: 2, wave: "triangle", v: 0.32 },
-          { s: 8, midi: 42, d: 2, wave: "triangle", v: 0.34 },
-          { s: 11, midi: 37, d: 2, wave: "triangle", v: 0.3 },
-          { s: 14, midi: 42, d: 2, wave: "sawtooth", v: 0.28 },
-        ],
-        4,
-        16,
-      ),
-      { s: 0, midi: 66, d: 6, wave: "sine", v: 0.16 },
-      { s: 8, midi: 69, d: 6, wave: "sine", v: 0.16 },
-      { s: 16, midi: 71, d: 6, wave: "sine", v: 0.17 },
-      { s: 24, midi: 69, d: 6, wave: "sine", v: 0.16 },
-      { s: 32, midi: 67, d: 6, wave: "sine", v: 0.15 },
-      { s: 40, midi: 66, d: 6, wave: "sine", v: 0.15 },
-      { s: 48, midi: 64, d: 6, wave: "sine", v: 0.15 },
-      { s: 56, midi: 66, d: 6, wave: "sine", v: 0.16 },
+      { s: 0, midi: 34, d: 12, wave: "sawtooth", v: 0.24 },
+      { s: 16, midi: 29, d: 12, wave: "triangle", v: 0.22 },
+      { s: 32, midi: 34, d: 10, wave: "sawtooth", v: 0.24 },
+      { s: 44, midi: 31, d: 8, wave: "triangle", v: 0.2 },
+      { s: 52, midi: 34, d: 12, wave: "sawtooth", v: 0.22 },
+      { s: 0, midi: 58, d: 10, wave: "triangle", v: 0.12 },
+      { s: 12, midi: 61, d: 8, wave: "sine", v: 0.1 },
+      { s: 24, midi: 63, d: 10, wave: "triangle", v: 0.12 },
+      { s: 36, midi: 58, d: 8, wave: "sine", v: 0.1 },
+      { s: 48, midi: 56, d: 12, wave: "triangle", v: 0.12 },
+      { s: 0, midi: 46, d: 32, wave: "triangle", v: 0.08 },
+      { s: 32, midi: 41, d: 32, wave: "triangle", v: 0.08 },
     ],
     drums: [
-      ...[0, 16, 32, 48].flatMap((b) => [
-        { s: b, k: "kick" as const, v: 0.6 },
-        { s: b + 6, k: "kick" as const, v: 0.4 },
-        { s: b + 8, k: "kick" as const, v: 0.5 },
-        { s: b + 4, k: "snare" as const, v: 0.26 },
-        { s: b + 12, k: "hat" as const, v: 0.16 },
-        { s: b + 14, k: "snare" as const, v: 0.22 },
-      ]),
+      { s: 0, k: "kick", v: 0.55 },
+      { s: 8, k: "kick", v: 0.32 },
+      { s: 16, k: "snare", v: 0.36 },
+      { s: 24, k: "tom", v: 0.3 },
+      { s: 32, k: "kick", v: 0.58 },
+      { s: 40, k: "kick", v: 0.28 },
+      { s: 48, k: "snare", v: 0.4 },
+      { s: 56, k: "tom", v: 0.42 },
     ],
   },
   victory: {
-    bpm: 120,
+    bpm: 108,
     steps: 32,
     loop: false,
     notes: [
-      { s: 0, midi: 36, d: 8, wave: "triangle", v: 0.34 },
-      { s: 8, midi: 43, d: 8, wave: "triangle", v: 0.32 },
-      { s: 16, midi: 48, d: 12, wave: "triangle", v: 0.34 },
-      { s: 0, midi: 60, d: 3, wave: "square", v: 0.22 },
-      { s: 4, midi: 64, d: 3, wave: "square", v: 0.22 },
-      { s: 8, midi: 67, d: 3, wave: "square", v: 0.22 },
-      { s: 12, midi: 72, d: 4, wave: "square", v: 0.24 },
-      { s: 16, midi: 76, d: 8, wave: "square", v: 0.24 },
-      { s: 24, midi: 79, d: 6, wave: "triangle", v: 0.2 },
+      { s: 0, midi: 36, d: 8, wave: "sawtooth", v: 0.26 },
+      { s: 8, midi: 43, d: 8, wave: "sawtooth", v: 0.26 },
+      { s: 16, midi: 48, d: 14, wave: "triangle", v: 0.28 },
+      { s: 0, midi: 60, d: 6, wave: "sawtooth", v: 0.16 },
+      { s: 6, midi: 64, d: 6, wave: "triangle", v: 0.16 },
+      { s: 12, midi: 67, d: 6, wave: "sawtooth", v: 0.16 },
+      { s: 18, midi: 72, d: 12, wave: "triangle", v: 0.18 },
     ],
-    drums: drumLine(0, 4, 6, "kick", 0.45),
+    drums: [
+      { s: 0, k: "kick", v: 0.6 },
+      { s: 8, k: "snare", v: 0.45 },
+      { s: 16, k: "kick", v: 0.65 },
+      { s: 24, k: "tom", v: 0.4 },
+    ],
   },
   defeat: {
-    bpm: 76,
+    bpm: 64,
     steps: 40,
     loop: false,
     notes: [
-      { s: 0, midi: 33, d: 16, wave: "sine", v: 0.3 },
-      { s: 16, midi: 29, d: 20, wave: "sine", v: 0.28 },
-      { s: 0, midi: 57, d: 8, wave: "triangle", v: 0.22 },
-      { s: 8, midi: 53, d: 8, wave: "triangle", v: 0.2 },
-      { s: 16, midi: 50, d: 8, wave: "triangle", v: 0.2 },
-      { s: 24, midi: 45, d: 8, wave: "sawtooth", v: 0.16 },
-      { s: 32, midi: 41, d: 8, wave: "sine", v: 0.18 },
+      { s: 0, midi: 33, d: 16, wave: "sawtooth", v: 0.24 },
+      { s: 16, midi: 29, d: 22, wave: "triangle", v: 0.22 },
+      { s: 0, midi: 57, d: 10, wave: "triangle", v: 0.14 },
+      { s: 10, midi: 53, d: 10, wave: "sine", v: 0.12 },
+      { s: 20, midi: 50, d: 10, wave: "triangle", v: 0.12 },
+      { s: 30, midi: 45, d: 10, wave: "sawtooth", v: 0.12 },
     ],
     drums: [
-      { s: 0, k: "kick", v: 0.35 },
-      { s: 16, k: "kick", v: 0.28 },
+      { s: 0, k: "kick", v: 0.4 },
+      { s: 16, k: "tom", v: 0.32 },
+      { s: 32, k: "kick", v: 0.28 },
     ],
   },
 };
@@ -967,32 +959,57 @@ function fireStep(score: Score, step: number, time: number) {
 function playTone(time: number, midi: number, dur: number, wave: OscillatorType, vel: number, dest: AudioNode) {
   if (!ctx) return;
   const o = ctx.createOscillator();
+  const o2 = ctx.createOscillator();
   const g = ctx.createGain();
   const f = ctx.createBiquadFilter();
   f.type = "lowpass";
-  f.frequency.setValueAtTime(midi < 50 ? 380 : midi < 67 ? 1400 : 2800, time);
+  const open = midi < 48 ? 480 : midi < 64 ? 1280 : 1700;
+  const closed = Math.max(80, open * 0.28);
+  f.frequency.setValueAtTime(closed, time);
+  f.frequency.exponentialRampToValueAtTime(open, time + Math.min(0.16, Math.max(0.04, dur * 0.22)));
+  f.Q.value = 0.85;
   o.type = wave;
-  o.frequency.setValueAtTime(midiHz(midi), time);
-  const end = time + dur;
+  o2.type = wave === "sine" ? "triangle" : wave;
+  const hz = midiHz(midi);
+  o.frequency.setValueAtTime(hz, time);
+  o2.frequency.setValueAtTime(hz, time);
+  o2.detune.setValueAtTime(8, time);
+  const end = time + Math.max(0.12, dur);
+  const attack = Math.min(0.07, Math.max(0.02, dur * 0.14));
+  const release = Math.min(0.26, Math.max(0.08, dur * 0.26));
+  const sustainAt = Math.min(end - 0.02, Math.max(time + attack + 0.03, end - release));
+  const peak = Math.max(0.001, vel);
   g.gain.setValueAtTime(0.0001, time);
-  g.gain.exponentialRampToValueAtTime(Math.max(0.001, vel), time + Math.min(0.02, dur * 0.35));
+  g.gain.linearRampToValueAtTime(peak, time + attack);
+  g.gain.linearRampToValueAtTime(peak * 0.82, sustainAt);
   g.gain.exponentialRampToValueAtTime(0.0001, end);
-  o.connect(f);
+  const body = ctx.createGain();
+  body.gain.value = 0.68;
+  const twin = ctx.createGain();
+  twin.gain.value = 0.36;
+  o.connect(body);
+  o2.connect(twin);
+  body.connect(f);
+  twin.connect(f);
   f.connect(g);
   g.connect(dest);
   o.start(time);
+  o2.start(time);
   o.stop(end + 0.03);
+  o2.stop(end + 0.03);
 }
 
 function drum(kind: DrumEv["k"], time: number, vel: number, dest: AudioNode) {
   if (kind === "kick") {
-    toneAt(time, 150, 0.12, "sine", vel * 0.9, dest, 48);
-    toneAt(time, 58, 0.16, "sine", vel * 0.75, dest);
+    toneAt(time, 140, 0.16, "sine", vel * 0.95, dest, 42);
+    toneAt(time, 52, 0.22, "sine", vel * 0.8, dest);
   } else if (kind === "snare") {
-    noiseAt(time, 0.12, 1800, "highpass", vel * 0.55, dest);
-    toneAt(time, 196, 0.08, "triangle", vel * 0.28, dest);
+    noiseAt(time, 0.16, 1400, "bandpass", vel * 0.5, dest);
+    toneAt(time, 168, 0.1, "triangle", vel * 0.32, dest, 90);
+  } else if (kind === "tom") {
+    toneAt(time, 220, 0.18, "sine", vel * 0.7, dest, 70);
   } else {
-    noiseAt(time, 0.04, 7000, "highpass", vel * 0.7, dest);
+    noiseAt(time, 0.03, 5000, "highpass", vel * 0.28, dest);
   }
 }
 
@@ -1056,8 +1073,8 @@ function sayText(text: string, pri: number) {
   voiceClosed = false;
   duck(true);
   if (voiceGain && ctx && ctx.state === "running") {
-    toneAt(ctx.currentTime, 880, 0.07, "square", 0.28, voiceGain);
-    toneAt(ctx.currentTime + 0.07, 620, 0.08, "square", 0.18, voiceGain);
+    noiseAt(ctx.currentTime, 0.04, 480, "bandpass", 0.08, voiceGain);
+    toneAt(ctx.currentTime, 146, 0.08, "sawtooth", 0.1, voiceGain);
   }
   const dur = ctx && ctx.state === "running" ? formantPhrase(text) : 0.6;
   let started = false;
@@ -1257,11 +1274,11 @@ function startConstruct() {
   motor = o;
   const hit = () => {
     if (!ctx || !sfxGain || muted) return;
-    noiseAt(ctx.currentTime, 0.07, 900, "bandpass", 0.28, sfxGain);
-    toneAt(ctx.currentTime, 140, 0.05, "square", 0.1, sfxGain);
+    noiseAt(ctx.currentTime, 0.1, 160, "lowpass", 0.32, sfxGain);
+    toneAt(ctx.currentTime, 78, 0.12, "sine", 0.22, sfxGain, 40);
   };
   hit();
-  constructTimer = window.setInterval(hit, 280);
+  constructTimer = window.setInterval(hit, 520);
 }
 
 function haltConstruct() {

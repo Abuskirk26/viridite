@@ -13,6 +13,9 @@ import {
   type DoctrineShape,
   type SheetTab,
 } from "@/game/doctrine";
+import { LIMIT_CHOICES, type SkirmishSetup } from "@/game/lobby";
+import { DEFAULT_YEAR } from "@/game/eras";
+import { YearSlider } from "@/components/YearSlider";
 
 const TABS: { id: SheetTab; label: string }[] = [
   { id: "game", label: "Game" },
@@ -92,10 +95,14 @@ export function SheetBody({
   tab,
   locked,
   onDoctrine,
+  setup,
+  onSetup,
 }: {
   tab: SheetTab;
   locked?: boolean;
   onDoctrine?: (id: DoctrineId) => void;
+  setup?: SkirmishSetup;
+  onSetup?: (partial: Partial<SkirmishSetup>) => void;
 }) {
   const [rev, setRev] = useState(0);
   const [open, setOpen] = useState<DoctrineId | null>(null);
@@ -132,11 +139,38 @@ export function SheetBody({
             ))}
           </div>
           <p className="text-sm text-pretty text-brass">{picked.feel}</p>
+          {setup && onSetup && !locked ? (
+            <div className="mt-2 flex flex-col gap-2" data-testid="time-limit">
+              <p className="font-display text-[10px] uppercase tracking-widest text-brass">Time limit</p>
+              <p className="text-sm text-pretty text-muted">
+                60 minutes is the clock. Unlimited plays until a side is gone. Survive wins if you are still standing when it ends.
+              </p>
+              <div className="grid grid-cols-4 gap-1">
+                {LIMIT_CHOICES.map((min) => (
+                  <button
+                    key={min}
+                    type="button"
+                    data-testid={`limit-${min}`}
+                    aria-pressed={setup.limit === min}
+                    className={`h-11 font-display text-xs uppercase ${setup.limit === min ? "bg-crystal text-crystal-ink" : "border border-brass-dim text-ink"}`}
+                    onClick={() => onSetup({ limit: min })}
+                  >
+                    {min === 0 ? "None" : `${min}m`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <p className="text-xs text-muted">The skirmish is the match. Set the map and seats, then start, or bring friends into that same fight.</p>
         </section>
       )}
       {tab === "armies" && (
         <>
+          <YearSlider
+            year={setup?.year ?? DEFAULT_YEAR}
+            locked={!!locked || !onSetup}
+            onChange={onSetup ? (year) => onSetup({ year }) : undefined}
+          />
           {DOCTRINES.map((pack) => {
             const status = packStatus(pack.id);
             const ready = status === "Bundled" || status === "Ready";

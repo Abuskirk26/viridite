@@ -197,7 +197,7 @@ export interface BuildingDef {
   storage: number;
   trains: "infantry" | "vehicle" | "navy" | "air" | null;
   requires?: BuildingId | null;
-  /** Must sit entirely on shore. */
+  /** Dock only. The pad is harbor water with one full side on the coast, not the beach. */
   shore?: boolean;
   /** Omit or "both" for shared structures. */
   only?: "both" | FactionId;
@@ -253,8 +253,21 @@ export const BUILDING_CAP = 40;
 export const WALL_RUN_MAX = 40;
 /** Weapon range multiplier for a unit standing on high ground. */
 export const HIGH_RANGE = 1.12;
-/** Extra sight tiles from high ground, and it looks over cliffs. */
-export const HIGH_SIGHT = 1.6;
+/**
+ * Vision. Every sight rule reads from here so a lockstep change is one number.
+ * HIGH is extra tiles when the viewer stands on a higher level than the target tile.
+ * FOREST_IN is how far an outsider sees into TILE_SCRUB. FOREST_SPOT and FOREST_REVEAL
+ * unhide a unit standing in the trees. MARK_* is the marksman still-aim.
+ */
+export const SIGHT = {
+  HIGH: 1.6,
+  FOREST_IN: 1,
+  FOREST_SPOT: 2,
+  FOREST_REVEAL: 3,
+  MARK_MOVE: 8,
+  MARK_AIM: 9.5,
+  MARK_STILL: 2,
+} as const;
 /** Damage multiplier when the shooter stands above the target. */
 export const HIGH_AIM = 1.1;
 /** A powered Radar Mast spots cloaked infantry inside this range. */
