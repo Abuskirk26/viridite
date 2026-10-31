@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_FORD, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
+import { ARMOR_MULT, BUILDINGS, HARVEST_PER_SEC, MAP_W, SIGHT, TILE_BRIDGE, TILE_CLEAR, TILE_CLIFF, TILE_DEEP, TILE_FORD, TILE_HIGH, TILE_RAMP, TILE_ROAD, TILE_ROCK, TILE_SAND, TILE_SCRUB, TILE_SHALLOW, TILE_SHORE, TILE_STUMP, TILE_WRECK, counterMul, plateOf, resolveBuilding } from "./data.ts";
 import { terrainFieldAlive, writeTerrain } from "./tileset.ts";
 import { DEPLOY_SECS, NORMAL_HARASS_AT, NORMAL_PUSH_AT, Sim, footprintOrigin, ghostPlaceReason, shortPlaceReason, type Building } from "./sim.ts";
 import { findPath } from "./path.ts";
@@ -1334,7 +1334,8 @@ test("woods hide infantry until a shot, a neighbor, or a detector, and soften ta
   hid.order = { t: "idle" };
   hid.cooldown = 9;
   prey.hp = 0;
-  for (let i = 0; i < 22; i++) hide.tick(0.1);
+  const fadeTicks = Math.ceil((SIGHT.forestReveal + 0.4) / 0.1);
+  for (let i = 0; i < fadeTicks; i++) hide.tick(0.1);
   assert.equal(hide.visibleUnit(0, hid), false, "still revealed after the shot faded");
 
   const scoutSim = fresh();
@@ -2916,6 +2917,194 @@ test("a tree tile tells the player it is blocked by trees", () => {
   assert.equal(hall.reason, "Blocked by trees");
   assert.equal(ghostPlaceReason(hall.reason), "Blocked by trees");
   assert.equal(shortPlaceReason(hall.reason), "Blocked by trees");
+});
+
+function sightField() {
+  const sim = new Sim({
+    mapId: "dry",
+    faction: "concord",
+    mode: "destroy",
+    fog: true,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 2,
+  });
+  sim.time = 50;
+  sim.terrain.fill(TILE_CLEAR);
+  return sim;
+}
+
+function pin(sim: Sim, keep: { id: number; x: number; y: number; px: number; py: number; postX: number; postY: number; sight: number; order: { t: string } }[]) {
+  const ids = new Set(keep.map((u) => u.id));
+  for (const u of sim.units) {
+    if (ids.has(u.id)) {
+      u.px = u.x;
+      u.py = u.y;
+      u.postX = u.x;
+      u.postY = u.y;
+      continue;
+    }
+    u.x = 2.5;
+    u.y = 2.5;
+    u.px = u.x;
+    u.py = u.y;
+    u.postX = u.x;
+    u.postY = u.y;
+    u.sight = 0;
+    u.order = { t: "idle" };
+    u.path = [];
+  }
+}
+
+test("high ground adds sight downhill and sees over forests and lower cliffs", () => {
+  const sim = sightField();
+  const up = sim.spawnUnit(0, "rifle", 24.5, 30.5);
+  assert.ok(up);
+  pin(sim, [up]);
+  const gw = sim.gw;
+  const far = 30 * gw + 30;
+  const span = 6;
+  assert.ok(span > up.sight && span < up.sight + SIGHT.highBonus, `sight ${up.sight}`);
+  sim.terrain[30 * gw + 24] = TILE_HIGH;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![far], 2, "no downhill bonus");
+  sim.terrain[far] = TILE_HIGH;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.notEqual(sim.fog[0]![far], 2, "same height kept the bonus");
+  sim.terrain[far] = TILE_CLEAR;
+  for (let x = 26; x <= 28; x++) sim.terrain[30 * gw + x] = TILE_SCRUB;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![30 * gw + 27], 2, "high ground did not see over the forest");
+  assert.equal(sim.fog[0]![far], 2, "high ground did not see past the forest");
+  sim.terrain[30 * gw + 24] = TILE_CLEAR;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![30 * gw + 26], 2, "missed the first forest tile");
+  assert.notEqual(sim.fog[0]![30 * gw + 27], 2, "saw a second tile into the forest");
+  assert.notEqual(sim.fog[0]![far], 2, "saw through the forest");
+  for (let x = 26; x <= 28; x++) sim.terrain[30 * gw + x] = TILE_CLEAR;
+  sim.terrain[30 * gw + 27] = TILE_CLIFF;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.notEqual(sim.fog[0]![far], 2, "low ground saw past the cliff");
+  sim.terrain[30 * gw + 27] = TILE_HIGH;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.notEqual(sim.fog[0]![far], 2, "low ground saw past the hill");
+  sim.terrain[30 * gw + 24] = TILE_HIGH;
+  sim.terrain[30 * gw + 27] = TILE_CLIFF;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![far], 2, "high ground did not see over the lower cliff");
+  assert.equal(up.x, 24.5);
+});
+
+test("a unit in a forest is hidden unless an enemy is within two tiles or it fired", () => {
+  const sim = sightField();
+  const ghost = sim.spawnUnit(1, "rifle", 21.5, 30.5);
+  const spot = sim.spawnUnit(0, "rifle", 18.5, 30.5);
+  assert.ok(ghost && spot);
+  for (const u of sim.units) if (u !== ghost && u !== spot) u.hp = 0;
+  ghost.cooldown = 99;
+  spot.cooldown = 99;
+  const gw = sim.gw;
+  sim.terrain[30 * gw + 20] = TILE_SCRUB;
+  sim.terrain[30 * gw + 21] = TILE_SCRUB;
+  sim.terrain[30 * gw + 22] = TILE_SCRUB;
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  assert.equal(sim.fog[0]![30 * gw + 20], 2, "missed the first forest tile");
+  assert.notEqual(sim.fog[0]![30 * gw + 21], 2, "saw a second tile into the forest");
+  assert.equal(sim.visibleUnit(0, ghost), false, "saw the unit through the trees");
+  spot.x = 19.5;
+  spot.y = 30.5;
+  assert.ok(Math.abs(Math.hypot(spot.x - ghost.x, spot.y - ghost.y) - SIGHT.forestSpot) < 0.001);
+  assert.equal(sim.visibleUnit(0, ghost), true, "two tiles did not spot the woods");
+  spot.x = 19.2;
+  assert.ok(Math.hypot(spot.x - ghost.x, spot.y - ghost.y) > SIGHT.forestSpot);
+  assert.equal(sim.visibleUnit(0, ghost), false, "past two tiles still spotted the woods");
+  spot.x = 40.5;
+  spot.y = 40.5;
+  const prey = sim.spawnUnit(0, "tank", 24.5, 30.5);
+  assert.ok(prey);
+  prey.cooldown = 99;
+  ghost.cooldown = 0;
+  sim.issueAttack([ghost.id], prey.id);
+  sim.tick(0.1);
+  assert.ok(ghost.reveal > SIGHT.forestReveal - 0.2, `reveal ${ghost.reveal}`);
+  assert.equal(sim.visibleUnit(0, ghost), true, "the shot stayed hidden");
+  ghost.order = { t: "idle" };
+  ghost.cooldown = 99;
+  prey.hp = 0;
+  for (let i = 0; i < 24; i++) sim.tick(0.1);
+  assert.equal(sim.visibleUnit(0, ghost), true, "the shot faded before 3 seconds");
+  for (let i = 0; i < 12; i++) sim.tick(0.1);
+  assert.equal(sim.visibleUnit(0, ghost), false, "the shot stayed visible past 3 seconds");
+});
+
+test("a marksman gains sight after standing and loses it when it moves", () => {
+  const sim = sightField();
+  const mark = sim.spawnUnit(0, "marksman", 12.5, 30.5);
+  assert.ok(mark);
+  pin(sim, [mark]);
+  assert.equal(mark.sight, SIGHT.marksmanMove);
+  const gw = sim.gw;
+  const near = 30 * gw + 20;
+  const far = 30 * gw + 21;
+  const past = 30 * gw + 22;
+  for (let i = 0; i < 19; i++) sim.tick(0.1);
+  assert.equal(mark.still, 1.9);
+  assert.equal(mark.sight, SIGHT.marksmanMove);
+  assert.equal(sim.fog[0]![near], 2, "missed the moving sight edge");
+  assert.notEqual(sim.fog[0]![far], 2, "moving sight reached the still range");
+  sim.tick(0.1);
+  assert.equal(mark.still, SIGHT.marksmanSettle);
+  assert.equal(mark.sight, SIGHT.marksmanStill);
+  const saved = Sim.fromSave(sim.toSave());
+  const again = saved?.units.find((u) => u.id === mark.id);
+  assert.ok(again);
+  assert.equal(again.still, SIGHT.marksmanSettle);
+  assert.equal(again.sight, SIGHT.marksmanStill);
+  assert.equal(sim.fog[0]![far], 2, "standing sight did not rise");
+  assert.notEqual(sim.fog[0]![past], 2, "standing sight went past 9.5");
+  sim.issueMove([mark.id], 12.5, 36.5, false);
+  sim.tick(0.1);
+  assert.ok(mark.y > 30.6, `did not move (${mark.y})`);
+  assert.equal(mark.still, 0);
+  assert.equal(mark.sight, SIGHT.marksmanMove);
+  assert.notEqual(sim.fog[0]![far], 2, "sight stayed long after the step");
+});
+
+test("allies share sight and an enemy team does not", () => {
+  const sim = new Sim({
+    mapId: "dry",
+    faction: "concord",
+    opponents: 3,
+    teams: "tvt",
+    mode: "destroy",
+    fog: true,
+    crates: false,
+    cpu: [false, false, false, false],
+    seed: 1,
+  });
+  assert.equal(sim.sharedVision, true);
+  sim.time = 50;
+  sim.terrain.fill(TILE_CLEAR);
+  const watch = sim.spawnUnit(0, "rifle", 32.5, 32.5);
+  assert.ok(watch);
+  pin(sim, [watch]);
+  for (const fog of sim.fog) fog.fill(0);
+  sim.tick(0.1);
+  const seen = 32 * sim.gw + 36;
+  const dark = 32 * sim.gw + 50;
+  assert.equal(sim.fog[0]![seen], 2);
+  assert.equal(sim.fog[2]![seen], 2, "ally did not share the tile");
+  assert.notEqual(sim.fog[1]![seen], 2, "enemy team shared the tile");
+  assert.notEqual(sim.fog[0]![dark], 2);
+  assert.notEqual(sim.fog[2]![dark], 2, "ally saw past the unit");
 });
 
 

@@ -253,8 +253,26 @@ export const BUILDING_CAP = 40;
 export const WALL_RUN_MAX = 40;
 /** Weapon range multiplier for a unit standing on high ground. */
 export const HIGH_RANGE = 1.12;
-/** Extra sight tiles from high ground, and it looks over cliffs. */
-export const HIGH_SIGHT = 1.6;
+/**
+ * Sight rules. The sim reads only this block for height, forest, and marksman
+ * vision. Lockstep: no randomness, and tile scans stay in fixed order.
+ */
+export const SIGHT = {
+  /** Extra tiles when the viewer is on a higher height level than the target tile. */
+  highBonus: 1.6,
+  /** How far a unit outside a forest can see into it. */
+  forestEdge: 1,
+  /** A unit inside a forest is hidden beyond this range. */
+  forestSpot: 2,
+  /** Seconds a shot keeps a forest unit visible. */
+  forestReveal: 3,
+  /** Marksman sight while moving. */
+  marksmanMove: 8,
+  /** Marksman sight after standing still. */
+  marksmanStill: 9.5,
+  /** Seconds a marksman must stand before the longer sight. */
+  marksmanSettle: 2,
+} as const;
 /** Damage multiplier when the shooter stands above the target. */
 export const HIGH_AIM = 1.1;
 /** A powered Radar Mast spots cloaked infantry inside this range. */
