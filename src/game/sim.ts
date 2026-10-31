@@ -1,6 +1,6 @@
 import { spawnTrail, spawnTracer, spawnSparks, spawnDirt, spawnWreck, spawnFall, spawnRuin } from "./combat-fx.ts";
 import { hallPictureLift, viewPitch } from "./view.ts";
-import { allows, blocksSight, boatBeaches, isShell, isWater } from "./tileset.ts";
+import { allows, blocksSight, boatBeaches, isShell, isTree, isWater } from "./tileset.ts";
 import { barkClass, type Cue, type SfxName } from "./audio.ts";
 import { Rng } from "./rng.ts";
 import {
@@ -15,7 +15,8 @@ import {
   HQ_TIME,
   HIGH_AIM,
   HIGH_RANGE,
-  HIGH_SIGHT,
+  SIGHT,
+  UNITS,
   DETECT_RADAR,
   DETECT_SCOUT,
   airTier,
@@ -154,6 +155,10 @@ export interface Unit {
   stuck: number;
   speed: number;
   sight: number;
+  /** Sight from the unit stat at spawn, before the marksman stand bonus. */
+  sight0: number;
+  /** Seconds this unit has stayed on the same point. Marksman sight reads it. */
+  still: number;
   damage: number;
   range: number;
   rof: number;
@@ -411,6 +416,8 @@ export interface SimSave {
     ammo?: number;
     rearm?: number;
     sortie?: number;
+    /** Seconds a marksman has stood still. Omitted on older saves. */
+    still?: number;
   }[];
   buildings: {
     id: number;
@@ -1115,9 +1122,12 @@ export class Sim {
   visibleUnit(viewer: Team, u: Unit): boolean {
     if (u.hp <= 0 || u.aboard) return false;
     if (this.allied(u.team, viewer)) return true;
+    const forest = this.inForest(u);
+    const close = forest && this.coverBroken(viewer, u);
+    if (forest && u.reveal <= 0 && !close && !this.sensorNear(viewer, u)) return false;
     // Aircraft stay invisible until they enter current vision. Radar is minimap-only.
-    if (!this.tileVisible(viewer, u.x | 0, u.y | 0)) return false;
-    if (this.inCover(u) && u.reveal <= 0 && !this.coverBroken(viewer, u) && !this.sensorNear(viewer, u)) return false;
+    // A ground unit within SIGHT.forestSpot sees a forest unit even past the tree line.
+    if (!this.tileVisible(viewer, u.x | 0, u.y | 0) && !close) return false;
     if (u.stealth && u.reveal <= 0 && !this.detected(viewer, u)) return false;
     return true;
   }
@@ -1888,6 +1898,8 @@ export class Sim {
       stuck: 0,
       speed: spec.speed,
       sight: spec.sight,
+      sight0: spec.sight,
+      still: 0,
       damage: spec.damage,
       range: spec.range,
       rof: spec.rof,
@@ -2008,6 +2020,7 @@ export class Sim {
     this.tickIncome(dt);
     this.applyCloak();
     this.sweep();
+    this.settleSight(dt);
     this.updateFog();
     this.decayFx(dt);
     this.decayContact(dt);
@@ -2098,6 +2111,7 @@ export class Sim {
           ammo: u.ammo,
           rearm: u.rearm,
           sortie: u.sortie,
+          still: u.still || undefined,
         })),
       buildings: this.buildings
         .filter((b) => b.hp > 0)
@@ -2248,6 +2262,8 @@ export class Sim {
       u.harvestTy = src.harvestTy ?? -1;
       u.deploy = src.deploy || 0;
       u.reveal = src.reveal || 0;
+      if (typeof src.still === "number" && src.still > 0) u.still = src.still;
+      if (u.kind === "marksman") sim.applyMarksmanSight(u);
       if (typeof src.ammo === "number") u.ammo = src.ammo;
       if (typeof src.rearm === "number") u.rearm = src.rearm;
       if (typeof src.sortie === "number") u.sortie = src.sortie;
@@ -3018,7 +3034,7 @@ export class Sim {
     const gap = target.kind === "building" ? distPointToRect(u.x, u.y, target.b) : Math.hypot(pos.x - u.x, pos.y - u.y);
     if (u.minRange > 0 && gap < u.minRange) return;
     u.cooldown = u.rof;
-    if (this.inCover(u)) u.reveal = 2;
+    if (this.inForest(u)) u.reveal = SIGHT.forestReveal;
     else if (u.stealth) u.reveal = 1.7;
     this.markFire(u);
     this.muzzle(u.x, u.y, pos.x, pos.y);
@@ -4119,26 +4135,30 @@ export class Sim {
     }
   }
 
-  /** Infantry in woods stay hidden until a shot, a detector, or a ground unit beside them. Air does not spot them. */
-  private inCover(u: Unit): boolean {
-    if (u.armor !== "infantry" || u.loco === "air" || u.loco === "sea") return false;
-    const tx = u.x | 0;
-    const ty = u.y | 0;
+  private forestAt(x: number, y: number): boolean {
+    const tx = x | 0;
+    const ty = y | 0;
     if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return false;
-    return this.terrain[ty * this.gw + tx] === TILE_SCRUB;
+    return isTree(this.terrain[ty * this.gw + tx] ?? 0);
   }
 
+  /** Any ground unit standing on a tree tile. Air and boats are never inside. */
+  private inForest(u: Unit): boolean {
+    if (u.loco === "air" || u.loco === "sea") return false;
+    return this.forestAt(u.x, u.y);
+  }
+
+  /** Infantry in woods take less from blasts. Hiding uses inForest. */
+  private inCover(u: Unit): boolean {
+    return u.armor === "infantry" && this.inForest(u);
+  }
+
+  /** A ground unit of the viewer within SIGHT.forestSpot. Air does not spot the woods. */
   private coverBroken(viewer: Team, u: Unit): boolean {
     for (const o of this.units) {
-      if (!this.allied(o.team, viewer) || o.hp <= 0 || o.aboard) continue;
+      if (o.id === u.id || !this.allied(o.team, viewer) || o.hp <= 0 || o.aboard) continue;
       if (o.loco === "air" || o.loco === "sea") continue;
-      if (Math.hypot(o.x - u.x, o.y - u.y) <= 1.55) return true;
-    }
-    for (const b of this.buildings) {
-      if (!this.allied(b.team, viewer) || b.hp <= 0 || !b.complete) continue;
-      if (b.kind !== "tower" && b.kind !== "aa") continue;
-      if (this.powerOf(b.team).low) continue;
-      if (distPointToRect(u.x, u.y, b) <= Math.max(2.4, b.range * 0.7)) return true;
+      if (Math.hypot(o.x - u.x, o.y - u.y) <= SIGHT.forestSpot) return true;
     }
     return false;
   }
@@ -4348,8 +4368,8 @@ export class Sim {
     for (const u of this.units) {
       if (u.hp > 0 && !this.eliminated[u.team]) {
         const bonus = u.armor === "infantry" && this.marchLeft[u.team]! > 0 ? 2.2 : 0;
-        const high = u.loco !== "air" && u.loco !== "sea" && this.elevOf(u.x, u.y) >= 2 ? HIGH_SIGHT : 0;
-        this.reveal(u.team, u.x, u.y, u.sight + bonus + high);
+        const ground = u.loco !== "air" && u.loco !== "sea";
+        this.reveal(u.team, u.x, u.y, u.sight + bonus, ground);
       }
     }
     for (const b of this.buildings) {
@@ -4357,11 +4377,11 @@ export class Sim {
         this.reveal(b.team, b.tx + b.w / 2, b.ty + b.h / 2, b.complete ? b.sight : 4);
       }
     }
-    if (this.sharedVision) this.shareSight();
     for (const s of this.spots) {
       if (s.ttl <= 0) continue;
       this.reveal(s.team, s.x, s.y, 2.4);
     }
+    if (this.sharedVision) this.shareSight();
     this.trackKnown();
     this.trackHalls();
   }
@@ -4380,38 +4400,87 @@ export class Sim {
     }
   }
 
+  /**
+   * Ground units compare height per target tile. Higher ground gains SIGHT.highBonus
+   * and looks over forest and cliffs below the mesa. Lower ground is blocked by
+   * hills and cliffs. A unit outside a forest sees SIGHT.forestEdge tiles into it.
+   */
   private sightClear(x0: number, y0: number, x1: number, y1: number): boolean {
+    const viewerElev = this.elevOf(x0, y0);
+    const outside = !this.forestAt(x0, y0);
     const dist = Math.hypot(x1 - x0, y1 - y0);
     const steps = Math.max(1, Math.ceil(dist * 2));
+    const tx = Math.floor(x1);
+    const ty = Math.floor(y1);
+    let prev = (y0 | 0) * this.gw + (x0 | 0);
+    let depth = 0;
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
       const x = Math.floor(x0 + (x1 - x0) * t);
       const y = Math.floor(y0 + (y1 - y0) * t);
-      if (x === Math.floor(x1) && y === Math.floor(y1)) continue;
+      if (x === tx && y === ty) continue;
       if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) return false;
-      if (blocksSight(this.terrain[y * this.gw + x] ?? 0) && this.elevOf(x0, y0) < 2) return false;
+      const idx = y * this.gw + x;
+      if (idx === prev) continue;
+      prev = idx;
+      const tile = this.terrain[idx] ?? 0;
+      const tileElev = this.elevOf(x, y);
+      if (tile === TILE_HIGH && viewerElev < tileElev) return false;
+      if (blocksSight(tile) && viewerElev < 2) return false;
+      if (outside && isTree(tile) && viewerElev <= tileElev) {
+        depth++;
+        if (depth >= SIGHT.forestEdge) return false;
+      }
+    }
+    if (tx < 0 || ty < 0 || tx >= this.gw || ty >= this.gh) return false;
+    const end = this.terrain[ty * this.gw + tx] ?? 0;
+    if (outside && isTree(end) && viewerElev <= this.elevOf(tx, ty)) {
+      depth++;
+      if (depth > SIGHT.forestEdge) return false;
     }
     return true;
   }
 
-  private reveal(team: Team, cx: number, cy: number, radius: number) {
+  private reveal(team: Team, cx: number, cy: number, radius: number, climb = false) {
     const fog = this.fog[team];
     if (!fog) return;
-    const r = Math.ceil(radius);
+    const viewerElev = this.elevOf(cx, cy);
+    const reach = climb ? radius + SIGHT.highBonus : radius;
+    const r = Math.ceil(reach);
     const x0 = Math.max(0, Math.floor(cx - r));
     const y0 = Math.max(0, Math.floor(cy - r));
     const x1 = Math.min(this.gw - 1, Math.ceil(cx + r));
     const y1 = Math.min(this.gh - 1, Math.ceil(cy + r));
     const r2 = radius * radius;
+    const far2 = reach * reach;
     for (let y = y0; y <= y1; y++) {
       for (let x = x0; x <= x1; x++) {
         const dx = x + 0.5 - cx;
         const dy = y + 0.5 - cy;
-        if (dx * dx + dy * dy > r2) continue;
+        const d2 = dx * dx + dy * dy;
+        const bonus = climb && viewerElev > this.elevOf(x, y);
+        if (d2 > (bonus ? far2 : r2)) continue;
         if (!this.sightClear(cx, cy, x + 0.5, y + 0.5)) continue;
         fog[y * this.gw + x] = 2;
       }
     }
+  }
+
+  /** Marksman sight grows after standing and drops on the tick movement happens. */
+  private settleSight(dt: number) {
+    for (const u of this.units) {
+      if (u.hp <= 0 || u.kind !== "marksman") continue;
+      if (u.x !== u.px || u.y !== u.py) u.still = 0;
+      else u.still = Math.round((u.still + dt) * 1000) / 1000;
+      this.applyMarksmanSight(u);
+    }
+  }
+
+  /** Catalog marksmen use the SIGHT numbers. A faction sight mod keeps its spawn sight and adds the stand bonus. */
+  private applyMarksmanSight(u: Unit) {
+    const stand = u.still >= SIGHT.marksmanSettle;
+    if (u.sight0 === UNITS.marksman.sight) u.sight = stand ? SIGHT.marksmanStill : SIGHT.marksmanMove;
+    else u.sight = u.sight0 + (stand ? SIGHT.marksmanStill - SIGHT.marksmanMove : 0);
   }
 
   private separate() {
@@ -5580,17 +5649,17 @@ export class Sim {
 
   /** Shooting lights the shooter for every enemy, and leaves a last-known mark. */
   private markFire(u: Unit) {
-    this.markPoint(u.team, u.x, u.y);
+    this.markPoint(u.team, u.x, u.y, this.inForest(u) ? SIGHT.forestReveal : 2.2);
     for (let t = 0; t <= this.opponents; t++) {
       if (this.allied(t, u.team)) continue;
       this.remember(t as Team, u, 6);
     }
   }
 
-  private markPoint(from: Team, x: number, y: number) {
+  private markPoint(from: Team, x: number, y: number, ttl = 2.2) {
     for (let t = 0; t <= this.opponents; t++) {
       if (this.allied(t, from)) continue;
-      this.spots.push({ team: t as Team, x, y, ttl: 2.2 });
+      this.spots.push({ team: t as Team, x, y, ttl });
     }
     if (this.spots.length > 48) this.spots.splice(0, this.spots.length - 48);
   }
