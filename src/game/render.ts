@@ -3,6 +3,7 @@ import { hearAt } from "./audio.ts";
 import {
   BUILD_GAP,
   BUILDINGS,
+  SIGHT,
   MAP_H,
   MAP_W,
   TILE_FORD,
@@ -38,6 +39,7 @@ import { generateMap } from "./maps.ts";
 import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
+import { placeChrome, type ScreenRect } from "./placeui.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
@@ -81,6 +83,8 @@ export interface DrawUi {
   glass?: "2d" | "3d";
   /** World-to-screen used by Confirm / Cancel when the 3D camera is up. */
   project?: (wx: number, wy: number) => { x: number; y: number };
+  /** Screen rectangles Confirm / Cancel must not cover (minimap, A-MOVE, army). */
+  avoid?: ScreenRect[];
 }
 
 function hash(x: number, y: number): number {
@@ -563,7 +567,9 @@ export function drawGame(
         ctx.save();
         ctx.globalAlpha *= 0.58;
       }
-      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), ui.selected.includes(u.id), sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
+      const picked = ui.selected.includes(u.id);
+      if (picked && u.hp > 0 && u.loco !== "air") drawSightRing(ctx, sim, u, px, py, cam.zoom);
+      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), picked, sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
       if (leaf) ctx.restore();
       if (u.hit > 0) {
         ctx.save();
@@ -907,7 +913,7 @@ export function drawGame(
       for (let tx = 0; tx < w; tx++) {
         const cx = origin.tx + tx;
         const cy = origin.ty + ty;
-        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, !!resolveBuilding(ui.placing, sim.factionOf(VIEWER)).shore);
+        const blocked = !bdef.ok && footprintCellBlocked(sim, cx, cy, ui.placing === "dock");
         ctx.globalAlpha = bdef.ok ? 0.5 : blocked ? 0.72 : 0.4;
         ctx.fillStyle = bdef.ok ? "#3dcc6e" : "#d25a48";
         ctx.fillRect(cx + 0.05, cy + 0.05, 0.9, 0.9);
@@ -917,6 +923,16 @@ export function drawGame(
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
     ctx.lineWidth = 0.12;
     ctx.strokeRect(origin.tx + 0.03, origin.ty + 0.03, w - 0.06, h - 0.06);
+    if (!bdef.ok) {
+      ctx.strokeStyle = "#1a120e";
+      ctx.lineWidth = 0.14;
+      ctx.beginPath();
+      ctx.moveTo(origin.tx + 0.25, origin.ty + 0.25);
+      ctx.lineTo(origin.tx + w - 0.25, origin.ty + h - 0.25);
+      ctx.moveTo(origin.tx + w - 0.25, origin.ty + 0.25);
+      ctx.lineTo(origin.tx + 0.25, origin.ty + h - 0.25);
+      ctx.stroke();
+    }
     if (lifted) {
       ctx.strokeStyle = "#f4f0e6";
       ctx.lineWidth = 0.08;
@@ -1074,64 +1090,27 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
   ctx.restore();
 }
 
-/** Keep Confirm / Cancel off the phone dock, the top bar, and the build pad. */
-export function placeSafeMargin(view: View): { l: number; t: number; r: number; b: number } {
-  const land = view.h > 0 && view.h < 500 && view.w > view.h;
-  return land ? { l: 64, t: 40, r: 12, b: 76 } : { l: 8, t: 8, r: 8, b: 8 };
-}
-
-export function placeChrome(
-  cam: Camera,
-  view: View,
-  tx: number,
-  ty: number,
-  w: number,
-  h = w,
-  project?: (wx: number, wy: number) => { x: number; y: number },
-): { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } } {
-  const bw = 112;
-  const bh = 48;
-  const gap = 10;
-  const margin = placeSafeMargin(view);
-  const to = project ?? ((x: number, y: number) => worldToScreen(cam, x, y, view));
-  const a = to(tx, ty);
-  const b = to(tx + w, ty + h);
-  const left = Math.min(a.x, b.x);
-  const right = Math.max(a.x, b.x);
-  const top = Math.min(a.y, b.y);
-  const bottom = Math.max(a.y, b.y);
-  const stack = bh * 2 + 6;
-  let x = Math.round(right + gap);
-  let y = Math.round((top + bottom) / 2 - stack / 2);
-  if (x + bw > view.w - margin.r) x = Math.round(left - gap - bw);
-  if (x < margin.l) x = margin.l;
-  if (x + bw > view.w - margin.r) x = Math.max(margin.l, Math.round(view.w - margin.r - bw));
-  if (y < margin.t) y = margin.t;
-  if (y + stack > view.h - margin.b) y = Math.max(margin.t, Math.round(view.h - margin.b - stack));
-  return {
-    confirm: { x, y, w: bw, h: bh },
-    cancel: { x, y: y + bh + 6, w: bw, h: bh },
-  };
-}
+export { placeChrome };
 
 function paintPlaceChrome(
   ctx: CanvasRenderingContext2D,
   box: { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } },
+  ok = true,
 ) {
-  const paint = (r: { x: number; y: number; w: number; h: number }, label: string, fill: string) => {
+  const paint = (r: { x: number; y: number; w: number; h: number }, label: string, fill: string, ink: string) => {
     ctx.fillStyle = fill;
     ctx.fillRect(r.x, r.y, r.w, r.h);
     ctx.strokeStyle = "#f3ead7";
     ctx.lineWidth = 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
-    ctx.fillStyle = "#14110e";
+    ctx.fillStyle = ink;
     ctx.font = "bold 14px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
   };
-  paint(box.confirm, "Confirm", "#7dce6a");
-  paint(box.cancel, "Cancel", "#e7b2a8");
+  paint(box.confirm, "Confirm", ok ? "#7dce6a" : "#6d6a62", ok ? "#14110e" : "#2a2824");
+  paint(box.cancel, "Cancel", "#e7b2a8", "#14110e");
 }
 
 /** Cells a finished structure can build from. Same Chebyshev gap as placement. */
@@ -1201,10 +1180,15 @@ function drawPlaceLabel(
 ) {
   if (!ui.placing) return;
   const to = (x: number, y: number) => (ui.project ? ui.project(x, y) : worldToScreen(cam, x, y, view));
-  if (ui.touchPlace) {
+  if (ui.touchPlace && ui.hover) {
     const visual = ui.ghost ?? ui.hover;
     const placed = BUILDINGS[ui.placing];
-    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h, ui.project));
+    const ok = sim.canPlace(VIEWER, ui.placing, ui.hover.tx, ui.hover.ty).ok;
+    paintPlaceChrome(
+      ctx,
+      placeChrome(cam, view, visual.tx, visual.ty, placed.w, placed.h, ui.project, ui.avoid),
+      ok,
+    );
   }
   let tx = 0;
   let ty = 0;
@@ -1231,10 +1215,11 @@ function drawPlaceLabel(
     const secs = def.time >= 10 || Number.isInteger(def.time) ? String(def.time) : def.time.toFixed(1);
     text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
-    const s = to(tx + def.w / 2, ty);
     const mark = check.ok ? "✓" : "✕";
     const lines = check.ok ? [`${mark}  ${text}`, power] : [mark, text];
-    paintPlaceCard(ctx, s.x, s.y, lines, bad);
+    const s = check.ok ? to(tx + def.w / 2, ty) : to(tx + def.w + 0.2, ty + def.h / 2);
+    if (check.ok) paintPlaceCard(ctx, s.x, s.y, lines, bad);
+    else paintPlaceCard(ctx, s.x + 8, s.y + 18, lines, bad);
     return;
   } else return;
   const s = to(tx + 0.5, ty);
@@ -1315,11 +1300,18 @@ function drawJobsScreen(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, vi
 }
 
 /** Legal cells are green. A blocked cell in the footprint is a stronger red. Not a team color. */
-function footprintCellBlocked(sim: Sim, x: number, y: number, shore: boolean): boolean {
+function footprintCellBlocked(sim: Sim, x: number, y: number, dock: boolean): boolean {
   if (x < 0 || y < 0 || x >= sim.gw || y >= sim.gh) return true;
+  const i = y * sim.gw + x;
+  const tile = sim.terrain[i] ?? 0;
+  if (dock) {
+    if (tile !== TILE_SHALLOW && tile !== TILE_DEEP) return true;
+    if ((sim.occ[i] ?? 0) !== 0) return true;
+    if ((sim.crystal[i] ?? 0) > 0) return true;
+    return false;
+  }
   if (sim.blockedTile(x, y)) return true;
-  if ((sim.crystal[y * sim.gw + x] ?? 0) > 0) return true;
-  if (shore && sim.terrain[y * sim.gw + x] !== TILE_SHORE) return true;
+  if ((sim.crystal[i] ?? 0) > 0) return true;
   return false;
 }
 
@@ -3915,6 +3907,51 @@ function paintPlate(
   ctx.drawImage(picture, -w / 2, -h, w, h);
   if (mask) ctx.drawImage(tintedMask(mask, color), -w / 2, -h, w, h);
   ctx.restore();
+}
+
+/** Thin sight ring on a selected unit. Forests and cliffs clip it. */
+function drawSightRing(ctx: CanvasRenderingContext2D, sim: Sim, u: Unit, x: number, y: number, zoom: number) {
+  const tx = u.x | 0;
+  const ty = u.y | 0;
+  const here = tx >= 0 && ty >= 0 && tx < sim.gw && ty < sim.gh ? (sim.terrain[ty * sim.gw + tx] ?? 0) : 0;
+  const radius = u.sight + (here === TILE_HIGH ? SIGHT.highBonus : 0);
+  const reach = Math.ceil(radius) + 1;
+  ctx.save();
+  ctx.beginPath();
+  for (let dy = -reach; dy <= reach; dy++) {
+    for (let dx = -reach; dx <= reach; dx++) {
+      const gx = tx + dx;
+      const gy = ty + dy;
+      if (gx < 0 || gy < 0 || gx >= sim.gw || gy >= sim.gh) continue;
+      const tile = sim.terrain[gy * sim.gw + gx] ?? 0;
+      if (tile === TILE_SCRUB || tile === TILE_CLIFF || tile === TILE_ROCK) continue;
+      ctx.rect(gx, gy, 1, 1);
+    }
+  }
+  ctx.clip();
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(243, 234, 215, 0.92)";
+  ctx.lineWidth = 1.25 / Math.max(8, zoom);
+  ctx.stroke();
+  ctx.restore();
+  if (u.kind === "marksman" && u.still >= SIGHT.marksmanSettle) {
+    const eye = Math.max(14 / Math.max(8, zoom), 0.28);
+    ctx.save();
+    ctx.translate(x, y - radius - eye * 0.2);
+    ctx.strokeStyle = "#f3ead7";
+    ctx.fillStyle = "#14110e";
+    ctx.lineWidth = Math.max(1, eye * 0.12);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, eye * 0.72, eye * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#f3ead7";
+    ctx.beginPath();
+    ctx.arc(0, 0, eye * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 /** Thin ellipse just under the footprint. About 0.9x the unit width. */

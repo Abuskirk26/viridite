@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   Anchor,
   ArrowDownToLine,
@@ -50,7 +50,6 @@ import {
   supplyShare,
   FACTION_NAME,
   SEAT_NAME,
-  SURVIVE_SECONDS,
   commandCost,
   isFence,
   matchupTag,
@@ -82,9 +81,20 @@ import {
   warnSkirmishDefaults,
   type SkirmishSetup,
 } from "@/game/lobby";
+import { eraForYear } from "@/game/eras";
 import { attachInput, type PointerDraft } from "@/game/input";
 import { ensureArt } from "@/game/art";
 import { bakeTerrain, drawGame, ensureGround, frameScale, groundSettled, placeChrome, sheetFieldAlive, sheetLong } from "@/game/render";
+import { allowEdgeScroll, phonePlaceHud } from "@/game/placeui";
+import {
+  buildClickSwallowed,
+  buildPanelOwning,
+  gestureMoved,
+  rememberBuildScroll,
+  savedBuildScroll,
+  setBuildPanelOwning,
+  swallowBuildClick,
+} from "@/game/buildlist";
 import { ensureIso, iso } from "@/game/iso";
 import { SheetBody, SheetHead, VersionPick } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
@@ -101,7 +111,7 @@ import { seatStatusLabel } from "@/game/relay-room";
 import { quant, seatResult, type CmdKind, type Cmd } from "@/game/orders";
 import { clampCamera, minimapHit, openingZoom, screenToWorld, setViewPitch, stepInertia, stepZoom, tacticalHome, viewPitch, worldToScreen, zoomAtBias, zoomBias, type Camera, type View } from "@/game/view";
 import { getRenderMode } from "@/game/render3d/mode";
-import { focusWorld, projectSurface, projectWorld } from "@/game/render3d/camera";
+import { focusOnGround, focusWorld, projectSurface, projectWorld } from "@/game/render3d/camera";
 import { sampleHeight } from "@/game/render3d/terrain";
 import { Scene3D } from "@/game/render3d/scene";
 
@@ -146,6 +156,15 @@ function pickStrike(sim: Sim, cam: Camera, view: View, sx: number, sy: number, t
 function aimedCell(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number, lift = false) {
   const world = liftedWorld(cam, view, sx, sy, lift);
   return footprintOrigin(kind, world.x, world.y);
+}
+
+/** Snap stays the cell Confirm builds. In 3D the ghost centre is the ray hit, so it does not jump off the finger. */
+function placeSpot(sim: Sim, cam: Camera, view: View, kind: BuildingId, sx: number, sy: number) {
+  const world = pointerWorld(cam, view, sx, sy);
+  const snap = footprintOrigin(kind, world.x, world.y);
+  const def = BUILDINGS[kind];
+  const visual = getRenderMode() === "3d" ? { tx: world.x - def.w / 2, ty: world.y - def.h / 2 } : snap;
+  return { snap, visual };
 }
 
 type Phase = "menu" | "net" | "play" | "over" | "editor";
@@ -360,7 +379,8 @@ function hintFor(sim: Sim, team: Team = 0): string {
   if (sim.cratesOn && !sim.haulLanded) return `Heavy field haul hits the center in ${clock(Math.max(0, 210 - sim.time))}.`;
   if (!has("factory")) return "War Factory for armor. Tanks cost more command points than rifles.";
   if (sim.commandUsed(team) >= sim.commandCap(team) - 2) return "The field is full. Spend what you have before you train more.";
-  if (sim.mode === "survive") return "Hold the clock, or flatten their Construction Yard.";
+  if (sim.mode === "survive" && sim.limitSecs > 0) return "Hold until the clock ends, or flatten their Construction Yard.";
+  if (sim.mode === "survive") return "No clock. Flatten their Construction Yard.";
   return "Infantry in the woods stay hidden until a ground unit walks up beside them. Your own troops show a leaf mark.";
 }
 
@@ -379,10 +399,12 @@ export function GameScreen() {
   const viewRef = useRef<View>({ w: 1, h: 1 });
   const phaseRef = useRef<Phase>("menu");
   const endNoted = useRef(false);
+  const viewErrorRef = useRef("");
   const pausedRef = useRef(false);
   const selRef = useRef<number[]>([]);
   const selBRef = useRef<number | null>(null);
   const placingRef = useRef<BuildingId | null>(null);
+  const buildOpenRef = useRef(false);
   const rallyRef = useRef(false);
   const shakeRef = useRef(0);
   const fittedRef = useRef(false);
@@ -418,6 +440,7 @@ export function GameScreen() {
   const [menuTab, setMenuTab] = useState<SheetTab>("game");
   const [ready, setReady] = useState(true);
   const [pauseSheet, setPauseSheet] = useState(false);
+  const [leaveAsk, setLeaveAsk] = useState<null | "restart" | "menu">(null);
   const [pauseTab, setPauseTab] = useState<SheetTab>("game");
   const [invite, setInvite] = useState("");
   const [paused, setPaused] = useState(false);
@@ -444,6 +467,7 @@ export function GameScreen() {
   const [delayTicks, setDelayTicks] = useState(8);
   const [desync, setDesync] = useState(false);
   const [rejoinNote, setRejoinNote] = useState("");
+  const [viewError, setViewError] = useState("");
   const [chat, setChat] = useState<string | null>(null);
   const [arming, setArming] = useState(false);
   const [strike, setStrike] = useState(false);
@@ -501,6 +525,7 @@ export function GameScreen() {
   selRef.current = sel;
   selBRef.current = selB;
   placingRef.current = placing;
+  buildOpenRef.current = buildOpen;
   rallyRef.current = rally;
   speedRef.current = speed;
   viewerRef.current = viewer;
@@ -782,9 +807,16 @@ export function GameScreen() {
       }
     };
     const id = setInterval(applyKeys, 16);
-    const onMouse = (e: MouseEvent) => {
+    const onPoint = (e: PointerEvent) => {
       const canvas = canvasRef.current;
-      if (!canvas || placingRef.current) return;
+      if (!canvas) return;
+      const placing = !!placingRef.current;
+      const touch = e.pointerType !== "mouse";
+      if (placing) {
+        camRef.current.vx = 0;
+        camRef.current.vy = 0;
+      }
+      if (!allowEdgeScroll(touch ? "touch" : "mouse", placing, buildPanelOwning(), !!camRef.current.hold)) return;
       const r = canvas.getBoundingClientRect();
       const mx = e.clientX - r.left;
       const my = e.clientY - r.top;
@@ -799,12 +831,12 @@ export function GameScreen() {
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
-    window.addEventListener("mousemove", onMouse);
+    window.addEventListener("pointermove", onPoint);
     return () => {
       clearInterval(id);
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("keyup", onKeyUp);
-      window.removeEventListener("mousemove", onMouse);
+      window.removeEventListener("pointermove", onPoint);
     };
   }, [phase]);
 
@@ -849,6 +881,8 @@ export function GameScreen() {
       customId: optsRef.current.customId,
       bots: [sim.seatChart[1], sim.seatChart[2], sim.seatChart[3]],
       skills: sim.skills,
+      limit: sim.limitSecs <= 0 ? 0 : Math.round(sim.limitSecs / 60) === 20 ? 20 : Math.round(sim.limitSecs / 60) === 40 ? 40 : 60,
+      year: sim.year,
     };
     optsRef.current = remembered;
     setSetup(remembered);
@@ -971,25 +1005,42 @@ export function GameScreen() {
         draftRef.current.follow = false;
         draftRef.current.cellTx = null;
         draftRef.current.cellTy = null;
-      } else if (draftRef.current.follow) {
-        const cell = aimedCell(
-          sim,
-          camRef.current,
-          viewRef.current,
-          placingRef.current,
-          draftRef.current.hoverX,
-          draftRef.current.hoverY,
-          draftRef.current.lift,
-        );
-        draftRef.current.cellTx = cell.tx;
-        draftRef.current.cellTy = cell.ty;
+      } else if (!draftRef.current.follow) {
+        if (draftRef.current.cellTx == null) {
+          const pad = sim.nearestBuildPad(viewerRef.current as 0, placingRef.current);
+          if (pad) {
+            draftRef.current.cellTx = pad.tx;
+            draftRef.current.cellTy = pad.ty;
+            draftRef.current.anchor = true;
+          }
+        }
+      } else {
+        const me = viewerRef.current as 0;
+        const kind = placingRef.current;
+        const drop = aimedCell(sim, camRef.current, viewRef.current, kind, draftRef.current.hoverX, draftRef.current.hoverY, false);
+        const offered = sim.offerCell(me, kind, drop.tx, drop.ty);
+        draftRef.current.cellTx = offered.tx;
+        draftRef.current.cellTy = offered.ty;
         draftRef.current.anchor = true;
       }
       const hover =
         placingRef.current && draftRef.current.cellTx != null && draftRef.current.cellTy != null
           ? { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy }
           : null;
-      const ghost = hover;
+      const lifting = !!placingRef.current && draftRef.current.lift && draftRef.current.pressed;
+      const ghost = (() => {
+        if (!hover || !placingRef.current || !lifting) return hover;
+        const raised = aimedCell(
+          sim,
+          camRef.current,
+          viewRef.current,
+          placingRef.current,
+          draftRef.current.hoverX,
+          draftRef.current.hoverY,
+          true,
+        );
+        return sim.offerCell(viewerRef.current as 0, placingRef.current, raised.tx, raised.ty);
+      })();
       let wallRun: { tx: number; ty: number; ok: boolean; reason?: string }[] | null = null;
       if (placingRef.current && isFence(placingRef.current)) {
         const dragged = draftRef.current.wallPts;
@@ -1046,16 +1097,29 @@ export function GameScreen() {
         placeGrid: true,
         touchPlace: touchPlaceRef.current || (viewRef.current.h < 500 && viewRef.current.w > viewRef.current.h),
         glass: mode3d ? ("3d" as const) : ("2d" as const),
+        avoid: phonePlaceHud(viewRef.current, wideField(sim.mapSize)),
         project: mode3d
           ? (wx: number, wy: number) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy))
           : undefined,
       };
       if (mode3d && glRef.current) {
         glRef.current.style.display = "block";
-        if (!sceneRef.current) sceneRef.current = new Scene3D(glRef.current);
-        sceneRef.current.resize(w, h);
-        sceneRef.current.sync(sim, camRef.current, viewRef.current, drawUi, alpha);
-        window.__viridite3d = { fps: sceneRef.current.fps, rebuild: () => sceneRef.current?.rebuild() };
+        try {
+          if (!sceneRef.current) sceneRef.current = new Scene3D(glRef.current);
+          sceneRef.current.resize(w, h);
+          sceneRef.current.sync(sim, camRef.current, viewRef.current, drawUi, alpha);
+          window.__viridite3d = { fps: sceneRef.current.fps, rebuild: () => sceneRef.current?.rebuild() };
+          if (viewErrorRef.current) {
+            viewErrorRef.current = "";
+            setViewError("");
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "The 3D view failed to draw.";
+          if (viewErrorRef.current !== message) {
+            viewErrorRef.current = message;
+            setViewError(message || "The 3D view failed to draw.");
+          }
+        }
       } else if (glRef.current) {
         glRef.current.style.display = "none";
       }
@@ -1074,6 +1138,7 @@ export function GameScreen() {
       if (sim.outcome !== "playing" && phaseRef.current === "play") {
         if (!endNoted.current) {
           endNoted.current = true;
+          netRef.current?.forgetRoom();
           writeSave(sim, camRef.current);
           window.setTimeout(() => {
             if (phaseRef.current === "play") setPhase("over");
@@ -1117,14 +1182,16 @@ export function GameScreen() {
         return selRef.current.length ? "delay" : "immediate";
       },
       onMinimap: (wx, wy) => {
-        if (getRenderMode() === "3d") focusWorld(camRef.current, viewRef.current, wx, wy, terrainHeight);
+        const view = viewRef.current;
+        const sim = simRef.current;
+        if (getRenderMode() === "3d") focusOnGround(camRef.current, view, wx, wy, terrainHeight);
         else {
           camRef.current.x = wx;
           camRef.current.y = wy;
         }
         camRef.current.vx = 0;
         camRef.current.vy = 0;
-        clampCamera(camRef.current, simRef.current?.gw ?? 64, simRef.current?.gh ?? 64, viewRef.current, wideField(simRef.current?.mapSize ?? "skirmish"));
+        clampCamera(camRef.current, sim?.gw ?? 64, sim?.gh ?? 64, view, wideField(sim?.mapSize ?? "skirmish"));
       },
       onMinimapTap: (wx, wy) => {
         const sim = simRef.current;
@@ -1174,15 +1241,16 @@ export function GameScreen() {
         const phone = viewRef.current.h < 500 && viewRef.current.w > viewRef.current.h;
         if (!sim || !kind || isFence(kind) || (!touchPlaceRef.current && !phone)) return null;
         if (draftRef.current.cellTx == null || draftRef.current.cellTy == null) return null;
-        const show = { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy };
+        const show = { visual: { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy } };
         const box = placeChrome(
           camRef.current,
           viewRef.current,
-          show.tx,
-          show.ty,
+          show.visual.tx,
+          show.visual.ty,
           BUILDINGS[kind].w,
           BUILDINGS[kind].h,
           getRenderMode() === "3d" ? (wx, wy) => projectWorld(camRef.current, viewRef.current, wx, wy, terrainHeight(wx, wy)) : undefined,
+          phonePlaceHud(viewRef.current, wideField(sim.mapSize)),
         );
         const hit = (r: { x: number; y: number; w: number; h: number }) => sx >= r.x && sy >= r.y && sx <= r.x + r.w && sy <= r.y + r.h;
         if (hit(box.confirm)) return "confirm";
@@ -1201,6 +1269,7 @@ export function GameScreen() {
             ? { tx: draftRef.current.cellTx, ty: draftRef.current.cellTy }
             : aimedCell(sim, camRef.current, viewRef.current, kind, draftRef.current.hoverX, draftRef.current.hoverY, draftRef.current.lift);
         const me = viewerRef.current as 0;
+        if (!sim.canPlace(me, kind, origin.tx, origin.ty).ok) return;
         // Friends and skirmish share this order. Online it is lockstep; offline it applies now.
         actRef.current("build", { kind, tx: origin.tx, ty: origin.ty }, () => {
           const res = sim.tryPlace(me, kind, origin.tx, origin.ty);
@@ -1211,6 +1280,7 @@ export function GameScreen() {
       },
       projectGround: (sx, sy) =>
         getRenderMode() === "3d" ? projectSurface(camRef.current, viewRef.current, sx, sy, terrainHeight) : null,
+      uiOwnsPointer: () => buildPanelOwning(),
       onWall: (screenPts) => {
         const sim = simRef.current;
         const kind = placingRef.current;
@@ -1256,6 +1326,11 @@ export function GameScreen() {
         setSelecting(false);
         selectRef.current = false;
         if (!sim || pausedRef.current || phaseRef.current !== "play") return;
+        if (buildOpenRef.current && !placingRef.current) {
+          if (buildClickSwallowed() || buildPanelOwning()) return;
+          setBuildOpen(false);
+          return;
+        }
         unlockAudio();
         const world = pointerWorld(camRef.current, viewRef.current, sx, sy);
         const me = viewerRef.current as 0;
@@ -1447,6 +1522,8 @@ export function GameScreen() {
     draftRef.current.follow = false;
     draftRef.current.cellTx = spot?.tx ?? null;
     draftRef.current.cellTy = spot?.ty ?? null;
+    camRef.current.vx = 0;
+    camRef.current.vy = 0;
     setPlacing(kind);
     setSel([]);
     setSelB(null);
@@ -1651,18 +1728,7 @@ export function GameScreen() {
     setFrame((n) => n + 1);
   };
   const openBuild = () => {
-    const id = selBRef.current;
-    const live = simRef.current;
-    const b = id != null && live ? live.buildingById(id) : undefined;
-    if (b && b.team === viewerRef.current && isTrainHall(b.kind) && selRef.current.length === 0 && !placingRef.current) {
-      setBuildOpen(false);
-      const kind = b.kind;
-      requestAnimationFrame(() => {
-        document.querySelector(`[data-roster-group="${kind}"]`)?.scrollIntoView({ inline: "start", block: "nearest", behavior: "auto" });
-      });
-      return;
-    }
-    setBuildOpen((v) => !v);
+    setBuildOpen(true);
     setProdTab("build");
   };
 
@@ -1727,7 +1793,7 @@ export function GameScreen() {
           <div className="min-h-0 flex-1 overflow-y-auto">
             {menuTab === "game" ? (
               <div className="mx-auto flex w-full max-w-lg flex-col gap-3 px-3 pb-6">
-                <SheetBody tab="game" />
+                <SheetBody tab="game" setup={setup} onSetup={patchSetup} />
                 <button
                   type="button"
                   data-testid="open-ready"
@@ -1738,7 +1804,7 @@ export function GameScreen() {
                 </button>
               </div>
             ) : (
-              <SheetBody tab={menuTab} />
+              <SheetBody tab={menuTab} setup={setup} onSetup={patchSetup} />
             )}
           </div>
         </div>
@@ -1773,8 +1839,8 @@ export function GameScreen() {
                 portrait
                   ? "h-11 shrink-0"
                   : short
-                    ? "z-30 h-8 shrink-0 overflow-visible"
-                    : "absolute top-0 left-0 z-30 h-8 overflow-visible"
+                ? "z-30 h-12 shrink-0 overflow-hidden"
+                : "absolute top-0 left-0 z-30 h-12 overflow-hidden"
               }`}
               style={portrait || short ? undefined : { right: "7.5rem" }}
               data-testid="resource-bar"
@@ -1805,8 +1871,8 @@ export function GameScreen() {
                 </ResourcePill>
               )}
               <ResourcePill
-                label="Time"
-                value={sim.mode === "survive" ? clock(SURVIVE_SECONDS - sim.time) : clock(sim.time)}
+                label={sim.limitSecs > 0 ? "Time left" : "Time"}
+                value={sim.limitSecs > 0 ? clock(Math.max(0, sim.limitSecs - sim.time)) : clock(sim.time)}
                 tone="text-crystal"
                 compact={!portrait}
                 minW={portrait ? "5rem" : "4.5rem"}
@@ -1817,6 +1883,7 @@ export function GameScreen() {
                 {online ? null : <SpeedControl speed={speed} onChange={setSpeed} compact />}
                 <IconButton
                   label={muted ? "Unmute" : "Mute"}
+                  testId="mute"
                   compact
                   onClick={() => {
                     const next = !isMuted();
@@ -1855,8 +1922,63 @@ export function GameScreen() {
             )}
             <div className="flex min-h-0 flex-1">
             <div className="relative min-h-0 min-w-0 flex-1">
-              <canvas ref={glRef} className="pointer-events-none absolute inset-0 hidden h-full w-full" data-testid="battlefield-3d" />
+              <canvas ref={glRef} className="pointer-events-none absolute inset-0 h-full w-full" style={{ display: "none" }} data-testid="battlefield-3d" />
               <canvas ref={canvasRef} className="relative z-0 h-full w-full touch-none" data-testid="battlefield" />
+              {viewError && (
+                <p
+                  data-testid="view-error"
+                  className="pointer-events-none absolute top-12 left-1/2 z-30 max-w-[80%] -translate-x-1/2 bg-field/92 px-3 py-2 text-center text-sm text-danger"
+                >
+                  {viewError}
+                </p>
+              )}
+              {phase === "play" &&
+                (() => {
+                  const left = sim.rebuildClock(viewer as 0);
+                  const mcv = sim.deployableMcv(viewer as 0);
+                  if (left == null && !mcv) return null;
+                  const urgent = left != null && left <= 10;
+                  return (
+                    <div
+                      data-testid="rebuild-banner"
+                      className="pointer-events-none absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-2"
+                      style={{ top: 52 }}
+                    >
+                      {left != null && (
+                        <p
+                          data-testid="rebuild-clock"
+                          className="font-bold"
+                          style={{
+                            fontSize: 14,
+                            fontWeight: 700,
+                            lineHeight: "20px",
+                            color: urgent ? "#e23b32" : "#f3ead7",
+                            textShadow: "0 1px 0 #14110e, 0 -1px 0 #14110e, 1px 0 0 #14110e, -1px 0 0 #14110e, 1px 1px 0 #14110e, -1px -1px 0 #14110e, 1px -1px 0 #14110e, -1px 1px 0 #14110e",
+                          }}
+                        >
+                          {`Rebuild or be defeated ${clock(left)}`}
+                        </p>
+                      )}
+                      {mcv && (
+                        <button
+                          type="button"
+                          data-testid="find-mcv"
+                          className="pointer-events-auto h-12 min-w-12 bg-crystal px-3 font-display text-xs uppercase text-crystal-ink"
+                          onClick={() => {
+                            camRef.current.x = mcv.x;
+                            camRef.current.y = mcv.y;
+                            camRef.current.vx = 0;
+                            camRef.current.vy = 0;
+                            clampCamera(camRef.current, sim.gw, sim.gh, viewRef.current, wideField(sim.mapSize));
+                            setFrame((n) => n + 1);
+                          }}
+                        >
+                          Find MCV
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               <div
                 data-testid="alert-lane"
                 className={`pointer-events-none absolute left-2 z-20 flex w-[min(58%,360px)] flex-col gap-1 ${portrait || short ? "top-1" : "top-10"}`}
@@ -2017,12 +2139,18 @@ export function GameScreen() {
                     {botBrief(sim)}
                   </p>
                   <PauseSound />
-                  <BarButton
-                    label="Resume"
-                    onClick={() => netRef.current?.command("pause", { on: false })}
-                  >
-                    <Play className="size-5" /> Resume
-                  </BarButton>
+                  {viewer !== 0 && (sim.pauseBits & 1) !== 0 ? (
+                    <p data-testid="paused-by-host" className="font-display text-sm uppercase tracking-wide text-gold">
+                      Paused by host
+                    </p>
+                  ) : (
+                    <BarButton
+                      label="Resume"
+                      onClick={() => netRef.current?.command("pause", { on: false })}
+                    >
+                      <Play className="size-5" /> Resume
+                    </BarButton>
+                  )}
                 </Overlay>
               )}
               {online && sim.eliminated[viewer] && sim.outcome === "playing" && !sim.frozen && (
@@ -2033,10 +2161,10 @@ export function GameScreen() {
               {paused && phase === "play" && pauseSheet && (
                 <div className="absolute inset-0 z-40 flex flex-col overflow-y-auto bg-field" data-testid="pause-sheet">
                   <SheetHead tab={pauseTab} onTab={setPauseTab} onBack={() => setPauseSheet(false)} />
-                  <SheetBody tab={pauseTab} locked />
+                  <SheetBody tab={pauseTab} locked setup={setup} />
                   {pauseTab === "game" && (
                     <p className="mx-auto w-full max-w-lg px-3 pb-6 text-sm text-pretty text-muted">
-                      {sim.mapName} · {SIZE_LABEL[sim.mapSize]} · {sim.fogOn ? "fog" : "no fog"} ·{" "}
+                      {sim.mapName} · {SIZE_LABEL[sim.mapSize]} · {eraForYear(sim.year).label} {sim.year} · {sim.fogOn ? "fog" : "no fog"} ·{" "}
                       {sim.wallsOn ? "walls" : "no walls"} · {sim.startCredits.toLocaleString("en-US")} credits ·{" "}
                       {packById(doctrineOf()).feel}
                     </p>
@@ -2044,52 +2172,86 @@ export function GameScreen() {
                 </div>
               )}
               {paused && phase === "play" && !pauseSheet && (
-                <Overlay title="Paused" fit>
-                  <div className="flex items-center justify-center gap-2">
-                    <p className="font-display text-xs uppercase tracking-wide text-brass">View</p>
-                    <VersionPick testPrefix="pause-version" dense />
+                <div
+                  className="fixed inset-0 z-50 flex items-center justify-center bg-field/80 p-2"
+                  data-testid="match-end"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="pause-title"
+                >
+                  <div className={`steel w-full overflow-hidden p-2 ${land ? "max-w-lg" : "max-w-sm"}`}>
+                    <h2 id="pause-title" data-testid="match-end-title" className="text-center font-display text-lg uppercase tracking-widest text-gold">
+                      Paused
+                    </h2>
+                    {leaveAsk ? (
+                      <div className="mt-2 flex flex-col gap-2">
+                        <p data-testid="leave-confirm" className="text-center text-sm text-pretty text-ink">
+                          Leave this match? Progress will be lost
+                        </p>
+                        <div className="flex gap-2">
+                          <BarButton label="Cancel" block testId="leave-cancel" onClick={() => setLeaveAsk(null)}>
+                            Cancel
+                          </BarButton>
+                          <BarButton
+                            label="Leave"
+                            block
+                            testId="leave-confirm-go"
+                            onClick={() => {
+                              const which = leaveAsk;
+                              setLeaveAsk(null);
+                              try {
+                                localStorage.removeItem(SAVE_KEY);
+                              } catch {
+                                /* private mode */
+                              }
+                              setHasSave(false);
+                              if (which === "restart") restartSame();
+                              else {
+                                setPaused(false);
+                                setPhase("menu");
+                              }
+                            }}
+                          >
+                            Leave
+                          </BarButton>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className={land ? "mt-1 grid grid-cols-2 items-start gap-2" : "mt-1 flex flex-col gap-2"}>
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <div className="flex items-center justify-center gap-2">
+                            <p className="font-display text-xs uppercase tracking-wide text-brass">View</p>
+                            <VersionPick testPrefix="pause-version" dense={land} />
+                          </div>
+                          <PauseSound />
+                        </div>
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <BarButton
+                            label="Resume"
+                            wide
+                            testId="pause-resume"
+                            onClick={() => {
+                              unlockAudio();
+                              setLeaveAsk(null);
+                              setPaused(false);
+                            }}
+                          >
+                            <Play className="size-4" /> Resume
+                          </BarButton>
+                          <BarButton label="Settings" wide testId="pause-settings" onClick={() => setPauseSheet(true)}>
+                            Settings
+                          </BarButton>
+                          <BarButton label="Restart" wide testId="restart-skirmish" onClick={() => setLeaveAsk("restart")}>
+                            <RotateCcw className="size-4" /> Restart
+                          </BarButton>
+                          <BarButton label="Menu" wide testId="pause-menu" onClick={() => setLeaveAsk("menu")}>
+                            Menu
+                          </BarButton>
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <p data-testid="pause-difficulty" className="font-display text-sm uppercase tracking-wide text-gold">
-                    Difficulty · {sim.difficulty === "hard" ? "Hard" : sim.difficulty === "easy" ? "Easy" : "Normal"}
-                  </p>
-                  <BarButton
-                    label="Resume"
-                    testId="pause-resume"
-                    block
-                    onClick={() => {
-                      unlockAudio();
-                      setPaused(false);
-                    }}
-                  >
-                    <Play className="size-4" /> Resume
-                  </BarButton>
-                  <p data-testid="pause-ai" className="line-clamp-1 max-w-xs text-center text-xs text-pretty text-gold">
-                    {botBrief(sim)}
-                  </p>
-                  <p data-testid="pause-rules" className="line-clamp-2 max-w-xs text-center text-[11px] leading-tight text-pretty text-muted">
-                    {sim.mapName} · {SIZE_LABEL[sim.mapSize]} · {sim.fogOn ? "fog" : "no fog"} ·{" "}
-                    {sim.startCredits.toLocaleString("en-US")} · {sim.difficulty} · {TEAM_LABEL[sim.teamMode]}
-                  </p>
-                  <div className="flex w-full gap-1">
-                    <BarButton label="Match settings" testId="pause-settings" block onClick={() => setPauseSheet(true)}>
-                      Settings
-                    </BarButton>
-                    <BarButton label="Restart with these rules" testId="restart-skirmish" block onClick={restartSame}>
-                      <RotateCcw className="size-4" /> Restart
-                    </BarButton>
-                    <BarButton
-                      label="Save and leave"
-                      block
-                      onClick={() => {
-                        if (simRef.current) writeSave(simRef.current, camRef.current);
-                        setHasSave(true);
-                        setPhase("menu");
-                      }}
-                    >
-                      Menu
-                    </BarButton>
-                  </div>
-                </Overlay>
+                </div>
               )}
               {phase === "over" && (
                 <Overlay
@@ -2102,7 +2264,7 @@ export function GameScreen() {
                     <BarButton
                       label="Rematch"
                       testId="rematch"
-                      block
+                      tall
                       onClick={() => {
                         if (netRef.current) netRef.current.rematch();
                         else {
@@ -2117,8 +2279,9 @@ export function GameScreen() {
                     </BarButton>
                     <BarButton
                       label="Menu"
-                      block
+                      tall
                       onClick={() => {
+                        netRef.current?.forgetRoom();
                         netRef.current?.leave();
                         netRef.current = null;
                         setOnline(false);
@@ -2446,10 +2609,10 @@ function ProductionColumn({
   const yard = sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
   const mcv = sim.units.some((u) => u.team === team && u.kind === "mcv" && u.hp > 0);
   const tabs: { id: ProdTab; label: string }[] = [{ id: "build", label: "Build" }];
-  if (buildingOffered(sim.mapId, faction, "barracks", sim.wallsOn)) tabs.push({ id: "barracks", label: "Infantry" });
-  if (buildingOffered(sim.mapId, faction, "factory", sim.wallsOn)) tabs.push({ id: "factory", label: "Vehicles" });
-  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn)) tabs.push({ id: "dock", label: "Navy" });
-  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn)) tabs.push({ id: "helipad", label: "Air" });
+  if (buildingOffered(sim.mapId, faction, "barracks", sim.wallsOn, sim.year)) tabs.push({ id: "barracks", label: "Infantry" });
+  if (buildingOffered(sim.mapId, faction, "factory", sim.wallsOn, sim.year)) tabs.push({ id: "factory", label: "Vehicles" });
+  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn, sim.year)) tabs.push({ id: "dock", label: "Navy" });
+  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn, sim.year)) tabs.push({ id: "helipad", label: "Air" });
   const active = tabs.some((t) => t.id === tab) ? tab : "build";
   const hall = active === "build" ? undefined : producerOf(sim, team, active, selB);
   const hasDock = sim.buildings.some((b) => b.team === team && b.kind === "dock" && b.complete && b.hp > 0);
@@ -2504,7 +2667,7 @@ function ProductionColumn({
                 <div className="col-span-2">
                   <HqCard sim={sim} team={team} />
                 </div>
-                {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
+                {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn, sim.year)).map((id) => {
                   const def = BUILDINGS[id];
                   const need = unmetNeed(sim, team, id);
                   const broke = sim.credits[team] < def.cost;
@@ -2538,7 +2701,7 @@ function ProductionColumn({
                 <TrainProgress sim={sim} team={team} building={hall} faction={faction} />
                 <div className="grid grid-cols-2 gap-1">
                   {trainedList(active, faction)
-                    .filter((id) => trainOffered(sim.mapId, faction, id, hasDock))
+                    .filter((id) => trainOffered(sim.mapId, faction, id, hasDock, sim.year))
                     .map((id) => (
                       <TrainButton key={id} sim={sim} team={team} building={hall} unitId={id} onTrain={(unit) => onTrain(active, unit)} />
                     ))}
@@ -2875,8 +3038,8 @@ function ShortDock({
     { id: "barracks", label: "Infantry" },
     { id: "factory", label: "Vehicles" },
   ];
-  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn)) hallTabs.push({ id: "helipad", label: "Air" });
-  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn)) hallTabs.push({ id: "dock", label: "Navy" });
+  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn, sim.year)) hallTabs.push({ id: "helipad", label: "Air" });
+  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn, sim.year)) hallTabs.push({ id: "dock", label: "Navy" });
   const [hall, setHall] = useState<TrainAt>("barracks");
   useEffect(() => {
     if (ownBuilding && isTrainHall(ownBuilding.kind)) setHall(ownBuilding.kind);
@@ -2982,8 +3145,8 @@ function TroopRoster({
     { id: "barracks", label: "Infantry" },
     { id: "factory", label: "Vehicles" },
   ];
-  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn)) groups.push({ id: "dock", label: "Navy" });
-  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn)) groups.push({ id: "helipad", label: "Air" });
+  if (buildingOffered(sim.mapId, faction, "dock", sim.wallsOn, sim.year)) groups.push({ id: "dock", label: "Navy" });
+  if (buildingOffered(sim.mapId, faction, "helipad", sim.wallsOn, sim.year)) groups.push({ id: "helipad", label: "Air" });
   const picked = selB != null ? sim.buildingById(selB) : undefined;
   return (
     <div
@@ -2993,7 +3156,7 @@ function TroopRoster({
       style={{ WebkitTouchCallout: "none", userSelect: "none", touchAction: "pan-x" }}
     >
       {groups.map((group) => {
-        const list = trainedList(group.id, faction).filter((id) => trainOffered(sim.mapId, faction, id, hasDock || group.id !== "dock"));
+        const list = trainedList(group.id, faction).filter((id) => trainOffered(sim.mapId, faction, id, hasDock || group.id !== "dock", sim.year));
         if (!list.length) return null;
         const shown = !focus || focus === group.id;
         const hall = producerOf(sim, team, group.id, selB);
@@ -3216,10 +3379,124 @@ function BuildColumn({
   const faction = sim.factionOf(team as 0);
   const power = sim.powerOf(team as 0);
   const yard = sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0);
+  const panel = useRef<HTMLElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
-  const drag = useRef({ y: 0, top: 0, moved: false, active: false, swallow: false, kind: "" as BuildingId | "" });
+  const drag = useRef<{ y: number; top: number; moved: boolean; active: boolean; swallow: boolean; kind: BuildingId | "" }>({
+    y: 0,
+    top: 0,
+    moved: false,
+    active: false,
+    swallow: false,
+    kind: "",
+  });
+  const onPlaceRef = useRef(onPlace);
+  const onCloseRef = useRef(onClose);
+  const simLive = useRef(sim);
+  onPlaceRef.current = onPlace;
+  onCloseRef.current = onClose;
+  simLive.current = sim;
+
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = savedBuildScroll();
+  }, []);
+
+  useEffect(() => {
+    const root = panel.current;
+    if (!root) return;
+    let owned: { id: number; x: number; y: number; scroll: number } | null = null;
+    const inside = (e: PointerEvent) => {
+      const r = root.getBoundingClientRect();
+      return e.clientX >= r.left && e.clientY >= r.top && e.clientX <= r.right && e.clientY <= r.bottom;
+    };
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0 || !inside(e)) return;
+      const stack = document.elementsFromPoint(e.clientX, e.clientY);
+      const top = stack[0];
+      const coveredByUi =
+        top instanceof Element && !root.contains(top) && !top.closest("canvas");
+      if (coveredByUi) return;
+      const el = scroller.current;
+      owned = {
+        id: e.pointerId,
+        x: e.clientX,
+        y: e.clientY,
+        scroll: el?.scrollTop ?? savedBuildScroll(),
+      };
+      setBuildPanelOwning(true);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!owned || e.pointerId !== owned.id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dx = e.clientX - owned.x;
+      const dy = e.clientY - owned.y;
+      if (!gestureMoved(dx, dy)) return;
+      const el = scroller.current;
+      if (!el) return;
+      el.scrollTop = Math.max(0, owned.scroll - dy);
+      rememberBuildScroll(el.scrollTop);
+    };
+    const finish = (e: PointerEvent) => {
+      if (!owned || e.pointerId !== owned.id) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const dx = e.clientX - owned.x;
+      const dy = e.clientY - owned.y;
+      owned = null;
+      setBuildPanelOwning(false);
+      if (gestureMoved(dx, dy)) {
+        swallowBuildClick();
+        const el = scroller.current;
+        if (el) rememberBuildScroll(el.scrollTop);
+        return;
+      }
+      const stack = document.elementsFromPoint(e.clientX, e.clientY);
+      const node = stack.find((n) => n instanceof Element && root.contains(n));
+      if (!(node instanceof Element)) return;
+      const button = node.closest("button");
+      if (!button || !root.contains(button)) return;
+      if (button.hasAttribute("data-build-close")) {
+        swallowBuildClick();
+        onCloseRef.current();
+        return;
+      }
+      const card = button.getAttribute("data-build") as BuildingId | null;
+      if (card) {
+        if (unmetNeed(simLive.current, team, card)) return;
+        swallowBuildClick();
+        onPlaceRef.current(card);
+        return;
+      }
+      button.click();
+    };
+    const cancel = (e: PointerEvent) => {
+      if (!owned || e.pointerId !== owned.id) return;
+      owned = null;
+      setBuildPanelOwning(false);
+      swallowBuildClick();
+      e.stopPropagation();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", cancel, true);
+    return () => {
+      owned = null;
+      setBuildPanelOwning(false);
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", cancel, true);
+    };
+  }, [team]);
+
   return (
     <aside
+      ref={panel}
       data-testid="build-column"
       className={`pointer-events-auto absolute top-1 right-[104px] z-40 flex w-44 flex-col border border-brass-dim bg-field/94 ${placing ? "bottom-[108px]" : "bottom-1"}`}
       style={{ touchAction: "none" }}
@@ -3234,7 +3511,16 @@ function BuildColumn({
     >
       <div className="flex h-11 shrink-0 items-center justify-between px-1">
         <p className="font-display text-[11px] uppercase tracking-wide text-gold">Build</p>
-        <button type="button" aria-label="Close build list" className="bevel-btn h-11 min-w-11 font-display text-[11px] uppercase" onClick={onClose}>
+        <button
+          type="button"
+          data-build-close=""
+          aria-label="Close build list"
+          className="bevel-btn h-11 min-w-11 font-display text-[11px] uppercase"
+          onClick={() => {
+            if (buildClickSwallowed()) return;
+            onClose();
+          }}
+        >
           Close
         </button>
       </div>
@@ -3242,7 +3528,8 @@ function BuildColumn({
         ref={scroller}
         data-testid="build-scroll"
         className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1"
-        style={{ touchAction: "none", WebkitTouchCallout: "none", minHeight: placing ? undefined : 144 }}
+        style={{ touchAction: "none", minHeight: placing ? undefined : 144 }}
+        onScroll={(e) => rememberBuildScroll(e.currentTarget.scrollTop)}
         onContextMenu={(e) => e.preventDefault()}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
@@ -3279,11 +3566,9 @@ function BuildColumn({
           drag.current.active = false;
         }}
       >
-        {!yard && (
-          <p className="px-1 py-2 text-[11px] text-muted">No Construction Yard.</p>
-        )}
+        {!yard && <p className="px-1 py-2 text-[11px] text-muted">No Construction Yard.</p>}
         <HqCard sim={sim} team={team} />
-        {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
+        {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn, sim.year)).map((id) => {
           const def = BUILDINGS[id];
           const need = unmetNeed(sim, team, id);
           const broke = !need && sim.credits[team] < def.cost;
@@ -3299,12 +3584,7 @@ function BuildColumn({
               data-build={id}
               aria-disabled={need ? true : undefined}
               onClick={() => {
-                if (need) return;
-                if (drag.current.swallow || drag.current.moved) {
-                  drag.current.swallow = false;
-                  drag.current.moved = false;
-                  return;
-                }
+                if (need || buildClickSwallowed()) return;
                 onPlace(id);
               }}
               className={`bevel-btn relative mb-1 flex min-h-11 w-full items-center gap-2 px-2 font-display text-xs uppercase ${need ? "text-brass" : "text-ink"} ${placing === id ? "bg-crystal text-crystal-ink" : ""}`}
@@ -3678,7 +3958,7 @@ function CommandBar({
   return (
     <>
       <HqCard sim={sim} team={team} dock />
-      {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn)).map((id) => {
+      {BUILD_ORDER.filter((id) => buildingOffered(sim.mapId, faction, id, sim.wallsOn, sim.year)).map((id) => {
         const def = BUILDINGS[id];
         const need = unmetNeed(sim, team, id);
         const broke = sim.credits[team] < def.cost;
@@ -4096,6 +4376,8 @@ function BarButton({
   tile = false,
   block = false,
   slim = false,
+  wide = false,
+  tall = false,
 }: {
   children: ReactNode;
   label: string;
@@ -4106,6 +4388,8 @@ function BarButton({
   tile?: boolean;
   block?: boolean;
   slim?: boolean;
+  wide?: boolean;
+  tall?: boolean;
 }) {
   return (
     <button
@@ -4115,7 +4399,11 @@ function BarButton({
       disabled={disabled}
       onClick={onClick}
       className={`bevel-btn flex shrink-0 items-center justify-center font-display uppercase tracking-wide disabled:text-muted ${
-        slim
+        tall
+          ? "h-12 min-h-12 min-w-12 flex-1 gap-1 px-2 text-xs"
+          : wide
+          ? "h-11 min-h-11 w-full gap-1 px-2 text-xs"
+          : slim
           ? "h-9 min-h-0 min-w-11 gap-1 px-2 text-[11px]"
           : block
             ? "h-11 min-h-11 min-w-11 flex-1 gap-1 px-2 text-xs"

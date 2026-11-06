@@ -312,7 +312,7 @@ const HALL_ASPECT: Record<string, number> = {
   radar: 1102 / 668,
   supply: 1.05,
   silo: 981 / 437,
-  dock: 300 / 360,
+  dock: 1008 / 1000,
   helipad: 745 / 1079,
   stealth: 798 / 835,
   wall: 807 / 1010,
@@ -350,7 +350,7 @@ export function unitPickRadius(kind: string, zoom: number): number {
 
 /** Square minimap. Sits fully below the top HUD and host banner, and above the command bar. */
 export function minimapRect(view: View, warzone = false): { x: number; y: number; s: number } {
-  const top = Math.max(4, Math.round(view.chromeTop ?? 0) + 4);
+  const top = Math.max(8, Math.round(view.chromeTop ?? 0) + 8);
   const bottom = Math.max(4, Math.round(view.chromeBottom ?? 0) + 4);
   const landscape = view.w > view.h + 40;
   const availH = Math.max(48, view.h - top - bottom);

@@ -197,7 +197,7 @@ export interface BuildingDef {
   storage: number;
   trains: "infantry" | "vehicle" | "navy" | "air" | null;
   requires?: BuildingId | null;
-  /** Must sit entirely on shore. */
+  /** Dock only. The pad is harbor water with one full side on the coast, not the beach. */
   shore?: boolean;
   /** Omit or "both" for shared structures. */
   only?: "both" | FactionId;
@@ -256,6 +256,7 @@ export const HIGH_RANGE = 1.12;
 /**
  * Sight rules. The sim reads only this block for height, forest, and marksman
  * vision. Lockstep: no randomness, and tile scans stay in fixed order.
+ * Both names are the same numbers: the sight-rules tests and the playtest build.
  */
 export const SIGHT = {
   /** Extra tiles when the viewer is on a higher height level than the target tile. */
@@ -272,6 +273,13 @@ export const SIGHT = {
   marksmanStill: 9.5,
   /** Seconds a marksman must stand before the longer sight. */
   marksmanSettle: 2,
+  HIGH: 1.6,
+  FOREST_IN: 1,
+  FOREST_SPOT: 2,
+  FOREST_REVEAL: 3,
+  MARK_MOVE: 8,
+  MARK_AIM: 9.5,
+  MARK_STILL: 2,
 } as const;
 /** Damage multiplier when the shooter stands above the target. */
 export const HIGH_AIM = 1.1;

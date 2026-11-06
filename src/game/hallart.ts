@@ -4,8 +4,7 @@
  * HALL_SHEET names a file in public/art/iso/<name>.png.
  * Drop that PNG in and it replaces the bake. A missing file keeps the bake.
  * Painted sheets already on disk: the original seven, plus advpower, helipad,
- * aa, radar, silo, stealth, wall, sandbag, and gate. Dock stays baked until
- * public/art/iso/dock.png is added.
+ * aa, radar, silo, stealth, wall, sandbag, gate, and dock.
  */
 
 import type { BuildingId } from "./data.ts";
@@ -140,24 +139,83 @@ function paintHelipad(ctx: CanvasRenderingContext2D, w: number, h: number) {
 
 function paintDock(ctx: CanvasRenderingContext2D, w: number, h: number) {
   shadow(ctx, w, h);
-  ctx.fillStyle = "#1a6e96";
-  ctx.fillRect(w * 0.08, h * 0.62, w * 0.84, h * 0.22);
-  ctx.fillStyle = "#8fd0ea";
-  ctx.fillRect(w * 0.1, h * 0.66, w * 0.5, 3);
-  block(ctx, w * 0.18, h * 0.48, w * 0.64, h * 0.16, "#c4b39a", "#6a5844", "#8a7460");
-  for (let i = 0; i < 5; i++) {
-    ctx.fillStyle = i % 2 ? "#6a5038" : "#3a2c22";
-    ctx.fillRect(w * (0.22 + i * 0.1), h * 0.7, 6, h * 0.16);
-  }
-  block(ctx, w * 0.12, h * 0.28, w * 0.28, h * 0.28, "#d0d4d6", "#4e585e", "#6e787e");
-  ctx.strokeStyle = "#e2b84a";
-  ctx.lineWidth = 5;
+  ctx.fillStyle = "#145e86";
   ctx.beginPath();
-  ctx.moveTo(w * 0.4, h * 0.36);
-  ctx.lineTo(w * 0.72, h * 0.22);
-  ctx.lineTo(w * 0.72, h * 0.48);
+  ctx.ellipse(w * 0.52, h * 0.74, w * 0.4, h * 0.14, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(168, 220, 236, 0.45)";
+  ctx.beginPath();
+  ctx.ellipse(w * 0.46, h * 0.7, w * 0.22, h * 0.04, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  const piles: [number, number][] = [
+    [0.18, 0.66],
+    [0.78, 0.64],
+    [0.3, 0.8],
+    [0.62, 0.8],
+    [0.48, 0.84],
+  ];
+  for (const [px, py] of piles) {
+    ctx.fillStyle = "#2a221c";
+    ctx.fillRect(w * px, h * py, 8, h * 0.12);
+    ctx.fillStyle = "#6a543c";
+    ctx.fillRect(w * px, h * py, 3, h * 0.12);
+  }
+  ctx.fillStyle = "#6a7278";
+  ctx.beginPath();
+  ctx.moveTo(w * 0.16, h * 0.62);
+  ctx.lineTo(w * 0.7, h * 0.5);
+  ctx.lineTo(w * 0.9, h * 0.64);
+  ctx.lineTo(w * 0.36, h * 0.78);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#9aa3a8";
+  ctx.beginPath();
+  ctx.moveTo(w * 0.16, h * 0.62);
+  ctx.lineTo(w * 0.7, h * 0.5);
+  ctx.lineTo(w * 0.7, h * 0.54);
+  ctx.lineTo(w * 0.16, h * 0.66);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "rgba(232, 228, 218, 0.45)";
+  ctx.lineWidth = 2;
+  for (let i = 1; i <= 4; i++) {
+    const t = i / 5;
+    ctx.beginPath();
+    ctx.moveTo(w * (0.16 + t * 0.2), h * (0.62 + t * 0.16));
+    ctx.lineTo(w * (0.7 + t * 0.2), h * (0.5 + t * 0.14));
+    ctx.stroke();
+  }
+  block(ctx, w * 0.28, h * 0.28, w * 0.34, h * 0.32, "#d5d8d4", "#3e4a46", "#5c6a64");
+  ctx.fillStyle = "#2a3130";
+  ctx.fillRect(w * 0.4, h * 0.42, w * 0.14, h * 0.16);
+  ctx.fillStyle = "#9fd6e8";
+  ctx.fillRect(w * 0.32, h * 0.36, w * 0.07, h * 0.07);
+  ctx.fillStyle = "#1a2220";
+  ctx.fillRect(w * 0.33, h * 0.2, w * 0.05, h * 0.08);
+  ctx.fillStyle = "#e23b2f";
+  ctx.beginPath();
+  ctx.arc(w * 0.355, h * 0.2, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#e2b84a";
+  ctx.lineWidth = 6;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(w * 0.5, h * 0.34);
+  ctx.lineTo(w * 0.74, h * 0.18);
   ctx.stroke();
-  teamBand(ctx, w * 0.14, h * 0.42, w * 0.24, 6);
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(w * 0.74, h * 0.18);
+  ctx.lineTo(w * 0.74, h * 0.4);
+  ctx.stroke();
+  ctx.fillStyle = "#c4552a";
+  ctx.fillRect(w * 0.7, h * 0.38, w * 0.08, h * 0.045);
+  ctx.fillStyle = "#f2d48a";
+  ctx.beginPath();
+  ctx.arc(w * 0.22, h * 0.6, 5, 0, Math.PI * 2);
+  ctx.arc(w * 0.84, h * 0.62, 5, 0, Math.PI * 2);
+  ctx.fill();
+  teamBand(ctx, w * 0.3, h * 0.48, w * 0.28, 6);
 }
 
 function paintAa(ctx: CanvasRenderingContext2D, w: number, h: number) {

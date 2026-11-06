@@ -1,6 +1,7 @@
 import { spawnTrail, spawnTracer, spawnSparks, spawnDirt, spawnWreck, spawnFall, spawnRuin } from "./combat-fx.ts";
 import { hallPictureLift, viewPitch } from "./view.ts";
-import { allows, blocksSight, boatBeaches, isShell, isTree, isWater } from "./tileset.ts";
+import { allows, blocksSight, boatBeaches, dockOnWaterline, isShell, isTree, isWater } from "./tileset.ts";
+import { buildingInYear, clampYear, startingArmy, unitInYear } from "./eras.ts";
 import { barkClass, type Cue, type SfxName } from "./audio.ts";
 import { Rng } from "./rng.ts";
 import {
@@ -28,7 +29,6 @@ import {
   SUPPLY_DRIP,
   SILO_DRIP,
   supplyShare,
-  SURVIVE_SECONDS,
   TILE_FORD,
   TILE_HIGH,
   TILE_RAMP,
@@ -116,8 +116,8 @@ export function firstPushAt(diff: AiDifficulty): number {
 }
 /** Tiles around a start the other side cannot enter during deployment. */
 const START_BUBBLE = 8;
-/** Hard matches end here if both yards are still standing. Score picks the winner. */
-const HARD_CAP_SECS = 1200;
+/** Clock used when a match does not name one. Sixty minutes. 0 would be unlimited. */
+const MATCH_LIMIT_DEFAULT = 60 * 60;
 
 export type Order =
   | { t: "idle" }
@@ -391,6 +391,8 @@ export interface SimSave {
   nextId: number;
   aiNext: number;
   hadYard: boolean[];
+  /** -1 when the rebuild clock is off. Omitted on older saves. */
+  rebuildLeft?: number[];
   crystal: number[];
   fog0: string;
   fog1: string;
@@ -399,6 +401,10 @@ export interface SimSave {
   commandLv?: number[];
   caches?: { x: number; y: number; kind: "cash" | "squad" | "haul" | "mend" }[];
   haulLanded?: boolean;
+  /** 0 is unlimited. Missing saves keep the 60 minute clock. */
+  limitSecs?: number;
+  /** Era year. Missing saves keep the latest era. */
+  year?: number;
   units: {
     id: number;
     kind: UnitId;
@@ -488,6 +494,10 @@ export interface NewGame {
   slots?: { x: number; y: number }[];
   /** You, enemy, then the two extra bots. */
   seatFactions?: FactionId[];
+  /** Seconds until the clock calls the match. 0 is unlimited. Omitted means 60 minutes. */
+  limit?: number;
+  /** Era year. Omitted means the latest era, so the full roster stays. */
+  year?: number;
 }
 export function footprintOrigin(kind: BuildingId, wx: number, wy: number): { tx: number; ty: number } {
   const d = BUILDINGS[kind];
@@ -505,11 +515,13 @@ export function shortPlaceReason(reason: string): string {
   const r = reason.toLowerCase();
   if (r.includes("tree") || r.includes("forest") || r.includes("scrub")) return "Blocked by trees";
   if (r.includes("unit")) return "On unit";
+  if (r.includes("waterline")) return "Waterline";
   if (r.includes("credit") || r.includes("fund")) return "Insufficient funds";
   if (r.includes("power")) return "No power";
   if (r.includes("crystal")) return "On ore";
   if (r.includes("too far")) return "Too far";
   if (r.startsWith("needs ")) return reason;
+  if (r.includes("era")) return "Later era";
   return "Blocked";
 }
 
@@ -521,9 +533,11 @@ export function ghostPlaceReason(reason: string): string {
   if (r.includes("crystal")) return "On crystal";
   if (r.includes("overlap") || r.includes("unit")) return "Overlapping";
   if (r.includes("too far")) return "Out of build radius";
-  if (r.includes("water")) return "That's water";
+  if (r.includes("waterline")) return "Waterline";
+  if (r.includes("era")) return "Later era";
+  if (r.includes("water")) return "Water";
   if (r.includes("tree") || r.includes("forest") || r.includes("scrub")) return "Blocked by trees";
-  if (r.includes("rock")) return "Blocked by rock";
+  if (r.includes("rock")) return "Rocks";
   if (r.includes("shore")) return "Shore only";
   if (r.includes("credit") || r.includes("fund")) return "Insufficient funds";
   if (r.includes("power")) return "No power";
@@ -610,7 +624,10 @@ export class Sim {
   theater: Theater = "desert";
   readonly gw: number;
   readonly gh: number;
-  readonly surviveFor = SURVIVE_SECONDS;
+  /** Seconds until the clock calls the match. 0 means no clock. */
+  readonly limitSecs: number;
+  /** Tech ceiling. Pieces from a later era stay off the bar and out of the queue. */
+  readonly year: number;
   readonly starts: {
     player: { x: number; y: number };
     enemy: { x: number; y: number };
@@ -658,6 +675,12 @@ export class Sim {
   outcome: "playing" | "win" | "lose" = "playing";
   reason = "";
   hadYard: boolean[] = [false, false, false, false];
+  /** This seat has fielded a unit or a building. An empty seat is not a loss. */
+  private seen: boolean[] = [false, false, false, false];
+  /** Seconds left to deploy a yard. -1 while the countdown is not running. */
+  rebuildLeft: number[] = [-1, -1, -1, -1];
+  /** The player's rebuild clock reached 0. The defeat line uses this. */
+  private clockLoss = false;
   /** True after "Last building!" so a rebuild can warn again. */
   private lastOne = [false, false, false, false];
   /** True once this side has owned two real buildings. The opening yard is not the last one. */
@@ -754,6 +777,8 @@ export class Sim {
         ];
     this.navy = custom ? deep : !navyHidden(opts.mapId);
     this.mode = opts.mode;
+    this.limitSecs = opts.limit == null ? MATCH_LIMIT_DEFAULT : opts.limit <= 0 ? 0 : Math.round(opts.limit);
+    this.year = clampYear(opts.year);
     this.ai = opts.ai ?? "builder";
     this.difficulty = normalizeDifficulty(opts.difficulty);
     const skillAt = (n: number) => normalizeDifficulty(opts.skills?.[n] ?? opts.difficulty);
@@ -839,7 +864,10 @@ export class Sim {
       linkStarts(this.terrain, gw, gh, slots);
       for (let t = 0; t <= this.opponents; t++) {
         const at = slots[t] ?? slots[0]!;
-        this.spawnUnit(t as Team, "mcv", at.x, at.y);
+        const army = startingArmy(this.year);
+        for (let i = 0; i < army.length; i++) {
+          this.spawnUnit(t as Team, army[i]!, at.x + i * 0.75, at.y);
+        }
       }
       const spans = custom ? custom.spans : (map?.spans ?? []);
       for (const span of spans) this.addBuilding(0, "span", span.tx, span.ty, true, true);
@@ -926,8 +954,37 @@ export class Sim {
       h = Math.imul(h ^ this.statLost[t]!, 16777619);
       h = Math.imul(h ^ this.statRazed[t]!, 16777619);
       h = Math.imul(h ^ this.statPlants[t]!, 16777619);
+      h = Math.imul(h ^ (this.eliminated[t] ? 1 : 0), 16777619);
+      h = Math.imul(h ^ Math.round(Math.max(0, this.rebuildLeft[t] ?? -1) * 10), 16777619);
     }
     return h >>> 0;
+  }
+
+  /** Seconds left on "Rebuild or be defeated". Null when that side is not on the clock. */
+  rebuildClock(team: Team): number | null {
+    const v = this.rebuildLeft[team] ?? -1;
+    return v >= 0 ? v : null;
+  }
+
+  /** An MCV that can still deploy, after this side has lost its yard. */
+  deployableMcv(team: Team): { id: number; x: number; y: number } | null {
+    if (!this.hadYard[team] || this.yardStanding(team) || this.eliminated[team]) return null;
+    const u = this.units.find((unit) => unit.team === team && unit.kind === "mcv" && unit.hp > 0 && !unit.aboard);
+    return u ? { id: u.id, x: u.x, y: u.y } : null;
+  }
+
+  /**
+   * Ghost cell. A tap outside the build radius becomes the nearest legal pad.
+   * Water, rock, and trees stay where they were tapped so the ghost can say why.
+   */
+  offerCell(team: Team, kind: BuildingId, tx: number, ty: number): { tx: number; ty: number } {
+    const check = this.canPlace(team, kind, tx, ty);
+    if (check.ok) return { tx, ty };
+    const r = check.reason.toLowerCase();
+    if (r.includes("too far") || r.includes("off the map")) {
+      return this.nearestBuildPad(team, kind) ?? { tx, ty };
+    }
+    return { tx, ty };
   }
 
   factionOf(team: Team): FactionId {
@@ -1122,12 +1179,11 @@ export class Sim {
   visibleUnit(viewer: Team, u: Unit): boolean {
     if (u.hp <= 0 || u.aboard) return false;
     if (this.allied(u.team, viewer)) return true;
-    const forest = this.inForest(u);
-    const close = forest && this.coverBroken(viewer, u);
-    if (forest && u.reveal <= 0 && !close && !this.sensorNear(viewer, u)) return false;
-    // Aircraft stay invisible until they enter current vision. Radar is minimap-only.
-    // A ground unit within SIGHT.forestSpot sees a forest unit even past the tree line.
-    if (!this.tileVisible(viewer, u.x | 0, u.y | 0) && !close) return false;
+    if (this.inForest(u)) {
+      if (this.forestSpotted(viewer, u)) return true;
+      if (u.reveal <= 0) return false;
+    }
+    if (!this.tileVisible(viewer, u.x | 0, u.y | 0)) return false;
     if (u.stealth && u.reveal <= 0 && !this.detected(viewer, u)) return false;
     return true;
   }
@@ -1244,6 +1300,7 @@ export class Sim {
 
   canPlace(team: Team, kind: BuildingId, tx: number, ty: number): PlaceResult {
     if (!this.hasYard(team)) return { ok: false, reason: "Needs a yard" };
+    if (!buildingInYear(kind, this.year)) return { ok: false, reason: "Later era" };
     if (isFence(kind)) {
       const step = this.previewFence(team, kind, [{ tx, ty }])[0];
       if (!step || !step.ok) return { ok: false, reason: step?.reason || "Blocked" };
@@ -1256,15 +1313,20 @@ export class Sim {
     for (let y = ty; y < ty + def.h; y++) {
       for (let x = tx; x < tx + def.w; x++) {
         const i = y * this.gw + x;
-        if (this.terrain[i] === TILE_ROCK || this.terrain[i] === TILE_CLIFF) return { ok: false, reason: "Blocked by rock" };
-        if (this.terrain[i] === TILE_DEEP || this.terrain[i] === TILE_SHALLOW || this.terrain[i] === TILE_WRECK) {
-          return { ok: false, reason: "That's water" };
-        }
-        if (this.terrain[i] === TILE_SCRUB) return { ok: false, reason: "Blocked by trees" };
-        if (isShell(this.terrain[i] ?? 0) && (this.craters[i] ?? 0) < 2) return { ok: false, reason: "Blocked" };
-        if (def.shore && this.terrain[i] !== TILE_SHORE) return { ok: false, reason: "Shore only" };
-        if (!def.shore && this.terrain[i] === TILE_SHORE && kind !== "wall") {
-          /* shore is legal for a land pad that isn't a dock */
+        const tile = this.terrain[i] ?? 0;
+        if (kind === "dock") {
+          if (tile !== TILE_SHALLOW && tile !== TILE_DEEP) return { ok: false, reason: "Waterline only" };
+        } else {
+          if (tile === TILE_ROCK || tile === TILE_CLIFF) return { ok: false, reason: "Blocked by rock" };
+          if (tile === TILE_DEEP || tile === TILE_SHALLOW || tile === TILE_WRECK) {
+            return { ok: false, reason: "That's water" };
+          }
+          if (tile === TILE_SCRUB) return { ok: false, reason: "Blocked by trees" };
+          if (isShell(tile) && (this.craters[i] ?? 0) < 2) return { ok: false, reason: "Blocked" };
+          if (def.shore && tile !== TILE_SHORE) return { ok: false, reason: "Shore only" };
+          if (!def.shore && tile === TILE_SHORE && kind !== "wall") {
+            /* shore is legal for a land pad that isn't a dock */
+          }
         }
         if (this.crystal[i] > 0) return { ok: false, reason: "Can't build on crystal" };
         if (this.occ[i] !== 0) return { ok: false, reason: "Overlapping" };
@@ -1272,7 +1334,12 @@ export class Sim {
       }
     }
     if (kind === "span") return { ok: false, reason: "Bridges are already placed" };
-    if (kind === "dock" && !this.navy) return { ok: false, reason: "No harbor on this map" };
+    if (kind === "dock") {
+      if (!this.navy) return { ok: false, reason: "No harbor on this map" };
+      if (!dockOnWaterline(this.terrain, this.gw, this.gh, tx, ty, def.w, def.h)) {
+        return { ok: false, reason: "Waterline only" };
+      }
+    }
     if (!canBuild(kind, this.factionOf(team))) return { ok: false, reason: "Other faction" };
     if (this.structureCount(team) >= BUILDING_CAP) return { ok: false, reason: "Base full" };
     if (def.requires && !this.buildings.some((b) => b.team === team && b.kind === def.requires && b.complete && b.hp > 0)) {
@@ -1384,6 +1451,10 @@ export class Sim {
     if (!b || b.hp <= 0 || !b.complete) return { ok: false, reason: "Not ready" };
     const faction = this.factionOf(b.team);
     if (!canTrain(unitId, faction)) return { ok: false, reason: "Unavailable" };
+    if (!unitInYear(unitId, this.year)) {
+      if (b.team === this.ear || b.team === 0) this.say("Later era", "tech", 0.8);
+      return { ok: false, reason: "Later era" };
+    }
     const spec = resolveUnit(unitId, faction);
     if (!this.navy && (spec.loco === "sea" || spec.trainedAt === "dock")) {
       return { ok: false, reason: "No navy on this map" };
@@ -1950,6 +2021,7 @@ export class Sim {
       u.py = y;
     }
     this.units.push(u);
+    this.seen[team] = true;
     return u;
   }
 
@@ -2038,6 +2110,7 @@ export class Sim {
       this.aiAcc = 0;
       this.runAi();
     }
+    this.tickRebuild(dt);
     this.checkEnd();
     this.syncBeds();
   }
@@ -2064,6 +2137,8 @@ export class Sim {
       crates: this.cratesOn,
       caches: this.crates.map((c) => ({ x: c.x, y: c.y, kind: c.kind })),
       haulLanded: this.haulLanded,
+      limitSecs: this.limitSecs,
+      year: this.year,
       commandLv: this.commandLv.slice(0, 4),
       mapSize: this.mapSize,
       opponents: this.opponents,
@@ -2079,6 +2154,7 @@ export class Sim {
       nextId: this.nextId,
       aiNext: this.aiNext,
       hadYard: this.hadYard.slice(0, 4),
+      rebuildLeft: this.rebuildLeft.slice(0, 4),
       score: {
         kills: this.statKills.slice(0, 4),
         lost: this.statLost.slice(0, 4),
@@ -2168,6 +2244,8 @@ export class Sim {
       skills: Array.isArray(data.skills) ? data.skills : undefined,
       rng: () => 0,
       slots: savedSlots.length ? savedSlots : undefined,
+      limit: typeof data.limitSecs === "number" ? data.limitSecs : MATCH_LIMIT_DEFAULT,
+      year: data.year,
     });
     const pristine = sim.crystal.slice();
     const amounts = new Map<number, number>();
@@ -2212,7 +2290,17 @@ export class Sim {
     sim.aiNext = data.aiNext ?? 70;
     sim.aiAt = [0, sim.aiNext, sim.aiNext + 8, sim.aiNext + 16];
     sim.hadYard = [false, false, false, false];
-    for (let t = 0; t < 4; t++) sim.hadYard[t] = !!data.hadYard?.[t];
+    sim.rebuildLeft = [-1, -1, -1, -1];
+    for (let t = 0; t < 4; t++) {
+      sim.hadYard[t] = !!data.hadYard?.[t];
+      if (sim.hadYard[t]) sim.seen[t] = true;
+    }
+    if (data.rebuildLeft) {
+      for (let t = 0; t < 4; t++) {
+        const v = data.rebuildLeft[t];
+        sim.rebuildLeft[t] = typeof v === "number" && v >= 0 ? v : -1;
+      }
+    }
     for (let t = 0; t < 4; t++) sim.eliminated[t] = !!data.eliminated?.[t];
     const score = data.score;
     if (score) {
@@ -2262,7 +2350,7 @@ export class Sim {
       u.harvestTy = src.harvestTy ?? -1;
       u.deploy = src.deploy || 0;
       u.reveal = src.reveal || 0;
-      if (typeof src.still === "number" && src.still > 0) u.still = src.still;
+      u.still = src.still || 0;
       if (u.kind === "marksman") sim.applyMarksmanSight(u);
       if (typeof src.ammo === "number") u.ammo = src.ammo;
       if (typeof src.rearm === "number") u.rearm = src.rearm;
@@ -4142,9 +4230,9 @@ export class Sim {
     return isTree(this.terrain[ty * this.gw + tx] ?? 0);
   }
 
-  /** Any ground unit standing on a tree tile. Air and boats are never inside. */
+  /** Any ground unit standing on a tree tile. Air, boats, and cargo are never inside. */
   private inForest(u: Unit): boolean {
-    if (u.loco === "air" || u.loco === "sea") return false;
+    if (u.loco === "air" || u.loco === "sea" || u.aboard) return false;
     return this.forestAt(u.x, u.y);
   }
 
@@ -4154,11 +4242,15 @@ export class Sim {
   }
 
   /** A ground unit of the viewer within SIGHT.forestSpot. Air does not spot the woods. */
-  private coverBroken(viewer: Team, u: Unit): boolean {
+  private forestSpotted(viewer: Team, u: Unit): boolean {
+    const r2 = SIGHT.forestSpot * SIGHT.forestSpot;
     for (const o of this.units) {
-      if (o.id === u.id || !this.allied(o.team, viewer) || o.hp <= 0 || o.aboard) continue;
+      if (o.hp <= 0 || o.aboard || o.id === u.id) continue;
       if (o.loco === "air" || o.loco === "sea") continue;
-      if (Math.hypot(o.x - u.x, o.y - u.y) <= SIGHT.forestSpot) return true;
+      if (!this.allied(o.team, viewer) || this.allied(o.team, u.team)) continue;
+      const dx = o.x - u.x;
+      const dy = o.y - u.y;
+      if (dx * dx + dy * dy <= r2) return true;
     }
     return false;
   }
@@ -4221,6 +4313,30 @@ export class Sim {
     }
   }
 
+  /**
+   * Yard gone and no MCV: a 60s rebuild clock. An MCV freezes it.
+   * Deploying that MCV (a yard standing again) clears it. At 0 with no yard, the side loses.
+   */
+  private tickRebuild(dt: number) {
+    for (let t = 0; t <= this.opponents; t++) {
+      const team = t as Team;
+      if (this.eliminated[team]) continue;
+      if (this.yardStanding(team)) {
+        this.hadYard[team] = true;
+        this.rebuildLeft[team] = -1;
+        continue;
+      }
+      if (!this.hadYard[team]) continue;
+      const mcv = this.units.some((u) => u.team === team && u.kind === "mcv" && u.hp > 0 && !u.aboard);
+      if ((this.rebuildLeft[team] ?? -1) < 0) this.rebuildLeft[team] = 60;
+      if (mcv) continue;
+      this.rebuildLeft[team] = Math.max(0, (this.rebuildLeft[team] ?? 60) - dt);
+      if ((this.rebuildLeft[team] ?? 0) > 0) continue;
+      this.eliminate(team);
+      if ((this.alliance[team] ?? team) === (this.alliance[0] ?? 0)) this.clockLoss = true;
+    }
+  }
+
   private checkEnd() {
     if (this.outcome !== "playing") return;
     this.noteLastBuilding();
@@ -4238,17 +4354,19 @@ export class Sim {
       const won = side === mine && sides.size === 1;
       this.finish(
         won ? "win" : "lose",
-        won ? "Enemy forces destroyed" : "No buildings or units remain",
+        won ? "Enemy forces destroyed" : this.clockLoss ? "Rebuild or be defeated" : "No buildings or units remain",
       );
       return;
     }
-    if (this.mode === "survive" && this.time >= this.surviveFor) {
-      const mine = this.alliance[0] ?? 0;
-      const up = [...sides].some((side) => side === mine);
-      this.finish(up ? "win" : "lose", up ? "Held the field" : "No buildings or units remain");
-      return;
-    }
-    if (this.mode === "destroy" && (this.difficulty === "hard" || this.difficulty === "normal") && this.time >= HARD_CAP_SECS) {
+    if (this.limitSecs > 0 && this.time >= this.limitSecs) {
+      const mins = Math.max(1, Math.round(this.limitSecs / 60));
+      const span = mins === 1 ? "1 minute" : `${mins} minutes`;
+      if (this.mode === "survive") {
+        const mine = this.alliance[0] ?? 0;
+        const up = [...sides].some((side) => side === mine);
+        this.finish(up ? "win" : "lose", up ? `Held for ${span}` : "No buildings or units remain");
+        return;
+      }
       const mineSide = this.alliance[0] ?? 0;
       const mine = this.matchScore(mineSide);
       let bestOther = -1;
@@ -4263,7 +4381,7 @@ export class Sim {
       const won = mine >= bestOther;
       this.finish(
         won ? "win" : "lose",
-        won ? "Twenty minutes. Your side leads on score" : "Twenty minutes. The enemy leads on score",
+        won ? `${span}. Your side leads on score` : `${span}. The enemy leads on score`,
       );
       return;
     }
@@ -4279,6 +4397,13 @@ export class Sim {
   private hasYard(team: Team): boolean {
     return this.buildings.some(
       (b) => b.team === team && b.kind === "yard" && b.complete && b.hp > 0 && b.rubble <= 0 && b.collapse <= 0,
+    );
+  }
+
+  /** A yard that is up or still building. The rebuild clock waits until this is gone. */
+  private yardStanding(team: Team): boolean {
+    return this.buildings.some(
+      (b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0 && b.collapse <= 0,
     );
   }
 
@@ -4311,11 +4436,20 @@ export class Sim {
     }
   }
 
-  /** Eliminated only when nothing real is left: no buildings and no live units. */
+  /**
+   * Nothing left on the field. Cargo inside a transport and a half-built hall do not count.
+   * A yard that is gone with stragglers still up uses the rebuild clock instead.
+   */
   private campDown(team: Team): boolean {
     if (this.eliminated[team]) return true;
-    if (this.realBuildings(team) > 0) return false;
-    if (this.units.some((u) => u.team === team && u.hp > 0)) return false;
+    if (!this.seen[team]) return false;
+    for (const b of this.buildings) {
+      if (b.team !== team || b.neutral) continue;
+      if (b.hp <= 0 || b.rubble > 0 || b.collapse > 0 || !b.complete) continue;
+      if (isFence(b.kind) || b.kind === "span") continue;
+      return false;
+    }
+    if (this.units.some((u) => u.team === team && u.hp > 0 && !u.aboard)) return false;
     return true;
   }
 
@@ -4426,7 +4560,8 @@ export class Sim {
       const tile = this.terrain[idx] ?? 0;
       const tileElev = this.elevOf(x, y);
       if (tile === TILE_HIGH && viewerElev < tileElev) return false;
-      if (blocksSight(tile) && viewerElev < 2) return false;
+      // A mesa looks over cliffs and forests on the slope below it.
+      if (blocksSight(tile) && viewerElev <= tileElev) return false;
       if (outside && isTree(tile) && viewerElev <= tileElev) {
         depth++;
         if (depth >= SIGHT.forestEdge) return false;
@@ -4466,11 +4601,18 @@ export class Sim {
     }
   }
 
+  /** The bot can see a last straggler that fog would otherwise hide. */
+  spotStraggler(team: Team, x: number, y: number) {
+    this.reveal(team, x, y, 4, true);
+  }
+
   /** Marksman sight grows after standing and drops on the tick movement happens. */
   private settleSight(dt: number) {
     for (const u of this.units) {
       if (u.hp <= 0 || u.kind !== "marksman") continue;
-      if (u.x !== u.px || u.y !== u.py) u.still = 0;
+      // Separation nudges a standing unit by a hair. A real step is much larger.
+      const moved = Math.abs(u.x - u.px) > 0.08 || Math.abs(u.y - u.py) > 0.08;
+      if (moved) u.still = 0;
       else u.still = Math.round((u.still + dt) * 1000) / 1000;
       this.applyMarksmanSight(u);
     }
@@ -4554,6 +4696,7 @@ export class Sim {
   }
 
   private addBuilding(team: Team, kind: BuildingId, tx: number, ty: number, complete: boolean, neutral = false): Building {
+    if (!neutral) this.seen[team] = true;
     const def = resolveBuilding(kind, this.factionOf(team));
     const b: Building = {
       id: this.nextId++,
@@ -4637,13 +4780,26 @@ export class Sim {
 
   doorOf(b: Building): { x: number; y: number } {
     if (b.kind === "dock") {
+      let best: { x: number; y: number } | null = null;
+      let bestD = Infinity;
+      const midX = b.tx + b.w / 2;
+      const midY = b.ty + b.h / 2;
       for (let y = b.ty - 1; y <= b.ty + b.h; y++) {
         for (let x = b.tx - 1; x <= b.tx + b.w; x++) {
+          if (x >= b.tx && x < b.tx + b.w && y >= b.ty && y < b.ty + b.h) continue;
           if (x < 0 || y < 0 || x >= this.gw || y >= this.gh) continue;
           const t = this.terrain[y * this.gw + x];
-          if (t === TILE_DEEP || t === TILE_SHALLOW) return { x: x + 0.5, y: y + 0.5 };
+          if (t !== TILE_DEEP && t !== TILE_SHALLOW) continue;
+          const px = x + 0.5;
+          const py = y + 0.5;
+          const d = (px - midX) ** 2 + (py - midY) ** 2;
+          if (d < bestD) {
+            bestD = d;
+            best = { x: px, y: py };
+          }
         }
       }
+      if (best) return best;
     }
     const south = b.team !== 0;
     const prefer = south
@@ -5135,7 +5291,7 @@ export class Sim {
     return best;
   }
 
-  /** Powered Radar Mast or Scout Buggy. Woods and cloaks share this check. */
+  /** Powered Radar Mast or Scout Buggy. Cloak uses this. Trees do not. */
   private sensorNear(viewer: Team, unit: Unit): boolean {
     if (!this.powerOf(viewer).low) {
       for (const b of this.buildings) {

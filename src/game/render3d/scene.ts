@@ -577,8 +577,10 @@ export class Scene3D {
       const ok = sim.canPlace(ui.viewer as Team, ui.placing, ui.hover.tx, ui.hover.ty).ok;
       this.ghost.visible = true;
       this.ghost.scale.set(def.w, 1, def.h);
-      const h = sampleHeight(sim.terrain, sim.gw, sim.gh, spot.tx, spot.ty);
-      this.ghost.position.set(spot.tx + def.w / 2, h + 0.2, spot.ty + def.h / 2);
+      const cx = spot.tx + def.w / 2;
+      const cz = spot.ty + def.h / 2;
+      const h = sampleHeight(sim.terrain, sim.gw, sim.gh, cx, cz);
+      this.ghost.position.set(cx, h + 0.11, cz);
       mat.color.set(ok ? 0x3dcc6e : 0xd25a48);
     } else this.ghost.visible = false;
     const run = ui.wallRun ?? [];

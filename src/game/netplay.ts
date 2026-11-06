@@ -663,6 +663,9 @@ export class NetPlay {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private dropAt = 0;
   private dropQueued = false;
+  private hiddenAt = 0;
+  /** Ticks to apply in one frame after a short hide, without drawing each one. */
+  private catchBudget = 0;
   private sock: NetSocket;
   private gen = 0;
   private acc = 0;
@@ -762,6 +765,11 @@ export class NetPlay {
     this.send({ op: "rematch" });
   }
 
+  /** Drop the saved room so a finished match cannot rejoin itself. */
+  forgetRoom() {
+    this.forgetSeat();
+  }
+
   leave() {
     this.closed = true;
     this.stopRetry = true;
@@ -803,31 +811,55 @@ export class NetPlay {
    * Tab hide does not pause the room. The match keeps ticking for everyone else.
    * Coming back asks for a snapshot so this phone does not sit on an old Deploy.
    */
-  setHidden(hidden: boolean) {
+  setHidden(hidden: boolean, at = Date.now()) {
     if (!this.sim || !this.released) return;
-    this.holding = true;
     if (hidden) {
+      this.holding = true;
+      this.hiddenAt = at;
       this.catching = false;
       this.expectSnap = false;
+      this.catchBudget = 0;
       this.send({ op: "presence", hidden: true });
       return;
     }
-    this.catching = true;
-    this.expectSnap = true;
+    const gap = this.hiddenAt ? at - this.hiddenAt : 0;
+    this.hiddenAt = 0;
     this.misses = 0;
     this.send({ op: "presence", hidden: false });
-    this.send({ op: "resync" });
+    if (gap > 10_000) {
+      this.holding = true;
+      this.catching = true;
+      this.expectSnap = true;
+      this.catchBudget = 0;
+      this.send({ op: "resync" });
+      return;
+    }
+    this.holding = false;
+    this.catching = true;
+    this.expectSnap = false;
+    this.catchBudget = 0;
+    // Ends arrive `delay` ticks ahead of the live clock. Catch up to that clock, not past it.
+    let ceiling = this.simTick;
+    for (const tick of this.inbox.keys()) ceiling = Math.max(ceiling, tick);
+    const target = Math.max(this.simTick, ceiling - this.delay + 1);
+    let guard = 0;
+    while (this.simTick < target && guard < 400 && this.step()) guard++;
+    this.catching = false;
+    this.send({ op: "live", tick: this.simTick });
   }
 
   /** Drive the 10 Hz sim. Returns how many ticks actually ran. */
   pump(dt: number): number {
     if (!this.sim || this.sim.outcome !== "playing") return 0;
-    this.acc = Math.min(0.3, this.acc + dt);
+    const burst = this.catchBudget > 0;
+    this.acc = Math.min(burst ? 8 : 0.3, this.acc + dt);
     let steps = 0;
-    while (this.acc >= 0.1 && steps < 4) {
+    const cap = burst ? 80 : 4;
+    while (this.acc >= 0.1 && steps < cap) {
       if (!this.step()) break;
       this.acc -= 0.1;
       steps++;
+      if (this.catchBudget > 0) this.catchBudget -= 1;
     }
     return steps;
   }
@@ -1009,7 +1041,7 @@ export class NetPlay {
     if (!this.code || !this.token) return;
     const pack = JSON.stringify({ code: this.code, token: this.token, name: this.playerName });
     try {
-      sessionStorage.setItem("viridite-room", pack);
+      sessionStorage.setItem("viridite-seat", pack);
       localStorage.setItem("viridite-room", pack);
     } catch {
       /* private mode */
@@ -1018,6 +1050,7 @@ export class NetPlay {
 
   private forgetSeat() {
     try {
+      sessionStorage.removeItem("viridite-seat");
       sessionStorage.removeItem("viridite-room");
       localStorage.removeItem("viridite-room");
     } catch {
@@ -1067,6 +1100,7 @@ export class NetPlay {
     if (msg.op === "bye") {
       this.stopRetry = true;
       this.reconnecting = false;
+      this.forgetSeat();
       this.onBye();
       return;
     }
@@ -1138,14 +1172,15 @@ export class NetPlay {
       return;
     }
     if (msg.op === "snapshot") {
+      const want = this.expectSnap || this.holding || this.catching || !this.sim;
       if (msg.resync) {
-        if (this.seat === 0 && this.sim) return;
+        if (!want) return;
         this.expectSnap = false;
         this.desynced = false;
         this.restore(msg.snap);
         return;
       }
-      if (this.sim && !this.expectSnap) return;
+      if (this.sim && !want) return;
       this.expectSnap = false;
       this.restore(msg.snap);
     }
@@ -1219,6 +1254,8 @@ export class NetPlay {
       start: "sw",
       walls: go.rules.walls,
       shared: go.shared,
+      limit: go.rules.limit == null ? 60 * 60 : go.rules.limit <= 0 ? 0 : go.rules.limit * 60,
+      year: go.rules.year,
       seed: go.seed,
       cpu: go.cpu,
       custom: doc ? pack(doc) : undefined,

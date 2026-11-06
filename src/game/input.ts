@@ -32,6 +32,12 @@
 import { MAP_H, MAP_W } from "./data.ts";
 import { clampCamera, minimapHit, seekZoom, viewPitch, type Camera, type View } from "./view.ts";
 
+/** Screen pixels to world units. One screen pixel moves the ground by one screen pixel. */
+export function panDelta(zoom: number, dx: number, dy: number, pitch = viewPitch()): { dxw: number; dyw: number } {
+  const z = Math.max(0.01, zoom);
+  return { dxw: dx / z, dyw: dy / (z * pitch) };
+}
+
 export interface PointerDraft {
   box: { x0: number; y0: number; x1: number; y1: number } | null;
   hoverX: number;
@@ -91,6 +97,8 @@ export interface InputHooks {
    * Absent on the 2D battlefield, which keeps dx/zoom.
    */
   projectGround?: (sx: number, sy: number) => { x: number; y: number } | null;
+  /** True while a BUILD-list finger is down. That pointer must not pan or tap the field. */
+  uiOwnsPointer?: () => boolean;
 }
 
 interface Pt {
@@ -111,6 +119,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   let prevMidX = 0;
   let prevMidY = 0;
   let touchPinch = false;
+  let touchPan: { x: number; y: number; sx: number; sy: number } | null = null;
   let suppressUntil = 0;
   let tapTimer: ReturnType<typeof setTimeout> | null = null;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
@@ -166,7 +175,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       const b = project(x1, y1);
       if (a && b) return { dxw: b.x - a.x, dyw: b.y - a.y };
     }
-    return { dxw: dx / cam.zoom, dyw: dy / (cam.zoom * viewPitch()) };
+    const step = panDelta(cam.zoom, dx, dy);
+    return { dxw: step.dxw, dyw: step.dyw };
   };
 
   const applyPan = (x0: number, y0: number, x1: number, y1: number, dx: number, dy: number) => {
@@ -216,6 +226,7 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onDown = (e: PointerEvent) => {
+    if (hooks.uiOwnsPointer?.()) return;
     if (e.pointerType === "mouse" && e.button === 2) e.preventDefault();
     const p = local(e);
     if (hooks.overUi?.(p.x, p.y)) return;
@@ -303,6 +314,16 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onMove = (e: PointerEvent) => {
+    if (hooks.uiOwnsPointer?.()) {
+      if (mode === "pan" || mode === "pending" || mode === "box") {
+        mode = "none";
+        fromPending = false;
+        hooks.draft.box = null;
+        hooks.camera.vx = 0;
+        hooks.camera.vy = 0;
+      }
+      return;
+    }
     const p = local(e);
     hooks.draft.hoverX = p.x;
     hooks.draft.hoverY = p.y;
@@ -361,7 +382,9 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
         if (touchPan) {
           mode = "pan";
           fromPending = true;
-          applyPan(cur.px, cur.py, p.x, p.y, p.x - cur.px, p.y - cur.py);
+          // The first pixels are the tap slop. Once the drag is real, catch the
+          // ground up so the whole finger travel is 1:1, not just the tail.
+          applyPan(cur.sx, cur.sy, p.x, p.y, p.x - cur.sx, p.y - cur.sy);
         } else if (!strike) {
           mode = "box";
           hooks.draft.box = { x0: cur.sx, y0: cur.sy, x1: p.x, y1: p.y };
@@ -399,6 +422,10 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       return;
     }
     if (mode === "pan" || mode === "minimap") {
+      if (pts.size === 0) {
+        hooks.camera.vx = 0;
+        hooks.camera.vy = 0;
+      }
       const slide = Math.hypot(p.x - cur.sx, p.y - cur.sy);
       const tapLimit = hooks.suppressBox?.() ? 48 : e.pointerType !== "mouse" ? 28 : 10;
       if (mode === "pan" && fromPending && gestureCam && e.button === 0 && slide < tapLimit) {
@@ -434,7 +461,8 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     if (mode === "place") {
       mode = "none";
       hooks.draft.pressed = false;
-      // Leave lift and the cell so the ghost stays where it was drawn.
+      hooks.draft.lift = false;
+      // The cell stays. The ghost sits on that tile once the finger is up.
       if (performance.now() < suppressUntil) return;
       if (e.pointerType !== "mouse") return;
       fireTap(p.x, p.y, false, e.shiftKey);
@@ -501,6 +529,10 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
   };
 
   const onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length === 1 && pts.size === 0) {
+      const p = touchPoint(e.touches[0]!);
+      touchPan = { x: p.x, y: p.y, sx: p.x, sy: p.y };
+    }
     if (e.touches.length < 2) return;
     e.preventDefault();
     if (pts.size >= 2) return;
@@ -510,8 +542,18 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
     beginPinch(Math.hypot(a.x - b.x, a.y - b.y) || 1, (a.x + b.x) / 2, (a.y + b.y) / 2);
   };
   const onTouchMove = (e: TouchEvent) => {
+    if (e.cancelable) e.preventDefault();
+    if (e.touches.length === 1 && pts.size === 0 && !hooks.placing?.() && !hooks.uiOwnsPointer?.()) {
+      const p = touchPoint(e.touches[0]!);
+      const prev = touchPan;
+      if (prev && Math.hypot(p.x - prev.sx, p.y - prev.sy) > 8) {
+        applyPan(prev.x, prev.y, p.x, p.y, p.x - prev.x, p.y - prev.y);
+        touchPan = { x: p.x, y: p.y, sx: prev.sx, sy: prev.sy };
+        hooks.camera.hold = true;
+      }
+      return;
+    }
     if (e.touches.length < 2) return;
-    e.preventDefault();
     if (pts.size >= 2) return;
     const a = touchPoint(e.touches[0]!);
     const b = touchPoint(e.touches[1]!);
@@ -531,6 +573,11 @@ export function attachInput(el: HTMLElement, hooks: InputHooks): () => void {
       const b = touchPoint(e.touches[1]!);
       beginPinch(Math.hypot(a.x - b.x, a.y - b.y) || 1, (a.x + b.x) / 2, (a.y + b.y) / 2);
       return;
+    }
+    if (e.touches.length === 0) {
+      touchPan = null;
+      hooks.camera.vx = 0;
+      hooks.camera.vy = 0;
     }
     if (!touchPinch) return;
     touchPinch = false;

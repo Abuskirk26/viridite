@@ -16,6 +16,7 @@ import {
   listMyMaps,
   loadSetup,
   lobbyBlock,
+  limitSeconds,
   LOBBY_MAPS,
   maxOpponents,
   navyHidden,
@@ -32,6 +33,7 @@ import {
   type SkirmishSetup,
 } from "./lobby.ts";
 import { NORMAL_PUSH_AT, Sim, firstPushAt } from "./sim.ts";
+import { DEFAULT_YEAR } from "./eras.ts";
 
 test("a texted room keeps the skirmish the host already set", () => {
   const packed = netRulesFromSetup({
@@ -92,6 +94,18 @@ test("randomize only returns a legal lobby", () => {
 
 test("a new bot slot is Normal, and Normal does not push before 6:00", () => {
   assert.equal(DEFAULT_SETUP.difficulty, "normal");
+  assert.equal(DEFAULT_SETUP.limit, 60);
+  assert.equal(DEFAULT_SETUP.fog, true);
+  assert.equal(toNewGame(DEFAULT_SETUP).fog, true);
+  assert.equal(toNewGame({ ...DEFAULT_SETUP, fog: false }).fog, false);
+  assert.equal(limitSeconds(60), 3600);
+  assert.equal(limitSeconds(0), 0);
+  assert.equal(toNewGame(DEFAULT_SETUP).limit, 3600);
+  assert.equal(toNewGame({ ...DEFAULT_SETUP, limit: 0 }).limit, 0);
+  assert.equal(DEFAULT_SETUP.year, DEFAULT_YEAR);
+  assert.equal(toNewGame({ ...DEFAULT_SETUP, year: 1914 }).year, 1914);
+  const kept = parseSetup({ mapId: "coast", player: "concord", enemy: "syndicate" });
+  assert.equal(kept?.limit, 60);
   assert.deepEqual(DEFAULT_SETUP.skills, ["normal", "normal", "normal"]);
   const stale: SkirmishSetup = {
     ...DEFAULT_SETUP,
