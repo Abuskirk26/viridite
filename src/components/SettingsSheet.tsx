@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { getRenderMode, setRenderMode, subscribeRenderMode, type RenderMode } from "@/game/render3d/mode";
 import { Check, CircleAlert, RefreshCw } from "lucide-react";
 import { AudioBuses } from "@/components/AudioBuses";
@@ -27,8 +27,8 @@ const TABS: { id: SheetTab; label: string }[] = [
 
 /** 2D or 3D. The same control is on the skirmish bar, the pause menu, and Video. */
 export function VersionPick({ testPrefix = "version", dense = false }: { testPrefix?: string; dense?: boolean }) {
-  const [mode, setMode] = useState<RenderMode>(() => getRenderMode());
-  useEffect(() => subscribeRenderMode(setMode), []);
+  // The server render has no saved choice. The client snapshot reads the URL and localStorage after hydration.
+  const mode = useSyncExternalStore(subscribeRenderMode, getRenderMode, () => "2d" as RenderMode);
   const choice = (id: RenderMode, label: string) => (
     <button
       type="button"
