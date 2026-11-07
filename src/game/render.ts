@@ -3,7 +3,6 @@ import { hearAt } from "./audio.ts";
 import {
   BUILD_GAP,
   BUILDINGS,
-  SIGHT,
   MAP_H,
   MAP_W,
   TILE_FORD,
@@ -40,6 +39,7 @@ import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { placeChrome, type ScreenRect } from "./placeui.ts";
+import { marksmanAiming, marksmanEyePx, sightRadius, sightRingSamples } from "./sightvis.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
@@ -79,7 +79,7 @@ export interface DrawUi {
   placeGrid?: boolean;
   /** Finger placement paints Confirm and Cancel beside the ghost. */
   touchPlace?: boolean;
-  /** "3d" leaves the battlefield to WebGL and paints only the screen chrome. */
+  /** "3d" leaves the battlefield to WebGL. This canvas still paints orders, sight, and chrome. */
   glass?: "2d" | "3d";
   /** World-to-screen used by Confirm / Cancel when the 3D camera is up. */
   project?: (wx: number, wy: number) => { x: number; y: number };
@@ -368,6 +368,7 @@ export function drawGame(
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     const dpr = ctx.canvas.width / Math.max(1, view.w);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawGlassTactics(ctx, sim, cam, ui, alpha);
     drawMinimap(ctx, sim, cam, view);
     drawPlaceLabel(ctx, sim, cam, view, ui);
     if (ui.box) {
@@ -854,6 +855,7 @@ export function drawGame(
         if (pad) ctx.lineTo(pad.tx + pad.w / 2, pad.ty + pad.h / 2);
       }
       ctx.stroke();
+      if (u.order.t === "move") paintOrderDiamond(ctx, u.order.x, u.order.y, 8 / Math.max(8, cam.zoom));
     }
     if (u.order.t === "deploy") {
       ctx.strokeStyle = "#c6a56a";
@@ -3911,46 +3913,141 @@ function paintPlate(
 
 /** Thin sight ring on a selected unit. Forests and cliffs clip it. */
 function drawSightRing(ctx: CanvasRenderingContext2D, sim: Sim, u: Unit, x: number, y: number, zoom: number) {
-  const tx = u.x | 0;
-  const ty = u.y | 0;
-  const here = tx >= 0 && ty >= 0 && tx < sim.gw && ty < sim.gh ? (sim.terrain[ty * sim.gw + tx] ?? 0) : 0;
-  const radius = u.sight + (here === TILE_HIGH ? SIGHT.highBonus : 0);
-  const reach = Math.ceil(radius) + 1;
-  ctx.save();
+  const radius = sightRadius(sim.terrain, sim.gw, sim.gh, u.x, u.y, u.sight);
+  const samples = sightRingSamples(sim.terrain, sim.gw, sim.gh, x, y, radius);
+  strokeSightSamples(ctx, samples, 1.25 / Math.max(8, zoom));
+  if (marksmanAiming(u.kind, u.still)) {
+    const eye = marksmanEyePx(zoom) / Math.max(8, zoom);
+    drawMarksmanEye(ctx, x, y - radius - eye * 0.2, eye);
+  }
+}
+
+function strokeSightSamples(
+  ctx: CanvasRenderingContext2D,
+  samples: { x: number; y: number; draw: boolean }[],
+  width: number,
+) {
   ctx.beginPath();
-  for (let dy = -reach; dy <= reach; dy++) {
-    for (let dx = -reach; dx <= reach; dx++) {
-      const gx = tx + dx;
-      const gy = ty + dy;
-      if (gx < 0 || gy < 0 || gx >= sim.gw || gy >= sim.gh) continue;
-      const tile = sim.terrain[gy * sim.gw + gx] ?? 0;
-      if (tile === TILE_SCRUB || tile === TILE_CLIFF || tile === TILE_ROCK) continue;
-      ctx.rect(gx, gy, 1, 1);
+  let pen = false;
+  for (const s of samples) {
+    if (!s.draw) {
+      pen = false;
+      continue;
+    }
+    if (!pen) ctx.moveTo(s.x, s.y);
+    else ctx.lineTo(s.x, s.y);
+    pen = true;
+  }
+  ctx.strokeStyle = "rgba(243, 234, 215, 0.92)";
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+function drawMarksmanEye(ctx: CanvasRenderingContext2D, x: number, y: number, eye: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = "#f3ead7";
+  ctx.fillStyle = "#14110e";
+  ctx.lineWidth = Math.max(eye * 0.08, eye < 2 ? 0.04 : 1);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, eye * 0.72, eye * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#f3ead7";
+  ctx.beginPath();
+  ctx.arc(0, 0, eye * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function paintOrderDiamond(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r * 0.72, y);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x - r * 0.72, y);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(243, 234, 215, 0.92)";
+  ctx.fill();
+}
+
+/** Orders, sight, and build progress painted over the WebGL view in screen pixels. */
+function drawGlassTactics(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, ui: DrawUi, alpha: number) {
+  const project = ui.project;
+  if (!project) return;
+  const a = Math.max(0, Math.min(1, alpha));
+  for (const id of ui.selected) {
+    const u = sim.unitById(id);
+    if (!u || u.hp <= 0 || u.loco === "air") continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const radius = sightRadius(sim.terrain, sim.gw, sim.gh, u.x, u.y, u.sight);
+    const samples = sightRingSamples(sim.terrain, sim.gw, sim.gh, x, y, radius).map((s) => {
+      const p = project(s.x, s.y);
+      return { x: p.x, y: p.y, draw: s.draw };
+    });
+    strokeSightSamples(ctx, samples, 1.25);
+    if (marksmanAiming(u.kind, u.still)) {
+      const eye = Math.max(14, marksmanEyePx(cam.zoom));
+      const at = project(x, y - radius);
+      drawMarksmanEye(ctx, at.x, at.y - eye * 0.15, eye);
     }
   }
-  ctx.clip();
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.strokeStyle = "rgba(243, 234, 215, 0.92)";
-  ctx.lineWidth = 1.25 / Math.max(8, zoom);
-  ctx.stroke();
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "rgba(243, 234, 215, 0.7)";
+  for (const id of ui.selected) {
+    const u = sim.unitById(id);
+    if (!u) continue;
+    if (!(u.path.length || u.order.t === "move" || u.order.t === "rearm")) continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const start = project(x, y);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    for (const p of u.path) {
+      const at = project(p.x + 0.5, p.y + 0.5);
+      ctx.lineTo(at.x, at.y);
+    }
+    if (u.order.t === "move") {
+      const at = project(u.order.x, u.order.y);
+      ctx.lineTo(at.x, at.y);
+      ctx.stroke();
+      paintOrderDiamond(ctx, at.x, at.y, 8);
+    } else if (u.order.t === "rearm") {
+      const pad = sim.buildings.find((b) => b.id === u.home && b.hp > 0) ?? sim.buildings.find((b) => b.team === u.team && b.kind === "helipad" && b.hp > 0);
+      if (pad) {
+        const at = project(pad.tx + pad.w / 2, pad.ty + pad.h / 2);
+        ctx.lineTo(at.x, at.y);
+      }
+      ctx.stroke();
+    } else ctx.stroke();
+  }
+  if (ui.buildingId) {
+    const b = sim.buildingById(ui.buildingId);
+    if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
+      const from = project(b.tx + b.w / 2, b.ty + b.h / 2);
+      const to = project(b.rallyX, b.rallyY);
+      ctx.strokeStyle = seatPaint(sim, b.team);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      paintOrderDiamond(ctx, to.x, to.y, 7);
+    }
+  }
   ctx.restore();
-  if (u.kind === "marksman" && u.still >= SIGHT.marksmanSettle) {
-    const eye = Math.max(14 / Math.max(8, zoom), 0.28);
-    ctx.save();
-    ctx.translate(x, y - radius - eye * 0.2);
-    ctx.strokeStyle = "#f3ead7";
-    ctx.fillStyle = "#14110e";
-    ctx.lineWidth = Math.max(1, eye * 0.12);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, eye * 0.72, eye * 0.42, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#f3ead7";
-    ctx.beginPath();
-    ctx.arc(0, 0, eye * 0.16, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+  for (const b of sim.buildings) {
+    if (b.complete || b.hp <= 0 || b.buildTotal <= 0) continue;
+    if (b.team !== VIEWER && !sim.buildingVisible(VIEWER, b)) continue;
+    const p = Math.max(0, Math.min(1, 1 - b.buildLeft / b.buildTotal));
+    const at = project(b.tx + b.w / 2, b.ty + b.h * 0.2);
+    const w = 56;
+    const h = 6;
+    ctx.fillStyle = "rgba(12,10,8,0.92)";
+    ctx.fillRect(at.x - w / 2, at.y, w, h);
+    ctx.fillStyle = "#d7b56a";
+    ctx.fillRect(at.x - w / 2, at.y, w * p, h);
   }
 }
 
