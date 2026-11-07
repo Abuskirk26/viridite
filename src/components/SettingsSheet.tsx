@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { getRenderMode, setRenderMode, subscribeRenderMode, type RenderMode } from "@/game/render3d/mode";
 import { Check, CircleAlert, RefreshCw } from "lucide-react";
 import { AudioBuses } from "@/components/AudioBuses";
@@ -27,8 +27,8 @@ const TABS: { id: SheetTab; label: string }[] = [
 
 /** 2D or 3D. The same control is on the skirmish bar, the pause menu, and Video. */
 export function VersionPick({ testPrefix = "version", dense = false }: { testPrefix?: string; dense?: boolean }) {
-  const [mode, setMode] = useState<RenderMode>(() => getRenderMode());
-  useEffect(() => subscribeRenderMode(setMode), []);
+  // The server render has no saved choice. The client snapshot reads the URL and localStorage after hydration.
+  const mode = useSyncExternalStore(subscribeRenderMode, getRenderMode, () => "2d" as RenderMode);
   const choice = (id: RenderMode, label: string) => (
     <button
       type="button"
@@ -141,7 +141,7 @@ export function SheetBody({
           <p className="text-sm text-pretty text-brass">{picked.feel}</p>
           {setup && onSetup && !locked ? (
             <div className="mt-2 flex flex-col gap-2" data-testid="time-limit">
-              <p className="font-display text-[10px] uppercase tracking-widest text-brass">Time limit</p>
+              <p className="font-display text-xs uppercase tracking-widest text-brass">Time limit</p>
               <p className="text-sm text-pretty text-muted">
                 60 minutes is the clock. Unlimited plays until a side is gone. Survive wins if you are still standing when it ends.
               </p>
@@ -152,8 +152,8 @@ export function SheetBody({
                     type="button"
                     data-testid={`limit-${min}`}
                     aria-pressed={setup.limit === min}
-                    className={`h-11 font-display text-xs uppercase ${setup.limit === min ? "bg-crystal text-crystal-ink" : "border border-brass-dim text-ink"}`}
-                    onClick={() => onSetup({ limit: min })}
+                    className={`h-12 font-display text-xs uppercase ${setup.limit === min ? "bg-crystal text-crystal-ink" : "border border-brass-dim text-ink"}`}
+                    onClick={() => onSetup(min === 0 && setup.mode === "survive" ? { limit: min, mode: "destroy" } : { limit: min })}
                   >
                     {min === 0 ? "None" : `${min}m`}
                   </button>

@@ -87,19 +87,23 @@ export function aiPace(diff: AiDifficulty): Pace {
       cap: 12,
     };
   }
-  // Harass from 4:00. First push at 6:30. Follow-up waves leave after that push.
+  // First attack waits until 7:30. The first wave is a quarter smaller than the old group of 5.
   return {
     scout: 130,
-    harass: NORMAL_HARASS_AT,
-    assault: NORMAL_PUSH_AT,
-    armor: NORMAL_PUSH_AT - 30,
+    harass: NORMAL_FIRST_ATTACK,
+    assault: NORMAL_FIRST_ATTACK,
+    armor: NORMAL_FIRST_ATTACK,
     wave: 110,
     jitter: 16,
-    push: NORMAL_PUSH_AT,
-    group: 5,
+    push: NORMAL_FIRST_ATTACK,
+    group: NORMAL_FIRST_WAVE,
     cap: 10,
   };
 }
+
+/** Normal does not attack before 7:30. The first wave is three quarters of the old group of 5. */
+const NORMAL_FIRST_ATTACK = 7.5 * 60;
+const NORMAL_FIRST_WAVE = Math.max(3, Math.round(5 * 0.75));
 
 /**
  * What they fight like right now. The chosen skill is only the ceiling.
@@ -160,6 +164,55 @@ export function aiThink(sim: Sim, team: Team = 1) {
   train(sim, team, stance, pace, false);
   seekCaches(sim, team);
   fight(sim, team, stance, pace);
+  huntStragglers(sim, team);
+}
+
+/** The last few enemy units and buildings are visible, and the army walks to them. */
+function huntStragglers(sim: Sim, team: Team) {
+  const prey: { x: number; y: number; id: number }[] = [];
+  for (let t = 0; t <= sim.opponents; t++) {
+    if (t === team || sim.allied(team, t as Team) || sim.eliminated[t]) continue;
+    const yardUp = sim.buildings.some((b) => b.team === t && b.kind === "yard" && b.hp > 0 && b.rubble <= 0);
+    if (!sim.hadYard[t] || yardUp) continue;
+    const units = sim.units.filter((u) => u.team === t && u.hp > 0 && !u.aboard);
+    const halls = sim.buildings.filter(
+      (b) =>
+        b.team === t &&
+        !b.neutral &&
+        b.hp > 0 &&
+        b.rubble <= 0 &&
+        b.complete &&
+        b.kind !== "span" &&
+        b.kind !== "wall" &&
+        b.kind !== "sandbag" &&
+        b.kind !== "gate",
+    );
+    const left = units.length + halls.length;
+    if (left === 0 || left > 6) continue;
+    for (const u of units) prey.push({ x: u.x, y: u.y, id: u.id });
+    for (const b of halls) prey.push({ x: b.tx + b.w / 2, y: b.ty + b.h / 2, id: b.id });
+  }
+  if (!prey.length) return;
+  for (const p of prey) sim.spotStraggler(team, p.x, p.y);
+  const army = sim.units.filter(
+    (u) => u.team === team && u.hp > 0 && !u.aboard && u.damage > 0 && u.kind !== "harvester" && u.kind !== "mcv",
+  );
+  if (!army.length) return;
+  const origin = army[0]!;
+  let best = prey[0]!;
+  let bestD = Infinity;
+  for (const p of prey) {
+    const d = Math.hypot(p.x - origin.x, p.y - origin.y);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  sim.issueAttack(
+    army.map((u) => u.id),
+    best.id,
+  );
+  sim.aiIntent[team] = "attack";
 }
 
 function seekCaches(sim: Sim, team: Team) {
@@ -832,7 +885,7 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
       sim.time >= pace.harass &&
       sim.time + 1 < pace.assault
     ) {
-      const party = harassParty(army, home);
+      const party = harassParty(sim, team, army, home);
       if (party.length >= 3) {
         const prey = openHarvester(sim, team);
         if (launch(sim, team, party, prey ?? standoff(sim, team), pace, false, null, true)) {
@@ -861,7 +914,8 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
       }
     }
     const follow = diff === "normal" && sim.aiPushed[team] && sim.time >= (sim.aiAt[team] || 0);
-    const opening = !sim.aiPushed[team] && sim.time >= pace.push;
+    const yardGone = sim.hadYard[team] && !sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0);
+    const opening = !sim.aiPushed[team] && (sim.time >= pace.push || yardGone);
     if (opening || follow) {
       // An attack-move into scrub or water never arrives, and that squad must still be free to push.
       const stalled = (u: Unit) =>
@@ -924,7 +978,8 @@ function fight(sim: Sim, team: Team, stance: AiProfile, pace: Pace) {
     sim.time >= pace.harass &&
     sim.time + 1 < pace.assault &&
     !sim.aiPoked[team];
-  const assaultDue = sim.time >= pace.assault && !sim.aiPushed[team];
+  const yardGone = sim.hadYard[team] && !sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0);
+  const assaultDue = !sim.aiPushed[team] && (sim.time >= pace.assault || yardGone);
   const waveDue = sim.aiPushed[team] && sim.time >= (sim.aiAt[team] || 0);
   if (pokeDue) {
     const foot = army.filter((u) => idleish(u) && !retreating(u, home) && u.armor === "infantry" && u.hp >= u.maxHp * 0.55).slice(0, 2);
@@ -1056,6 +1111,8 @@ function launch(
 ): boolean {
   if (!units.length) return false;
   const diff = sim.difficultyOf(team);
+  const yardDown = sim.hadYard[team] && !sim.buildings.some((b) => b.team === team && b.kind === "yard" && b.hp > 0 && b.rubble <= 0);
+  if (!defense && diff === "normal" && sim.time < NORMAL_FIRST_ATTACK && !yardDown) return false;
   // Personality can wait. It cannot attack before the difficulty mark.
   // Normal's 4:00 poke is the exception: 3–5 tier-1 units, and nothing heavier.
   if (!defense && attackMove && sim.time < firstPushAt(diff)) {
@@ -1130,12 +1187,13 @@ function launch(
 }
 
 /** 3–5 tier-1 troops. Tanks stay home until the real push. */
-function harassParty(army: Unit[], home: { x: number; y: number }): Unit[] {
+function harassParty(sim: Sim, team: Team, army: Unit[], home: { x: number; y: number }): Unit[] {
   const light = army.filter(
     (u) => LIGHT.has(u.kind) && idleish(u) && !retreating(u, home) && u.hp >= u.maxHp * 0.55,
   );
   if (light.length < 3) return [];
-  return light.slice(0, 5);
+  const cap = sim.difficultyOf(team) === "normal" && !sim.aiPushed[team] ? NORMAL_FIRST_WAVE : 5;
+  return light.slice(0, cap);
 }
 
 const SIEGE_ORDER = ["yard", "refinery", "barracks", "factory", "power", "advpower", "supply", "silo", "helipad", "dock", "stealth", "tower", "aa"];

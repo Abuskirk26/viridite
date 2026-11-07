@@ -36,6 +36,21 @@ import { Sim } from "@/game/sim";
 const NAME_KEY = "viridite-commander";
 const SEAT_KEY = "viridite-room";
 
+/** Five-character room code, or the code inside a pasted invite link. */
+function codeFromPaste(raw: string): string {
+  const text = raw.trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    const fromQuery = (url.searchParams.get("room") ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (fromQuery.length >= 5) return fromQuery.slice(0, 5);
+  } catch {
+    /* not a url */
+  }
+  const match = text.toUpperCase().match(/[A-Z0-9]{5}/);
+  return match ? match[0] : "";
+}
+
 type OpenFn = (
   role: "host" | "guest",
   token?: string,
@@ -99,7 +114,7 @@ export function NetLobby({
   onMatch,
   invite = "",
   setup,
-  autoHost = true,
+  autoHost = false,
   showAi = false,
   onShowAi,
 }: {
@@ -127,6 +142,7 @@ export function NetLobby({
   const [transport, setTransport] = useState<InviteRelay>("public");
   const [offerLocal, setOfferLocal] = useState(false);
   const copyTimer = useRef(0);
+  const codeRefs = useRef<(HTMLInputElement | null)[]>([]);
   const helloTimer = useRef(0);
   const openRef = useRef<OpenFn>(() => {});
   const joinedInvite = useRef(false);
@@ -138,17 +154,25 @@ export function NetLobby({
 
   useEffect(() => {
     let nextName = "Commander";
-    let seat: { code: string; token: string; name: string } | null = null;
-    try {
-      nextName = localStorage.getItem(NAME_KEY) || "Commander";
-      const raw = localStorage.getItem(SEAT_KEY);
-      if (raw) {
+    let savedSeat: { code: string; token: string; name: string } | null = null;
+    let sessionSeat: { code: string; token: string; name: string } | null = null;
+    const readPack = (raw: string | null) => {
+      if (!raw) return null;
+      try {
         const parsed = JSON.parse(raw) as { code?: string; token?: string; name?: string };
         if (parsed.code && parsed.token) {
-          seat = { code: parsed.code, token: parsed.token, name: parsed.name || "Commander" };
-          setSaved(seat);
+          return { code: parsed.code.toUpperCase(), token: parsed.token, name: parsed.name || "Commander" };
         }
+      } catch {
+        /* ignore */
       }
+      return null;
+    };
+    try {
+      nextName = localStorage.getItem(NAME_KEY) || "Commander";
+      savedSeat = readPack(localStorage.getItem(SEAT_KEY));
+      sessionSeat = readPack(sessionStorage.getItem("viridite-seat"));
+      if (savedSeat) setSaved(savedSeat);
     } catch {
       /* private mode */
     }
@@ -160,35 +184,27 @@ export function NetLobby({
       hosted.current = true;
       setPane("join");
       setCode(invite);
-      const token = seat && seat.code.toUpperCase() === invite ? seat.token : "";
+      const token = sessionSeat && sessionSeat.code === invite ? sessionSeat.token : "";
       openRef.current("guest", token, {
         code: invite,
-        name: token && seat ? seat.name : nextName,
+        name: token && sessionSeat ? sessionSeat.name : nextName,
         transport: hint.mode,
         url: hint.url,
+      });
+    } else if (sessionSeat && !hosted.current) {
+      hosted.current = true;
+      setPane("join");
+      setCode(sessionSeat.code);
+      openRef.current("guest", sessionSeat.token, {
+        code: sessionSeat.code,
+        name: sessionSeat.name,
+        transport: hint.mode === "local" ? "local" : "public",
       });
     } else if (autoHost && !hosted.current) {
       hosted.current = true;
       openRef.current("host", "", { name: nextName, transport: hint.mode === "local" ? "local" : "public" });
     }
   }, [invite, autoHost]);
-
-  useEffect(() => {
-    if (!lobby || lobby.phase !== "lobby") return;
-    const onVis = () => {
-      const play = netRef.current;
-      if (!play) return;
-      if (document.visibilityState === "hidden") {
-        play.signalAway(true);
-        setError("Reconnecting");
-      } else {
-        play.signalAway(false);
-        setError("");
-      }
-    };
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, [lobby?.phase, lobby?.code]);
 
   const readClip = async () => {
     try {
@@ -425,7 +441,8 @@ export function NetLobby({
     : "";
 
   const submitCode = (raw: string) => {
-    const next = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+    const pasted = codeFromPaste(raw);
+    const next = (pasted || raw).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
     setCode(next);
     if (next.length === 5) open("guest", "", { code: next, transport: transport === "local" ? "local" : "public" });
   };
@@ -511,28 +528,24 @@ export function NetLobby({
 
         {!lobby && pane === "home" && (
           <section className="steel flex flex-col gap-3 p-3">
-            {error ? (
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
                 data-testid="net-host"
                 className="flex h-16 items-center justify-center bg-crystal font-display text-base uppercase tracking-widest text-crystal-ink"
                 onClick={() => open("host", "", { name })}
               >
-                Play with friends
+                Host
               </button>
-            ) : (
-              <p className="text-sm text-pretty text-ink" data-testid="net-opening">
-                Opening this skirmish for friends…
-              </p>
-            )}
-            <button
-              type="button"
-              data-testid="net-join-open"
-              className="bevel-btn flex h-16 items-center justify-center font-display text-base uppercase tracking-widest"
-              onClick={joinInstead}
-            >
-              Join a friend's skirmish
-            </button>
+              <button
+                type="button"
+                data-testid="net-join-open"
+                className="bevel-btn flex h-16 items-center justify-center font-display text-base uppercase tracking-widest"
+                onClick={joinInstead}
+              >
+                Join
+              </button>
+            </div>
             {saved && (
               <button
                 type="button"
@@ -607,30 +620,47 @@ export function NetLobby({
                 Join {clipCode}
               </button>
             )}
-            <label className="flex flex-col gap-1">
-              <span className="font-display text-[10px] uppercase tracking-wide text-brass">Room code</span>
-              <input
-                key={shake}
-                value={code}
-                maxLength={5}
-                autoFocus
-                autoCapitalize="characters"
-                autoCorrect="off"
-                spellCheck={false}
-                inputMode="text"
-                aria-label="Room code"
-                onChange={(e) => submitCode(e.target.value)}
-                onPaste={(e) => {
-                  const text = e.clipboardData.getData("text");
-                  if (!text) return;
-                  e.preventDefault();
-                  submitCode(text);
-                }}
-                className={`steel-inset h-16 text-center font-display text-4xl tracking-[0.35em] text-gold outline-none select-text ${shake ? "code-shake" : ""}`}
-                style={{ userSelect: "text", WebkitUserSelect: "text" }}
-                data-testid="net-code-input"
-              />
-            </label>
+            <div className="flex flex-col gap-1" data-testid="net-code-boxes">
+              <span className="font-display text-xs uppercase tracking-wide text-brass">Room code</span>
+              <div className={`grid grid-cols-5 gap-2 ${shake ? "code-shake" : ""}`}>
+                {Array.from({ length: 5 }, (_, i) => (
+                  <input
+                    key={i}
+                    ref={(el) => {
+                      codeRefs.current[i] = el;
+                    }}
+                    value={code[i] ?? ""}
+                    maxLength={1}
+                    autoFocus={i === 0}
+                    autoCapitalize="characters"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="text"
+                    aria-label={`Room code ${i + 1}`}
+                    data-testid={i === 0 ? "net-code-input" : `net-code-${i}`}
+                    className="steel-inset h-16 text-center font-display text-3xl uppercase text-gold outline-none"
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData("text");
+                      if (!text) return;
+                      e.preventDefault();
+                      submitCode(text);
+                    }}
+                    onChange={(e) => {
+                      const ch = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(-1);
+                      const chars = code.padEnd(5, " ").slice(0, 5).split("");
+                      chars[i] = ch || " ";
+                      const next = chars.join("").replace(/ /g, "").slice(0, 5);
+                      if (next.length === 5) submitCode(next);
+                      else setCode(next);
+                      if (ch && i < 4) codeRefs.current[i + 1]?.focus();
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Backspace" && !code[i] && i > 0) codeRefs.current[i - 1]?.focus();
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
             {error && (
               <p className="text-sm text-pretty text-danger" data-testid="net-error" data-reason={errorReason(error)}>
                 {error}
@@ -735,6 +765,11 @@ export function NetLobby({
                   data-testid={`seat-row-${s.seat}`}
                 >
                   <span className="w-6 font-display text-xs text-brass">{s.seat + 1}</span>
+                  {s.fill === "human" && s.ready && (
+                    <span data-testid={`seat-ready-${s.seat}`} className="font-display text-lg text-crystal" aria-label="Ready">
+                      ✓
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1 truncate font-display text-sm uppercase">
                     {s.you ? "You" : s.fill === "open" ? "Empty" : s.name}
                     {s.you && s.name ? <span className="text-brass"> · {s.name}</span> : null}
@@ -898,7 +933,7 @@ export function NetLobby({
                   type="button"
                   data-testid="net-start"
                   disabled={!!blocked}
-                  className={`flex h-14 items-center justify-center font-display text-sm uppercase ${blocked ? "bg-brass-dim text-muted" : "bg-crystal text-crystal-ink"}`}
+                  className={`flex h-14 items-center justify-center font-display text-sm uppercase [@media(max-height:500px)]:fixed [@media(max-height:500px)]:inset-x-3 [@media(max-height:500px)]:bottom-2 [@media(max-height:500px)]:z-40 ${blocked ? "bg-brass-dim text-muted" : "bg-crystal text-crystal-ink"}`}
                   onClick={() => {
                     const doc = rules.customId ? resolveMyMap(rules.customId) : null;
                     net?.start(doc ? shareCode(doc) : undefined);
@@ -916,7 +951,7 @@ export function NetLobby({
                   type="button"
                   data-testid="net-ready"
                   aria-pressed={!!you?.ready}
-                  className={`flex h-14 items-center justify-center font-display text-sm uppercase ${you?.ready ? "steel-inset text-gold" : "bg-crystal text-crystal-ink"}`}
+                  className={`flex h-14 items-center justify-center font-display text-sm uppercase [@media(max-height:500px)]:fixed [@media(max-height:500px)]:inset-x-3 [@media(max-height:500px)]:bottom-2 [@media(max-height:500px)]:z-40 ${you?.ready ? "bg-field text-gold" : "bg-crystal text-crystal-ink"}`}
                   onClick={() => net?.ready(!you?.ready)}
                 >
                   {you?.ready ? "Ready" : "Tap ready"}

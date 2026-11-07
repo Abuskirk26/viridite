@@ -42,7 +42,7 @@ export function YearSlider({
         disabled={locked || !onChange}
         aria-label="Starting year"
         data-testid="year-range"
-        className="h-11 w-full cursor-pointer accent-[#3dcc6e] disabled:cursor-default"
+        className="h-12 w-full cursor-pointer accent-[#3dcc6e] disabled:cursor-default"
         onChange={(e) => setIndex(Number(e.target.value))}
       />
       <div className="grid grid-cols-4 gap-1" role="group" aria-label="Era">
@@ -53,7 +53,7 @@ export function YearSlider({
             data-testid={`year-${row.id}`}
             aria-pressed={row.id === era.id}
             disabled={locked || !onChange}
-            className={`h-11 px-1 font-display text-[10px] uppercase leading-tight ${
+            className={`h-12 px-1 font-display text-xs uppercase leading-tight ${
               row.id === era.id ? "bg-crystal text-crystal-ink" : "border border-brass-dim text-ink"
             }`}
             onClick={() => setIndex(i)}

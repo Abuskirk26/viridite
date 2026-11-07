@@ -39,6 +39,7 @@ import type { Building, Sim, Unit } from "./sim.ts";
 import { ghostPlaceReason, shortPlaceReason } from "./sim.ts";
 import { hallDrawMul, hallPictureLift, minimapRect, unitPictureWidth, unitWorldSpan, viewPitch, worldToScreen, zoomLimits, type Camera, type View } from "./view.ts";
 import { placeChrome, type ScreenRect } from "./placeui.ts";
+import { marksmanAiming, marksmanEyePx, sightRadius, sightRingSamples } from "./sightvis.ts";
 import { art, sourceSize, type Painted } from "./art.ts";
 import { paintSolidBuilding, paintSolidUnit, SOLID_LIFT, SOLID_SHEAR } from "./solids.ts";
 import { ensureIso, iso, isoDmg, isoMask, isoRuin, type IsoBank } from "./iso.ts";
@@ -78,7 +79,7 @@ export interface DrawUi {
   placeGrid?: boolean;
   /** Finger placement paints Confirm and Cancel beside the ghost. */
   touchPlace?: boolean;
-  /** "3d" leaves the battlefield to WebGL and paints only the screen chrome. */
+  /** "3d" leaves the battlefield to WebGL. This canvas still paints orders, sight, and chrome. */
   glass?: "2d" | "3d";
   /** World-to-screen used by Confirm / Cancel when the 3D camera is up. */
   project?: (wx: number, wy: number) => { x: number; y: number };
@@ -367,6 +368,7 @@ export function drawGame(
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
     const dpr = ctx.canvas.width / Math.max(1, view.w);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawGlassTactics(ctx, sim, cam, ui, alpha);
     drawMinimap(ctx, sim, cam, view);
     drawPlaceLabel(ctx, sim, cam, view, ui);
     if (ui.box) {
@@ -566,7 +568,9 @@ export function drawGame(
         ctx.save();
         ctx.globalAlpha *= 0.58;
       }
-      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), ui.selected.includes(u.id), sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
+      const picked = ui.selected.includes(u.id);
+      if (picked && u.hp > 0 && u.loco !== "air") drawSightRing(ctx, sim, u, px, py, cam.zoom);
+      drawUnit(ctx, u, px, py, seatPaint(sim, u.team), picked, sim.time, aimOf(sim, u), leaf, cam.zoom, zoomLimits(view, sim.gw, sim.gh).min);
       if (leaf) ctx.restore();
       if (u.hit > 0) {
         ctx.save();
@@ -851,6 +855,7 @@ export function drawGame(
         if (pad) ctx.lineTo(pad.tx + pad.w / 2, pad.ty + pad.h / 2);
       }
       ctx.stroke();
+      if (u.order.t === "move") paintOrderDiamond(ctx, u.order.x, u.order.y, 8 / Math.max(8, cam.zoom));
     }
     if (u.order.t === "deploy") {
       ctx.strokeStyle = "#c6a56a";
@@ -920,6 +925,16 @@ export function drawGame(
     ctx.strokeStyle = bdef.ok ? "#d8ffe6" : "#ffd0c8";
     ctx.lineWidth = 0.12;
     ctx.strokeRect(origin.tx + 0.03, origin.ty + 0.03, w - 0.06, h - 0.06);
+    if (!bdef.ok) {
+      ctx.strokeStyle = "#1a120e";
+      ctx.lineWidth = 0.14;
+      ctx.beginPath();
+      ctx.moveTo(origin.tx + 0.25, origin.ty + 0.25);
+      ctx.lineTo(origin.tx + w - 0.25, origin.ty + h - 0.25);
+      ctx.moveTo(origin.tx + w - 0.25, origin.ty + 0.25);
+      ctx.lineTo(origin.tx + 0.25, origin.ty + h - 0.25);
+      ctx.stroke();
+    }
     if (lifted) {
       ctx.strokeStyle = "#f4f0e6";
       ctx.lineWidth = 0.08;
@@ -1077,26 +1092,27 @@ function drawPlaceGrid(ctx: CanvasRenderingContext2D, x0: number, y0: number, x1
   ctx.restore();
 }
 
-export { placeChrome } from "./placeui.ts";
+export { placeChrome };
 
 function paintPlaceChrome(
   ctx: CanvasRenderingContext2D,
   box: { confirm: { x: number; y: number; w: number; h: number }; cancel: { x: number; y: number; w: number; h: number } },
+  ok = true,
 ) {
-  const paint = (r: { x: number; y: number; w: number; h: number }, label: string, fill: string) => {
+  const paint = (r: { x: number; y: number; w: number; h: number }, label: string, fill: string, ink: string) => {
     ctx.fillStyle = fill;
     ctx.fillRect(r.x, r.y, r.w, r.h);
     ctx.strokeStyle = "#f3ead7";
     ctx.lineWidth = 1;
     ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
-    ctx.fillStyle = "#14110e";
+    ctx.fillStyle = ink;
     ctx.font = "bold 14px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
   };
-  paint(box.confirm, "Confirm", "#7dce6a");
-  paint(box.cancel, "Cancel", "#e7b2a8");
+  paint(box.confirm, "Confirm", ok ? "#7dce6a" : "#6d6a62", ok ? "#14110e" : "#2a2824");
+  paint(box.cancel, "Cancel", "#e7b2a8", "#14110e");
 }
 
 /** Cells a finished structure can build from. Same Chebyshev gap as placement. */
@@ -1166,10 +1182,15 @@ function drawPlaceLabel(
 ) {
   if (!ui.placing) return;
   const to = (x: number, y: number) => (ui.project ? ui.project(x, y) : worldToScreen(cam, x, y, view));
-  if (ui.touchPlace) {
+  if (ui.touchPlace && ui.hover) {
     const visual = ui.ghost ?? ui.hover;
     const placed = BUILDINGS[ui.placing];
-    paintPlaceChrome(ctx, placeChrome(cam, view, visual?.tx ?? 0, visual?.ty ?? 0, placed.w, placed.h, ui.project, ui.avoid));
+    const ok = sim.canPlace(VIEWER, ui.placing, ui.hover.tx, ui.hover.ty).ok;
+    paintPlaceChrome(
+      ctx,
+      placeChrome(cam, view, visual.tx, visual.ty, placed.w, placed.h, ui.project, ui.avoid),
+      ok,
+    );
   }
   let tx = 0;
   let ty = 0;
@@ -1196,9 +1217,11 @@ function drawPlaceLabel(
     const secs = def.time >= 10 || Number.isInteger(def.time) ? String(def.time) : def.time.toFixed(1);
     text = check.ok ? `${def.cost} · ${secs}s` : ghostPlaceReason(check.reason);
     bad = !check.ok;
-    const s = to(tx + def.w / 2, ty);
-    const lines = check.ok ? [text, power] : [text];
-    paintPlaceCard(ctx, s.x, s.y, lines, bad);
+    const mark = check.ok ? "✓" : "✕";
+    const lines = check.ok ? [`${mark}  ${text}`, power] : [mark, text];
+    const s = check.ok ? to(tx + def.w / 2, ty) : to(tx + def.w + 0.2, ty + def.h / 2);
+    if (check.ok) paintPlaceCard(ctx, s.x, s.y, lines, bad);
+    else paintPlaceCard(ctx, s.x + 8, s.y + 18, lines, bad);
     return;
   } else return;
   const s = to(tx + 0.5, ty);
@@ -3888,6 +3911,146 @@ function paintPlate(
   ctx.restore();
 }
 
+/** Thin sight ring on a selected unit. Forests and cliffs clip it. */
+function drawSightRing(ctx: CanvasRenderingContext2D, sim: Sim, u: Unit, x: number, y: number, zoom: number) {
+  const radius = sightRadius(sim.terrain, sim.gw, sim.gh, u.x, u.y, u.sight);
+  const samples = sightRingSamples(sim.terrain, sim.gw, sim.gh, x, y, radius);
+  strokeSightSamples(ctx, samples, 1.25 / Math.max(8, zoom));
+  if (marksmanAiming(u.kind, u.still)) {
+    const eye = marksmanEyePx(zoom) / Math.max(8, zoom);
+    drawMarksmanEye(ctx, x, y - radius - eye * 0.2, eye);
+  }
+}
+
+function strokeSightSamples(
+  ctx: CanvasRenderingContext2D,
+  samples: { x: number; y: number; draw: boolean }[],
+  width: number,
+) {
+  ctx.beginPath();
+  let pen = false;
+  for (const s of samples) {
+    if (!s.draw) {
+      pen = false;
+      continue;
+    }
+    if (!pen) ctx.moveTo(s.x, s.y);
+    else ctx.lineTo(s.x, s.y);
+    pen = true;
+  }
+  ctx.strokeStyle = "rgba(243, 234, 215, 0.92)";
+  ctx.lineWidth = width;
+  ctx.stroke();
+}
+
+function drawMarksmanEye(ctx: CanvasRenderingContext2D, x: number, y: number, eye: number) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = "#f3ead7";
+  ctx.fillStyle = "#14110e";
+  ctx.lineWidth = Math.max(eye * 0.08, eye < 2 ? 0.04 : 1);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, eye * 0.72, eye * 0.42, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#f3ead7";
+  ctx.beginPath();
+  ctx.arc(0, 0, eye * 0.16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function paintOrderDiamond(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r);
+  ctx.lineTo(x + r * 0.72, y);
+  ctx.lineTo(x, y + r);
+  ctx.lineTo(x - r * 0.72, y);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(243, 234, 215, 0.92)";
+  ctx.fill();
+}
+
+/** Orders, sight, and build progress painted over the WebGL view in screen pixels. */
+function drawGlassTactics(ctx: CanvasRenderingContext2D, sim: Sim, cam: Camera, ui: DrawUi, alpha: number) {
+  const project = ui.project;
+  if (!project) return;
+  const a = Math.max(0, Math.min(1, alpha));
+  for (const id of ui.selected) {
+    const u = sim.unitById(id);
+    if (!u || u.hp <= 0 || u.loco === "air") continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const radius = sightRadius(sim.terrain, sim.gw, sim.gh, u.x, u.y, u.sight);
+    const samples = sightRingSamples(sim.terrain, sim.gw, sim.gh, x, y, radius).map((s) => {
+      const p = project(s.x, s.y);
+      return { x: p.x, y: p.y, draw: s.draw };
+    });
+    strokeSightSamples(ctx, samples, 1.25);
+    if (marksmanAiming(u.kind, u.still)) {
+      const eye = Math.max(14, marksmanEyePx(cam.zoom));
+      const at = project(x, y - radius);
+      drawMarksmanEye(ctx, at.x, at.y - eye * 0.15, eye);
+    }
+  }
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = "rgba(243, 234, 215, 0.7)";
+  for (const id of ui.selected) {
+    const u = sim.unitById(id);
+    if (!u) continue;
+    if (!(u.path.length || u.order.t === "move" || u.order.t === "rearm")) continue;
+    const x = u.px + (u.x - u.px) * a;
+    const y = u.py + (u.y - u.py) * a;
+    const start = project(x, y);
+    ctx.beginPath();
+    ctx.moveTo(start.x, start.y);
+    for (const p of u.path) {
+      const at = project(p.x + 0.5, p.y + 0.5);
+      ctx.lineTo(at.x, at.y);
+    }
+    if (u.order.t === "move") {
+      const at = project(u.order.x, u.order.y);
+      ctx.lineTo(at.x, at.y);
+      ctx.stroke();
+      paintOrderDiamond(ctx, at.x, at.y, 8);
+    } else if (u.order.t === "rearm") {
+      const pad = sim.buildings.find((b) => b.id === u.home && b.hp > 0) ?? sim.buildings.find((b) => b.team === u.team && b.kind === "helipad" && b.hp > 0);
+      if (pad) {
+        const at = project(pad.tx + pad.w / 2, pad.ty + pad.h / 2);
+        ctx.lineTo(at.x, at.y);
+      }
+      ctx.stroke();
+    } else ctx.stroke();
+  }
+  if (ui.buildingId) {
+    const b = sim.buildingById(ui.buildingId);
+    if (b && (b.kind === "barracks" || b.kind === "factory" || b.kind === "dock" || b.kind === "helipad")) {
+      const from = project(b.tx + b.w / 2, b.ty + b.h / 2);
+      const to = project(b.rallyX, b.rallyY);
+      ctx.strokeStyle = seatPaint(sim, b.team);
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+      paintOrderDiamond(ctx, to.x, to.y, 7);
+    }
+  }
+  ctx.restore();
+  for (const b of sim.buildings) {
+    if (b.complete || b.hp <= 0 || b.buildTotal <= 0) continue;
+    if (b.team !== VIEWER && !sim.buildingVisible(VIEWER, b)) continue;
+    const p = Math.max(0, Math.min(1, 1 - b.buildLeft / b.buildTotal));
+    const at = project(b.tx + b.w / 2, b.ty + b.h * 0.2);
+    const w = 56;
+    const h = 6;
+    ctx.fillStyle = "rgba(12,10,8,0.92)";
+    ctx.fillRect(at.x - w / 2, at.y, w, h);
+    ctx.fillStyle = "#d7b56a";
+    ctx.fillRect(at.x - w / 2, at.y, w * p, h);
+  }
+}
+
 /** Thin ellipse just under the footprint. About 0.9x the unit width. */
 function paintUnitMark(ctx: CanvasRenderingContext2D, x: number, y: number, wide: number, color: string, selected = false) {
   const rx = Math.max(0.1, wide * 0.45);
@@ -4982,7 +5145,8 @@ function drawMinimap(
       const tx = c.x | 0;
       const ty = c.y | 0;
       const seen = tx >= 0 && ty >= 0 && tx < sim.gw && ty < sim.gh ? (sim.fog[VIEWER]?.[ty * sim.gw + tx] ?? 0) : 0;
-      if (seen === 0) continue;
+      // Fog off fills every tile with 2. A real shroud keeps the camp hidden until it is scouted.
+      if (sim.fogOn && seen === 0) continue;
     }
     if (seat >= 0) paintTeamShape(ctx, cx, cy, 6, seatPaint(sim, seat), teamStyle(seat).shape, 1);
     else {

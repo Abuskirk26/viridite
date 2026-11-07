@@ -247,13 +247,17 @@ export function ReadyUp({
               type="button"
               data-testid="mode-survive"
               aria-pressed={setup.mode === "survive"}
-              className={`h-11 font-display text-xs uppercase ${setup.mode === "survive" ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
-              onClick={() => onChange({ mode: "survive" })}
+              className={`h-12 font-display text-xs uppercase ${setup.limit === 0 ? "border border-[#2a3330] text-muted" : setup.mode === "survive" ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+              disabled={setup.limit === 0}
+              onClick={() => {
+                if (setup.limit === 0) return;
+                onChange({ mode: "survive" });
+              }}
             >
               Survive
             </button>
           </div>
-          <p className="mt-1 font-display text-[10px] uppercase tracking-wide text-muted">Time limit</p>
+          <p className="mt-1 font-display text-xs uppercase tracking-wide text-muted">Time limit</p>
           <div className="grid grid-cols-4 gap-1" data-testid="time-limit">
             {LIMIT_CHOICES.map((min) => (
               <button
@@ -262,8 +266,8 @@ export function ReadyUp({
                 data-testid={`limit-${min}`}
                 aria-pressed={setup.limit === min}
                 aria-label={min === 0 ? "Unlimited time" : `${min} minute time limit`}
-                className={`h-11 font-display text-xs uppercase ${setup.limit === min ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
-                onClick={() => onChange({ limit: min })}
+                className={`h-12 font-display text-xs uppercase ${setup.limit === min ? "steel-inset text-gold" : "border border-[#2a3330] text-ink"}`}
+                onClick={() => onChange(min === 0 && setup.mode === "survive" ? { limit: min, mode: "destroy" } : { limit: min })}
               >
                 {min === 0 ? "None" : `${min}m`}
               </button>
@@ -371,7 +375,7 @@ function OptionsScreen({
           </Section>
           <Section title="Win">
             <Wide on={setup.mode === "destroy"} testId="mode-destroy" label="Destroy the enemy base" onClick={() => onChange({ mode: "destroy" })}>Destroy</Wide>
-            <Wide on={setup.mode === "survive"} testId="mode-survive" label="Survive until the time limit" onClick={() => onChange({ mode: "survive" })}>Survive</Wide>
+            <Wide on={setup.mode === "survive"} testId="mode-survive" label="Survive until the time limit" onClick={() => { if (setup.limit > 0) onChange({ mode: "survive" }); }}>Survive</Wide>
           </Section>
           <Section title="Time">
             {LIMIT_CHOICES.map((min) => (
@@ -380,7 +384,7 @@ function OptionsScreen({
                 on={setup.limit === min}
                 testId={`limit-${min}`}
                 label={min === 0 ? "Unlimited time" : `${min} minute time limit`}
-                onClick={() => onChange({ limit: min })}
+                onClick={() => onChange(min === 0 && setup.mode === "survive" ? { limit: min, mode: "destroy" } : { limit: min })}
               >
                 {min === 0 ? "None" : `${min}m`}
               </Wide>
@@ -448,7 +452,7 @@ function Wide({
       data-testid={testId}
       aria-pressed={on}
       aria-label={label}
-      className={`h-11 font-display text-xs uppercase tracking-wide ${on ? "border border-crystal bg-[#16301f] text-crystal" : "bevel-btn"}`}
+      className={`h-12 font-display text-xs uppercase tracking-wide ${on ? "border border-crystal bg-[#16301f] text-crystal" : "bevel-btn"}`}
       onClick={onClick}
     >
       {children}

@@ -29,7 +29,15 @@ function link() {
   });
   const a = new NetPlay(sock("a"), { ping: false });
   const b = new NetPlay(sock("b"), { ping: false });
-  return { room, a, b, deliver };
+  return {
+    room,
+    a,
+    b,
+    deliver,
+    listen(id: string, fn: (msg: ServerMsg) => void) {
+      handlers.set(id, fn);
+    },
+  };
 }
 
 function bootPair() {
@@ -488,6 +496,32 @@ test("diverging state hashes resync from the host, then offer a rematch", () => 
   assert.equal(fatal.some((o) => o.msg.op === "desync"), true);
 });
 
+test("a friends build order places the same hall on both phones", () => {
+  const { a, b } = bootPair();
+  const mcvA = a.sim!.units.find((u) => u.team === 0 && u.kind === "mcv");
+  const mcvB = b.sim!.units.find((u) => u.team === 1 && u.kind === "mcv");
+  assert.ok(mcvA && mcvB);
+  a.command("deploy", { ids: [mcvA.id] });
+  b.command("deploy", { ids: [mcvB.id] });
+  for (let i = 0; i < 50; i++) {
+    assert.equal(a.step(), true, a.waiting);
+    assert.equal(b.step(), true, b.waiting);
+  }
+  const spot = a.sim!.nearestBuildPad(0, "power");
+  assert.ok(spot);
+  assert.equal(a.sim!.canPlace(0, "power", spot.tx, spot.ty).ok, true);
+  a.command("build", { kind: "power", tx: spot.tx, ty: spot.ty });
+  for (let i = 0; i < 16; i++) {
+    assert.equal(a.step(), true, a.waiting);
+    assert.equal(b.step(), true, b.waiting);
+  }
+  const placed = (sim: NonNullable<typeof a.sim>) =>
+    sim.buildings.some((u) => u.team === 0 && u.kind === "power" && u.tx === spot.tx && u.ty === spot.ty);
+  assert.equal(placed(a.sim!), true);
+  assert.equal(placed(b.sim!), true);
+  assert.equal(a.sim!.checksum(), b.sim!.checksum());
+});
+
 test("both phones deploy the MCV, move, and keep the same checksum", () => {
   const { a, b } = bootPair();
   assert.equal(a.sim!.seed, b.sim!.seed);
@@ -555,4 +589,82 @@ test("a lobby drop keeps the seat for 20 seconds, then frees it", () => {
   assert.equal(room.view("h").seats[1]?.fill, "open");
   assert.equal(bye.some((o) => o.to === "g2" && o.msg.op === "bye"), true);
   assert.equal(room.closed, false);
+});
+
+function hideFor(who: "host" | "guest") {
+  const { a, b } = bootPair();
+  for (let i = 0; i < 8; i++) {
+    assert.equal(a.step(), true, a.waiting);
+    assert.equal(b.step(), true, b.waiting);
+  }
+  const away = who === "host" ? a : b;
+  const live = who === "host" ? b : a;
+  const t0 = 5_000_000;
+  away.setHidden(true, t0);
+  for (let i = 0; i < 200; i++) assert.equal(live.step(), true, `${who} hide stalled the other: ${live.waiting}`);
+  away.setHidden(false, t0 + 20_000);
+  for (let i = 0; i < 30; i++) {
+    a.step();
+    b.step();
+  }
+  assert.equal(a.sim!.checksum(), b.sim!.checksum(), `${who} hide desynced`);
+  assert.ok(Math.abs(a.sim!.time - b.sim!.time) < 1, `${who} clocks ${a.sim!.time} vs ${b.sim!.time}`);
+  a.leave();
+  b.leave();
+}
+
+test("two clients match after the host is hidden for 20 seconds", () => {
+  hideFor("host");
+});
+
+test("two clients match after the guest is hidden for 20 seconds", () => {
+  hideFor("guest");
+});
+
+test("a host reconnect keeps a confirmed power plant and the clocks within a second", () => {
+  const net = bootPair();
+  const mcvA = net.a.sim!.units.find((u) => u.team === 0 && u.kind === "mcv");
+  const mcvB = net.b.sim!.units.find((u) => u.team === 1 && u.kind === "mcv");
+  assert.ok(mcvA && mcvB);
+  net.a.command("deploy", { ids: [mcvA.id] });
+  net.b.command("deploy", { ids: [mcvB.id] });
+  for (let i = 0; i < 50; i++) {
+    assert.equal(net.a.step(), true, net.a.waiting);
+    assert.equal(net.b.step(), true, net.b.waiting);
+  }
+  const spot = net.a.sim!.nearestBuildPad(0, "power");
+  assert.ok(spot);
+  net.a.command("build", { kind: "power", tx: spot.tx, ty: spot.ty });
+  for (let i = 0; i < 16; i++) {
+    assert.equal(net.a.step(), true, net.a.waiting);
+    assert.equal(net.b.step(), true, net.b.waiting);
+  }
+  assert.equal(net.a.sim!.buildings.some((b) => b.team === 0 && b.kind === "power"), true);
+  assert.equal(net.b.sim!.buildings.some((b) => b.team === 0 && b.kind === "power"), true);
+  const token = net.a.token;
+  const code = net.a.code;
+  net.room.drop("a", 2_000_000);
+  const host = new NetPlay(
+    {
+      send(data: string) {
+        net.deliver("a2", JSON.parse(data), 2_001_000);
+      },
+      close() {},
+      onMessage(fn) {
+        net.listen("a2", (msg) => fn(JSON.stringify(msg)));
+      },
+      onClose() {},
+    },
+    { ping: false },
+  );
+  host.join(code, "Ada", token);
+  for (let i = 0; i < 8; i++) {
+    net.b.step();
+    host.step();
+  }
+  assert.equal(host.sim?.buildings.some((b) => b.team === 0 && b.kind === "power"), true, "confirmed plant was lost");
+  assert.equal(net.b.sim!.buildings.some((b) => b.team === 0 && b.kind === "power"), true);
+  assert.ok(host.sim && Math.abs(host.sim.time - net.b.sim!.time) < 1, `clocks ${host.sim.time} vs ${net.b.sim!.time}`);
+  net.b.leave();
+  host.leave();
 });

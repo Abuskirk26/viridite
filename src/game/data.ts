@@ -254,12 +254,25 @@ export const WALL_RUN_MAX = 40;
 /** Weapon range multiplier for a unit standing on high ground. */
 export const HIGH_RANGE = 1.12;
 /**
- * Vision. Every sight rule reads from here so a lockstep change is one number.
- * HIGH is extra tiles when the viewer stands on a higher level than the target tile.
- * FOREST_IN is how far an outsider sees into TILE_SCRUB. FOREST_SPOT and FOREST_REVEAL
- * unhide a unit standing in the trees. MARK_* is the marksman still-aim.
+ * Sight rules. The sim reads only this block for height, forest, and marksman
+ * vision. Lockstep: no randomness, and tile scans stay in fixed order.
+ * Both names are the same numbers: the sight-rules tests and the playtest build.
  */
 export const SIGHT = {
+  /** Extra tiles when the viewer is on a higher height level than the target tile. */
+  highBonus: 1.6,
+  /** How far a unit outside a forest can see into it. */
+  forestEdge: 1,
+  /** A unit inside a forest is hidden beyond this range. */
+  forestSpot: 2,
+  /** Seconds a shot keeps a forest unit visible. */
+  forestReveal: 3,
+  /** Marksman sight while moving. */
+  marksmanMove: 8,
+  /** Marksman sight after standing still. */
+  marksmanStill: 9.5,
+  /** Seconds a marksman must stand before the longer sight. */
+  marksmanSettle: 2,
   HIGH: 1.6,
   FOREST_IN: 1,
   FOREST_SPOT: 2,

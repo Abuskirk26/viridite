@@ -673,7 +673,7 @@ export function toNewGame(setup: SkirmishSetup) {
     mapId: setup.mapId,
     faction: setup.player,
     enemy: setup.bots[0],
-    mode: setup.mode,
+    mode: setup.mode === "survive" && setup.limit <= 0 ? "destroy" : setup.mode,
     credits: setup.credits,
     ai: setup.ai,
     difficulty: normalizeDifficulty(setup.skills?.[0] ?? "normal"),
