@@ -19,6 +19,7 @@ import { Sim } from "./sim.ts";
 import {
   MCV_NOTE,
   YARD_NOTE,
+  cardLine,
   bookBuildingIds,
   bookHalls,
   bookUnitIds,
@@ -263,6 +264,38 @@ test("settings, pause settings, the ready screen, and friends all open this book
   assert.doesNotMatch(arsenal, /\/art\/hull\.png|\/art\/infantry\.png|hue-rotate/);
 });
 
+/** The freeze rule, in the same words, on the card and in both long notes. */
+const ON_FIELD = /An MCV on the field—not loaded in a transport—freezes the remaining countdown/;
+
+function assertRebuildCopyAgrees() {
+  const mcvCard = cardLine(bookUnits("concord").find((row) => row.id === "mcv")!);
+  const yardCard = cardLine(bookHalls("concord").find((row) => row.id === "yard")!);
+  assert.match(MCV_NOTE, ON_FIELD);
+  assert.match(YARD_NOTE, ON_FIELD);
+  assert.match(mcvCard, ON_FIELD);
+  assert.match(mcvCard, /deploying restores the Yard and clears it/);
+  assert.match(MCV_NOTE, /Deploying the MCV restores the yard and clears the clock/);
+  assert.match(YARD_NOTE, /Deploying it restores the yard and clears the clock/);
+  assert.match(MCV_NOTE, /does not clear the clock/);
+  assert.match(MCV_NOTE, /does not start it over/);
+  assert.match(YARD_NOTE, /does not clear the clock/);
+  assert.match(YARD_NOTE, /does not start it over/);
+  assert.match(YARD_NOTE, /including one gained during the countdown/);
+  assert.match(MCV_NOTE, /2 seconds/);
+  assert.match(YARD_NOTE, /60 second/);
+  assert.match(mcvCard, /60s clock/);
+  assert.match(yardCard, /60s rebuild clock/);
+  assert.doesNotMatch(mcvCard, /Owning an MCV only freezes/);
+  assert.doesNotMatch(YARD_NOTE, /undeployed MCV is alive/);
+  assert.doesNotMatch(`${MCV_NOTE} ${YARD_NOTE} ${mcvCard}`, /Owning an MCV only freezes|undeployed MCV is alive/);
+}
+
+test("yard and MCV copy name the transport exception with the freeze", () => {
+  assertRebuildCopyAgrees();
+  assert.equal(unitBlurb(resolveUnit("mcv", "concord")), MCV_NOTE);
+  assert.equal(structureBlurb("yard", resolveBuilding("yard", "concord")), YARD_NOTE);
+});
+
 function bootDry() {
   const sim = new Sim({
     mapId: "dry",
@@ -308,10 +341,7 @@ test("deploy restores the yard, and an MCV gained during the countdown only free
   assert.equal(sim.units.some((u) => u.team === 0 && u.kind === "mcv" && u.hp > 0), false);
   assert.equal(sim.rebuildClock(0), null);
   assert.match(YARD_NOTE, /standing yard starts a 60 second/);
-  assert.match(MCV_NOTE, /freezes the countdown/);
-  assert.match(MCV_NOTE, /does not clear the clock/);
-  assert.match(MCV_NOTE, /does not start it over/);
-  assert.match(MCV_NOTE, /loaded in a transport does not freeze/);
+  assertRebuildCopyAgrees();
   assert.doesNotMatch(`${YARD_NOTE} ${MCV_NOTE}`, /match ends if the yard is gone/i);
   assert.doesNotMatch(`${YARD_NOTE} ${MCV_NOTE}`, /no MCV is left/i);
 

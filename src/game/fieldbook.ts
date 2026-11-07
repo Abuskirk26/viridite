@@ -81,15 +81,16 @@ export const MCV_UNPACK_SECONDS = 2;
 
 /**
  * Yard gone and no MCV on the field: tickRebuild starts this countdown.
- * An undeployed MCV freezes the remaining time. Only a standing yard clears it.
+ * An MCV on the field, not loaded in a transport, freezes the remaining time.
+ * Deploying it restores the yard and clears the clock.
  */
 export const REBUILD_SECONDS = 60;
 
 export const MCV_NOTE =
-  "No weapon. Deploying it takes 2 seconds, removes the vehicle, and leaves a finished Construction Yard. While the rebuild clock is running, an MCV on the field freezes the countdown where it is. Gaining that MCV does not clear the clock and does not start it over. An MCV loaded in a transport does not freeze it. Deploying the MCV restores the yard and clears the clock.";
+  "No weapon. Deploying it takes 2 seconds, removes the vehicle, and leaves a finished Construction Yard. An MCV on the field—not loaded in a transport—freezes the remaining countdown where it is. Gaining that MCV does not clear the clock and does not start it over. Deploying the MCV restores the yard and clears the clock.";
 
 export const YARD_NOTE =
-  "Not bought from the build list. An MCV deploys into it. After this side has had a yard, losing every standing yard starts a 60 second rebuild clock when no MCV is on the field. The clock freezes while an undeployed MCV is alive, including one gained during the countdown. A yard standing again clears it. At 0, with no yard and no MCV, that side is eliminated. Other buildings and units do not stop the clock. Wiping the army is a separate loss.";
+  "Not bought from the build list. An MCV deploys into it. After this side has had a yard, losing every standing yard starts a 60 second rebuild clock when no MCV is on the field. An MCV on the field—not loaded in a transport—freezes the remaining countdown, including one gained during the countdown. Gaining that MCV does not clear the clock and does not start it over. Deploying it restores the yard and clears the clock. At 0, with no yard and no MCV, that side is eliminated. Other buildings and units do not stop the clock. Wiping the army is a separate loss.";
 
 export function bookUnitIds(): UnitId[] {
   const known = Object.keys(UNITS) as UnitId[];
@@ -264,7 +265,9 @@ export function structureBlurb(id: BuildingId, b: ResolvedBuilding): string {
 
 export function cardLine(row: BookUnit | BookHall): string {
   if ("u" in row) {
-    if (row.id === "mcv") return "Deploy clears the 60s clock. Owning an MCV only freezes it.";
+    if (row.id === "mcv") {
+      return "60s clock. An MCV on the field—not loaded in a transport—freezes the remaining countdown; deploying restores the Yard and clears it.";
+    }
     if (row.u.damage <= 0) return "No gun";
     return `${row.u.damage} base damage`;
   }
