@@ -54,10 +54,12 @@ export function SheetHead({
   tab,
   onTab,
   onBack,
+  onOpenBook,
 }: {
   tab: SheetTab;
   onTab: (tab: SheetTab) => void;
   onBack?: () => void;
+  onOpenBook?: () => void;
 }) {
   return (
     <header className="shrink-0 bg-field px-3 pt-3 pb-2">
@@ -87,6 +89,16 @@ export function SheetHead({
           </button>
         ))}
       </div>
+      {onOpenBook ? (
+        <button
+          type="button"
+          data-testid="settings-troop-book"
+          className="mx-auto mt-2 flex h-12 min-h-12 w-full max-w-lg items-center justify-center border border-brass-dim bg-field font-display text-sm uppercase tracking-wide text-ink"
+          onClick={onOpenBook}
+        >
+          Troop book
+        </button>
+      ) : null}
     </header>
   );
 }

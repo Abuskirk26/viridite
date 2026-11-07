@@ -96,6 +96,7 @@ import {
   swallowBuildClick,
 } from "@/game/buildlist";
 import { ensureIso, iso } from "@/game/iso";
+import { Arsenal } from "@/components/Arsenal";
 import { SheetBody, SheetHead, VersionPick } from "@/components/SettingsSheet";
 import { AudioBuses } from "@/components/AudioBuses";
 import { ReadyUp } from "@/components/ReadyUp";
@@ -440,6 +441,8 @@ export function GameScreen() {
   const [menuTab, setMenuTab] = useState<SheetTab>("game");
   const [ready, setReady] = useState(true);
   const [pauseSheet, setPauseSheet] = useState(false);
+  const [menuBook, setMenuBook] = useState(false);
+  const [pauseBook, setPauseBook] = useState(false);
   const [leaveAsk, setLeaveAsk] = useState<null | "restart" | "menu">(null);
   const [pauseTab, setPauseTab] = useState<SheetTab>("game");
   const [invite, setInvite] = useState("");
@@ -1773,6 +1776,8 @@ export function GameScreen() {
             setPhase("menu");
           }}
         />
+      ) : phase === "menu" && menuBook ? (
+        <Arsenal faction={setup.player} onBack={() => setMenuBook(false)} />
       ) : phase === "menu" && ready ? (
         <ReadyUp
           setup={setup}
@@ -1789,7 +1794,7 @@ export function GameScreen() {
         />
       ) : phase === "menu" ? (
         <div className="flex h-full min-h-0 flex-col bg-field">
-          <SheetHead tab={menuTab} onTab={setMenuTab} />
+          <SheetHead tab={menuTab} onTab={setMenuTab} onOpenBook={() => setMenuBook(true)} />
           <div className="min-h-0 flex-1 overflow-y-auto">
             {menuTab === "game" ? (
               <div className="mx-auto flex w-full max-w-lg flex-col gap-3 px-3 pb-6">
@@ -2158,9 +2163,14 @@ export function GameScreen() {
                   Eliminated. The room plays on.
                 </p>
               )}
-              {paused && phase === "play" && pauseSheet && (
+              {paused && phase === "play" && pauseBook && (
+                <div className="absolute inset-0 z-50 bg-field" data-testid="pause-troop-book">
+                  <Arsenal faction={setup.player} onBack={() => setPauseBook(false)} />
+                </div>
+              )}
+              {paused && phase === "play" && pauseSheet && !pauseBook && (
                 <div className="absolute inset-0 z-40 flex flex-col overflow-y-auto bg-field" data-testid="pause-sheet">
-                  <SheetHead tab={pauseTab} onTab={setPauseTab} onBack={() => setPauseSheet(false)} />
+                  <SheetHead tab={pauseTab} onTab={setPauseTab} onBack={() => setPauseSheet(false)} onOpenBook={() => setPauseBook(true)} />
                   <SheetBody tab={pauseTab} locked setup={setup} />
                   {pauseTab === "game" && (
                     <p className="mx-auto w-full max-w-lg px-3 pb-6 text-sm text-pretty text-muted">

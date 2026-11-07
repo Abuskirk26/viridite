@@ -517,7 +517,7 @@ export function NetLobby({
           <div className="min-w-0 flex-1">
             <p className="font-display text-xs uppercase tracking-widest text-crystal">Skirmish</p>
             <h1 className="font-display text-2xl leading-none text-ink">With friends</h1>
-            <button type="button" data-testid="open-arsenal" onClick={() => setBook(true)} className="bevel-btn mt-2 h-11 px-3 font-display text-xs uppercase">
+            <button type="button" data-testid="open-arsenal" onClick={() => setBook(true)} className="bevel-btn mt-2 h-12 min-h-12 px-3 font-display text-sm uppercase">
               Troop book
             </button>
           </div>
