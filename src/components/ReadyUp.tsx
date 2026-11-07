@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Dices, Swords } from "lucide-react";
+import { BookOpen, Dices, Swords } from "lucide-react";
+import { Arsenal } from "@/components/Arsenal";
 import { FACTION_COLOR, FACTION_NAME, MAP_H, MAP_W, teamStyle, theaterOf, type AiDifficulty, type FactionId, type MapId, type Theater } from "@/game/data";
 import { generateMap, MAP_LIST, plantCorners, waterKind } from "@/game/maps";
 import { paintDocThumb, paintTeamShape } from "@/game/render";
@@ -50,6 +51,7 @@ export function ReadyUp({
   const [maps, setMaps] = useState<MyMapRow[]>([]);
   const [more, setMore] = useState(false);
   const [rules, setRules] = useState(false);
+  const [book, setBook] = useState(false);
   useEffect(() => setMaps(listMyMaps()), []);
   const block = lobbyBlock(setup);
   const n = aiCount(setup);
@@ -110,6 +112,10 @@ export function ReadyUp({
     { key: "b2", label: coOp ? "Ally" : "Bot", faction: setup.bots[1] },
     { key: "b3", label: "Bot", faction: setup.bots[2] },
   ].slice(0, n + 1);
+
+  if (book) {
+    return <Arsenal faction={setup.player} onBack={() => setBook(false)} />;
+  }
 
   if (rules) {
     return (
@@ -309,6 +315,15 @@ export function ReadyUp({
       {block && <p className="px-3 text-center text-xs text-danger">{block}</p>}
 
       <footer className="steel relative z-30 flex h-12 shrink-0 items-center gap-2 overflow-x-auto border-t border-black px-2">
+        <button
+          type="button"
+          data-testid="ready-troop-book"
+          onClick={() => setBook(true)}
+          className="flex h-12 min-h-12 min-w-12 shrink-0 items-center gap-1 px-2 font-display text-xs uppercase text-ink"
+        >
+          <BookOpen className="size-4" />
+          Troops
+        </button>
         <button type="button" data-testid="randomize" onClick={onRandomize} className="flex h-11 min-w-11 items-center gap-1 px-2 font-display text-xs uppercase text-brass">
           <Dices className="size-4" />
           Random
