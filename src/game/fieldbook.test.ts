@@ -283,6 +283,11 @@ function assertRebuildCopyAgrees() {
   assert.match(YARD_NOTE, /including one gained during the countdown/);
   assert.match(MCV_NOTE, /2 seconds/);
   assert.match(YARD_NOTE, /60 second/);
+  const eliminated = "At 0, with no standing Yard and no MCV on the field outside a transport, that side is eliminated.";
+  assert.ok(MCV_NOTE.includes(eliminated));
+  assert.ok(YARD_NOTE.includes(eliminated));
+  assert.doesNotMatch(YARD_NOTE, /At 0, with no yard and no MCV, that side is eliminated/);
+  assert.doesNotMatch(MCV_NOTE, /At 0, with no yard and no MCV, that side is eliminated/);
   assert.match(mcvCard, /60s clock/);
   assert.match(yardCard, /60s rebuild clock/);
   assert.doesNotMatch(mcvCard, /Owning an MCV only freezes/);
@@ -294,6 +299,56 @@ test("yard and MCV copy name the transport exception with the freeze", () => {
   assertRebuildCopyAgrees();
   assert.equal(unitBlurb(resolveUnit("mcv", "concord")), MCV_NOTE);
   assert.equal(structureBlurb("yard", resolveBuilding("yard", "concord")), YARD_NOTE);
+});
+
+test("a countdown with only a transported MCV left eliminates that side at 0", () => {
+  const { sim } = bootDry();
+  const yard = sim.buildings.find((b) => b.team === 0 && b.kind === "yard" && b.hp > 0);
+  assert.ok(yard);
+  const boat = sim.spawnUnit(0, "transport", yard.tx + 8.5, yard.ty + 6.5);
+  const mcv = sim.spawnUnit(0, "mcv", yard.tx + 8.5, yard.ty + 8.5);
+  assert.ok(boat);
+  assert.ok(mcv);
+  mcv.aboard = boat.id;
+  boat.riders = [mcv.id];
+  for (const u of sim.units) {
+    if (u.team === 0 && u !== boat && u !== mcv) u.hp = 0;
+  }
+  yard.hp = 0;
+  sim.tick(0.1);
+  const started = sim.rebuildClock(0);
+  assert.equal(sim.eliminated[0], false);
+  assert.equal(sim.outcome, "playing");
+  assert.ok(started != null && started > 59 && started <= 60, `clock ${started}`);
+  const ours = sim.units.filter((u) => u.team === 0 && u.hp > 0);
+  assert.deepEqual(
+    ours.map((u) => u.kind).sort(),
+    ["mcv", "transport"],
+    `extra units ${ours.map((u) => u.kind).join(",")}`,
+  );
+
+  const mark = sim.time;
+  let sawResume = false;
+  let eliminatedAt = -1;
+  for (let i = 0; i < 700 && eliminatedAt < 0; i++) {
+    assert.equal(mcv.aboard, boat.id, "the MCV left the transport before the clock ended");
+    assert.ok(mcv.hp > 0 && boat.hp > 0);
+    const before = sim.rebuildClock(0);
+    sim.tick(0.1);
+    if (sim.eliminated[0]) {
+      eliminatedAt = sim.time;
+      break;
+    }
+    const after = sim.rebuildClock(0);
+    if (before != null && after != null && after < before - 0.05) sawResume = true;
+    if (sim.time - mark < 30) assert.equal(sim.outcome, "playing");
+  }
+  assert.equal(sawResume, true, "the transported MCV froze the clock");
+  assert.equal(sim.eliminated[0], true);
+  assert.ok(eliminatedAt - mark >= 58 && eliminatedAt - mark <= 61, `eliminated after ${eliminatedAt - mark}s`);
+  assert.equal(mcv.hp > 0 && mcv.aboard === boat.id, true);
+  assert.equal(sim.outcome, "lose");
+  assert.equal(sim.reason, "Rebuild or be defeated");
 });
 
 function bootDry() {

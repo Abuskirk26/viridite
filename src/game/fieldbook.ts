@@ -80,17 +80,17 @@ export type BookHall = {
 export const MCV_UNPACK_SECONDS = 2;
 
 /**
- * Yard gone and no MCV on the field: tickRebuild starts this countdown.
+ * Yard gone and no MCV on the field outside a transport: tickRebuild starts this countdown.
  * An MCV on the field, not loaded in a transport, freezes the remaining time.
- * Deploying it restores the yard and clears the clock.
+ * At 0 that side is eliminated. Deploying restores the yard and clears the clock.
  */
 export const REBUILD_SECONDS = 60;
 
 export const MCV_NOTE =
-  "No weapon. Deploying it takes 2 seconds, removes the vehicle, and leaves a finished Construction Yard. An MCV on the field—not loaded in a transport—freezes the remaining countdown where it is. Gaining that MCV does not clear the clock and does not start it over. Deploying the MCV restores the yard and clears the clock.";
+  "No weapon. Deploying it takes 2 seconds, removes the vehicle, and leaves a finished Construction Yard. An MCV on the field—not loaded in a transport—freezes the remaining countdown where it is. Gaining that MCV does not clear the clock and does not start it over. Deploying the MCV restores the yard and clears the clock. At 0, with no standing Yard and no MCV on the field outside a transport, that side is eliminated.";
 
 export const YARD_NOTE =
-  "Not bought from the build list. An MCV deploys into it. After this side has had a yard, losing every standing yard starts a 60 second rebuild clock when no MCV is on the field. An MCV on the field—not loaded in a transport—freezes the remaining countdown, including one gained during the countdown. Gaining that MCV does not clear the clock and does not start it over. Deploying it restores the yard and clears the clock. At 0, with no yard and no MCV, that side is eliminated. Other buildings and units do not stop the clock. Wiping the army is a separate loss.";
+  "Not bought from the build list. An MCV deploys into it. After this side has had a yard, losing every standing yard starts a 60 second rebuild clock when no MCV is on the field outside a transport. An MCV on the field—not loaded in a transport—freezes the remaining countdown, including one gained during the countdown. Gaining that MCV does not clear the clock and does not start it over. Deploying it restores the yard and clears the clock. At 0, with no standing Yard and no MCV on the field outside a transport, that side is eliminated. Other buildings and units do not stop the clock. Wiping the army is a separate loss.";
 
 export function bookUnitIds(): UnitId[] {
   const known = Object.keys(UNITS) as UnitId[];
